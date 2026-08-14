@@ -102,7 +102,6 @@ describe('fetchSleepyAccountData', () => {
       balances: {
         credits: typeof data.balanceUSD === 'number' ? Math.round(data.balanceUSD * 100) / 100 : undefined,
         currency: 'USD',
-        freeCreditsRemaining: typeof data.limits?.creditUSD === 'number' ? data.limits.creditUSD : undefined,
       },
       subscription: {
         plan: typeof data.tier === 'string' ? data.tier : undefined,
@@ -163,7 +162,9 @@ describe('fetchSleepyAccountData', () => {
             monthlyAllowanceUSD: 195,
             freeTokensToday: 40000000,
             freeTokenLimit: 500000000,
-            limits: { rpmLimit: 200, limit24h: 40, creditUSD: 5 }
+            // Regression: the live server returns limits.creditUSD with the same value as
+            // balanceUSD, so it must never surface as a second (duplicate) balance field.
+            limits: { rpmLimit: 200, limit24h: 40, creditUSD: 47.42 }
           })
         };
       }
@@ -179,6 +180,10 @@ describe('fetchSleepyAccountData', () => {
     assert.equal(data.limits.requestsPerDay, 40);
     assert.equal(data.balances.credits, 47.42);
     assert.equal(data.balances.currency, 'USD');
+    // Regression: server limits.creditUSD is the same quantity as balanceUSD; it must not
+    // be exposed as a second balance field (previously surfaced as "Extra Credits").
+    assert.equal(data.balances.freeCreditsRemaining, undefined);
+    assert.deepEqual(Object.keys(data.balances).sort(), ['credits', 'currency']);
     assert.equal(data.subscription.plan, 'pro');
     assert.equal(data.subscription.status, 'active');
     assert.equal(data.subscription.monthlySpend, 2.07);

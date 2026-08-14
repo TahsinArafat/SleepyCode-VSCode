@@ -23,7 +23,7 @@ export type WebMessage =
   | { type: 'setKey' }
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'requestSettings' }
-  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; initialSetup?: boolean }
+  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }
   | { type: 'removeApiKey'; providerId: string }
   | { type: 'sleepyLogin' }
@@ -35,6 +35,8 @@ export type WebMessage =
   | { type: 'resetSettings' }
   | { type: 'openFile'; path: string }
   | { type: 'chooseContext' }
+  | { type: 'compact'; conversationId?: string }
+  | { type: 'compactStatus'; conversationId: string; ok: boolean; summary?: string; inputTokens?: number; outputTokens?: number }
   | { type: 'requestFilePicker' }
   | { type: 'pasteImage'; dataUrl: string; mimeType: string; name: string; size: number }
   | { type: 'dropFiles'; paths: string[] }
@@ -138,6 +140,15 @@ export type Conversation = {
   pinned?: boolean;
   createdAt: number;
   updatedAt: number;
+  model?: string;
+  provider?: string;
+  agentId?: string;
+};
+
+export type SubagentModelMap = {
+  explorer?: string;
+  reviewer?: string;
+  worker?: string;
 };
 
 export type Project = {
@@ -210,6 +221,7 @@ export interface AppConfig {
   extraFreeModels: string[];
   onlyDefaultModels: boolean;
   agentId: string;
+  compactionModel: string;
 }
 
 export type { ProjectIntelligence };

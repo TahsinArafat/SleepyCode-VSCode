@@ -3,12 +3,12 @@ import * as path from 'node:path';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { ToolLoopAgent, isLoopFinished, isStepCount } from 'ai';
+import { ToolLoopAgent, generateText, isLoopFinished, isStepCount } from 'ai';
 import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
-import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, Project, ProviderModelGroup, TranscriptItem, WebMessage, WorkItem } from './types';
+import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
@@ -18,7 +18,7 @@ import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
 import { connectMcpServers, parseMcpServers, type McpConnection } from './mcp';
 import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
-import { chooseAutoModel, sortModelsA2Z } from './model-routing-core';
+import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
 import { TerminalManager } from './terminal';
 import { MEMORY_RELATIVE_PATH, openProjectMemory, readProjectMemory, writeProjectMemory } from './memory';
 import { ProjectIndexService } from './project-index';
@@ -185,7 +185,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.syncConversations();
     void this.migrateProvidersIfNeeded().then(() => this.loadApiKeys()).then(() => {
       if (this.view !== view) return;
-      this.post({ type: 'config', model: this.config().model, provider: this.config().activeProvider, approvalMode: this.config().approvalMode, agentId: this.config().agentId });
+      this.postConfig();
       void this.maybeShowFirstLaunchSettings();
     });
   }
@@ -341,8 +341,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       sleepy: sleepyAccount,
       onlyDefaultModels: this.config().onlyDefaultModels,
       confirmDelete: this.confirmDeleteConversations(),
+      compactionModel: config.compactionModel,
       initialSetup,
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
+      subagentModels: this.subagentModels(),
     });
     // Lazily fetch account data and push an update
     if (sleepyAccount.loggedIn) {
@@ -544,7 +546,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
     if (includeActive) {
       const active = this.activeConversation();
-      if (active) this.post({ type: 'conversation', id: active.id, items: active.items });
+      if (active) {
+        const selection = this.selectionFor(active);
+        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId });
+      }
     }
   }
 
@@ -567,7 +572,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (getSleepyAccount().loggedIn) {
         await this.ensureSleepyProvider();
       }
-      this.post({ type: 'config', model: this.config().model, provider: this.config().activeProvider, approvalMode: this.config().approvalMode, agentId: this.config().agentId });
+      this.postConfig();
       await this.refreshModels();
       await this.maybeShowFirstLaunchSettings();
       this.sendUsage();
@@ -601,6 +606,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'requestSettings') return void this.showSettings();
+    if (message.type === 'compact') return this.compactConversation(message.conversationId);
     if (message.type === 'newConversation') return this.newConversation();
     if (message.type === 'openConversation') {
       const project = this.activeProject();
@@ -989,6 +995,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.context.globalState.update('sleepycode.mcpServers', message.mcpServers?.trim() || '{}');
         await this.context.globalState.update('sleepycode.onlyDefaultModels', Boolean(message.onlyDefaultModels));
         await this.context.globalState.update('sleepycode.confirmDelete', message.confirmDelete !== false);
+        await this.context.globalState.update('sleepycode.compactionModel', (message.compactionModel ?? '').trim());
+        await this.context.globalState.update('sleepycode.subagentModels', {
+          explorer: (message.subagentModels?.explorer ?? '').trim(),
+          reviewer: (message.subagentModels?.reviewer ?? '').trim(),
+          worker: (message.subagentModels?.worker ?? '').trim(),
+        });
         await this.context.globalState.update('sleepycode.setupComplete', true);
 
         if (message.apiKey.trim()) {
@@ -1057,7 +1069,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       this.post({ type: 'sleepyStatus', loggedIn: false, busy: false, text: '' });
       this.post({ type: 'settingsResult', ok: true, text: 'Signed out of SleepyAI.' });
-      this.post({ type: 'config', model: this.config().model, provider: this.config().activeProvider, approvalMode: this.config().approvalMode, agentId: this.config().agentId });
+      this.postConfig();
       await this.refreshModels();
       return;
     }
@@ -1088,6 +1100,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await this.context.globalState.update('sleepycode.mcpServers', undefined);
       await this.context.globalState.update('sleepycode.onlyDefaultModels', undefined);
       await this.context.globalState.update('sleepycode.confirmDelete', undefined);
+      await this.context.globalState.update('sleepycode.compactionModel', undefined);
+      await this.context.globalState.update('sleepycode.subagentModels', undefined);
       for (const provider of previousProviders) {
         await this.context.secrets.delete(`sleepycode.apiKey.${provider.id}`);
       }
@@ -1103,14 +1117,31 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (message.provider && this.getProviders().some(provider => provider.id === message.provider)) {
         await this.context.globalState.update('sleepycode.activeProvider', message.provider);
       }
-      this.post({ type: 'config', model: message.model, provider: this.config().activeProvider, approvalMode: this.config().approvalMode, agentId: this.config().agentId });
+      const conversation = this.activeConversation();
+      if (conversation) {
+        conversation.model = message.model;
+        if (message.provider) conversation.provider = message.provider;
+        conversation.updatedAt = Date.now();
+        const project = this.activeProject();
+        if (project) project.updatedAt = Date.now();
+        await this.persistProjects();
+      }
+      this.postConfig();
       void this.refreshModels();
       return;
     }
     if (message.type === 'selectAgent') {
       await this.context.globalState.update('sleepycode.agentId', message.agentId);
       this.agentPromptCache.clear();
-      this.post({ type: 'config', model: this.config().model, provider: this.config().activeProvider, approvalMode: this.config().approvalMode, agentId: message.agentId });
+      const conversation = this.activeConversation();
+      if (conversation) {
+        conversation.agentId = message.agentId;
+        conversation.updatedAt = Date.now();
+        const project = this.activeProject();
+        if (project) project.updatedAt = Date.now();
+        await this.persistProjects();
+      }
+      this.postConfig();
       return;
     }
     if (message.type === 'reviewChanges') {
@@ -1513,18 +1544,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         postPlan();
       }
     }
-    const providerConfig = getProvider(this.getProviders(), this.config().activeProvider);
+    const selection = this.selectionFor(conversation);
+    const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
     try {
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
       if (gitTracked) runGitTree ??= await captureGitTree(root.fsPath, { context: this.context, lastPrune: this.lastCheckpointPrune });
-      let { model: configuredModel, maxSteps, apiKey, baseUrl } = this.config();
+      let { maxSteps } = this.config();
+      let configuredModel = selection.model;
       if (!configuredModel) {
         await this.refreshModels();
-        ({ model: configuredModel, maxSteps, apiKey, baseUrl } = this.config());
+        configuredModel = this.selectionFor(conversation).model;
         if (!configuredModel) throw new Error('No model is selected. Choose a model from the composer and retry.');
       }
       let model = configuredModel;
+      const { apiKey, baseUrl } = this.providerCredentials(providerConfig);
       if (configuredModel === SLEEPY_AUTO_MODEL_ID) {
         if (!this.resolveAutoModel(providerConfig.id)) await this.refreshModels();
         const route = this.resolveAutoModel(providerConfig.id);
@@ -1586,7 +1620,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         (title, detail) => this.approve('command', title, detail),
       );
       const instructions = [
-        await this.systemPrompt(root),
+        await this.systemPrompt(root, selection.agentId),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
         `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
         mcpConnection.instructions.length ? `Connected MCP server instructions:\n${mcpConnection.instructions.join('\n')}` : '',
@@ -1639,7 +1673,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const label = `Subagent (${role}): ${cleanTask.slice(0, 96)}${cleanTask.length > 96 ? '…' : ''}`;
         this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'start' });
         const subagentInstructions = [
-          await this.systemPrompt(root),
+          await this.systemPrompt(root, selection.agentId),
           `You are a ${role} subagent. ${roleInstruction}`,
           'You have an isolated context window. The parent conversation is not available unless context is explicitly included below.',
           'Do not delegate further. The delegate_task tool is intentionally unavailable.',
@@ -1647,8 +1681,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           role === 'worker' && mcpConnection?.instructions.length ? `Connected MCP instructions:\n${mcpConnection.instructions.join('\n')}` : '',
           skillBlock,
         ].filter(Boolean).join('\n\n');
+        const subagentModelId = this.subagentModels()[role] || model;
+        let subagentProvider = provider;
+        let subagentProviderId = providerConfig.id;
+        if (subagentModelId && subagentModelId !== model) {
+          const targetGroup = this.lastModelGroups.find(group => (group.models ?? []).some(m => (typeof m === 'string' ? m : m.id) === subagentModelId));
+          if (targetGroup && targetGroup.providerId !== providerConfig.id) {
+            const targetProviderConfig = getProvider(this.getProviders(), targetGroup.providerId);
+            if (targetProviderConfig) {
+              const creds = this.providerCredentials(targetProviderConfig);
+              let token: string | undefined;
+              if (targetProviderConfig.isSleepy) token = (await getSleepyToken()) ?? undefined;
+              subagentProvider = createOpenAICompatible({
+                name: targetProviderConfig.id,
+                baseURL: creds.baseUrl,
+                ...(creds.apiKey ? { apiKey: creds.apiKey } : {}),
+                headers: {
+                  ...targetProviderConfig.customHeaders,
+                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+              });
+              subagentProviderId = targetProviderConfig.id;
+            }
+          }
+        }
         const subagent = new ToolLoopAgent({
-          model: provider(model),
+          model: subagentProvider(subagentModelId),
           maxRetries: 3,
           instructions: subagentInstructions,
           tools: { ...subagentTools, ...(role === 'worker' ? (mcpConnection?.tools ?? {}) : {}) },
@@ -1673,7 +1731,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           }
           const usage = await streamResult.usage;
           if (usage?.inputTokens || usage?.outputTokens) {
-            recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 });
+            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 });
           }
           const text = subagentText.trim() || '(Subagent completed without a text response.)';
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
@@ -1882,6 +1940,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             continuationCount++;
             streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
           } while (continuationCount < 2 && !run.controller.signal.aborted);
+          if (providerConfig.id === 'sleepyai') {
+            const session = this.sessionMetricsForConversation(conversation);
+            session.inputTokens += runInput;
+            session.outputTokens += runOutput;
+            const effectiveModelInfo = this.getEffectiveModelInfo(providerConfig.id, configuredModel);
+            if (this.shouldAutoCompact(session, effectiveModelInfo)) {
+              void this.compactConversation(conversationId);
+            }
+          }
           this.sendUsage();
           const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
           if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
@@ -1983,6 +2050,123 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const item = conversation?.items.find(entry => entry.id === itemId && entry.role === 'assistant');
     if (!project || !conversation || !item) return undefined;
     return { project, conversation, item };
+  }
+
+  private async compactConversation(conversationId?: string): Promise<void> {
+    const project = this.activeProject();
+    if (!project) return;
+    const targetId = conversationId ?? project.activeConversationId;
+    const conversation = project.conversations.find(entry => entry.id === targetId);
+    if (!conversation || conversation.items.length < 4) {
+      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Nothing to compact yet.' });
+      return;
+    }
+    if (this.runs.has(targetId ?? '')) {
+      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Wait until the current run finishes.' });
+      return;
+    }
+    const lastAssistant = [...conversation.items].reverse().find(item => item.role === 'assistant');
+    const compacted = await this.summarizeConversation(conversation.items, this.selectionFor(conversation));
+    conversation.items = compacted;
+    if (lastAssistant) {
+      conversation.title = lastAssistant.text?.trim().slice(0, 80) ?? conversation.title;
+    }
+    project.updatedAt = Date.now();
+    conversation.updatedAt = Date.now();
+    await this.persistProjects();
+    this.syncConversations();
+    const inputTokens = conversation.items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
+    const outputTokens = conversation.items.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
+    this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: true, summary: `Compacted to ${conversation.items.length} messages.`, inputTokens, outputTokens });
+  }
+
+  private async summarizeConversation(items: TranscriptItem[], selection: { model: string; provider: string; agentId: string }): Promise<TranscriptItem[]> {
+    const text = items
+      .map(item => {
+        const role = item.role === 'user' ? 'User' : 'Assistant';
+        const content = item.text.trim().replace(/\s+/g, ' ').slice(0, 4000);
+        return `[${role}] ${content}`;
+      })
+      .join('\n\n');
+    const prompt = [
+      'Summarize the conversation below into a compact continuation context.',
+      'Preserve: active goal, unresolved blockers, open todos, key decisions, and latest state.',
+      'Omit completed subtasks, repeated confirmations, and tool trivia unless they affect the next steps.',
+      'Keep it under 1200 words and write it as a brief assistant message that can be injected into the next run.',
+      '',
+      text,
+    ].join('\n');
+    let summaryText = '';
+    const candidates = this.compactionModelCandidates(selection);
+    if (candidates.length) {
+      const providers = this.getProviders();
+      const providerConfig = getProvider(providers, selection.provider) ?? providers[0];
+      if (providerConfig) {
+        const { apiKey, baseUrl } = this.providerCredentials(providerConfig);
+        let sleepyToken: string | undefined;
+        if (providerConfig.isSleepy) sleepyToken = (await getSleepyToken()) ?? undefined;
+        const provider = createOpenAICompatible({
+          name: providerConfig.id,
+          baseURL: baseUrl || providerConfig.baseURL,
+          ...(apiKey ? { apiKey } : {}),
+          headers: {
+            ...providerConfig.customHeaders,
+            ...(sleepyToken ? { Authorization: `Bearer ${sleepyToken}` } : {}),
+          },
+        });
+        // Cheapest model first; on failure, fall through to the next cheapest.
+        for (const modelId of candidates) {
+          try {
+            const result = await generateText({ model: provider(modelId), prompt, maxOutputTokens: 1024 });
+            const text = result.text.trim();
+            if (text) { summaryText = text; break; }
+          } catch {
+            // Try the next cheapest available model.
+          }
+        }
+      }
+    }
+    if (!summaryText) summaryText = `Compacted context.\nOriginal message count: ${items.length}.`;
+    const summary = createTranscriptItem('assistant', summaryText.trim() || 'Compacted context.');
+    const inputTokens = items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
+    const outputTokens = items.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
+    if (inputTokens) summary.inputTokens = inputTokens;
+    if (outputTokens) summary.outputTokens = outputTokens;
+    const lastUser = [...items].reverse().find(item => item.role === 'user');
+    const lastAssistant = [...items].reverse().find(item => item.role === 'assistant');
+    return [
+      lastUser ?? createTranscriptItem('user', 'Continue the previous conversation.'),
+      summary,
+      createTranscriptItem('user', 'Continue from the compacted context above.'),
+      ...(lastAssistant && lastAssistant !== lastUser ? [lastAssistant] : []),
+    ];
+  }
+
+  /**
+   * Ordered model ids to use for compaction: cheapest available first, so a failed
+   * cheap model falls through to the second cheapest, and so on. When the user has
+   * pinned a specific compaction model in Settings, that model is tried first and the
+   * cheapest-first sequence remains as a fallback.
+   */
+  private compactionModelCandidates(selection: { model: string; provider: string; agentId: string }): string[] {
+    const configured = this.config().compactionModel.trim();
+    const providers = this.getProviders();
+    const providerConfig = getProvider(providers, selection.provider) ?? providers[0];
+    if (!providerConfig) return [];
+    const group = this.lastModelGroups.find(entry => entry.providerId === providerConfig.id);
+    const models = (group?.models ?? [])
+      .filter(model => (typeof model === 'string' ? model : model.id) !== SLEEPY_AUTO_MODEL_ID)
+      .map(model => typeof model === 'string' ? { id: model, name: model } : { id: model.id, name: model.name });
+    const ranked = rankModelsByPrice(models, this.lastSleepyModelPrices);
+    let ordered = ranked.map(model => model.id);
+    if (!ordered.length) {
+      const main = selection.model;
+      if (main && main !== SLEEPY_AUTO_MODEL_ID) ordered = [main];
+    }
+    if (configured && configured !== '__auto__' && ordered.includes(configured)) {
+      return [configured, ...ordered.filter(id => id !== configured)];
+    }
+    return ordered;
   }
 
   private taskGitRoot(project: Project): vscode.Uri | undefined {
@@ -2293,7 +2477,40 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       extraFreeModels: (config.get<string>('extraFreeModels', '') ?? '').split(',').map(item => item.trim()).filter(Boolean),
       onlyDefaultModels: this.context.globalState.get<boolean>('sleepycode.onlyDefaultModels', true),
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
+      compactionModel: this.context.globalState.get<string>('sleepycode.compactionModel', ''),
     };
+  }
+
+  private selectionFor(conversation: Conversation): { model: string; provider: string; agentId: string } {
+    const base = this.config();
+    return {
+      model: conversation.model ?? base.model,
+      provider: conversation.provider ?? base.activeProvider,
+      agentId: conversation.agentId ?? base.agentId,
+    };
+  }
+
+  private providerCredentials(provider: Provider): { apiKey: string; baseUrl: string } {
+    return {
+      apiKey: provider.isSleepy ? (getSleepyTokenSync() ?? '') : this.providerApiKey(provider),
+      baseUrl: provider.isSleepy ? sleepyApiBase() : (provider.baseURL ?? ''),
+    };
+  }
+
+  private subagentModels(): SubagentModelMap {
+    return this.context.globalState.get<SubagentModelMap>('sleepycode.subagentModels', {}) ?? {};
+  }
+
+  private activeSelection(): { model: string; provider: string; agentId: string } {
+    const active = this.activeConversation();
+    if (active) return this.selectionFor(active);
+    const base = this.config();
+    return { model: base.model, provider: base.activeProvider, agentId: base.agentId };
+  }
+
+  private postConfig(): void {
+    const selection = this.activeSelection();
+    this.post({ type: 'config', model: selection.model, provider: selection.provider, approvalMode: this.config().approvalMode, agentId: selection.agentId });
   }
 
   private providerConfigured(provider: Provider): boolean {
@@ -2367,7 +2584,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'modelsError', text: details || 'No models found for any configured provider.' });
       return;
     }
-    this.post({ type: 'models', groups, selected, defaultProvider: selectedProviderId, onlyDefaultModels: config.onlyDefaultModels });
+    const active = this.activeSelection();
+    const activeSelectionGroup = groups.find(group => group.providerId === active.provider);
+    const activeModelValid = Boolean(active.model) && Boolean(activeSelectionGroup?.models.some(model => modelMatches(model, active.model)));
+    this.post({
+      type: 'models',
+      groups,
+      selected: activeModelValid ? active.model : selected,
+      defaultProvider: activeModelValid ? active.provider : selectedProviderId,
+      onlyDefaultModels: config.onlyDefaultModels,
+    });
   }
 
   private resolveAutoModel(providerId: string): { id: string; reason: string } | undefined {
@@ -2455,6 +2681,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private sessionMetricsForConversation(conversation: Conversation): { inputTokens: number; outputTokens: number } {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const item of conversation.items) {
+      inputTokens += item.inputTokens ?? 0;
+      outputTokens += item.outputTokens ?? 0;
+    }
+    return { inputTokens, outputTokens };
+  }
+
+  private getEffectiveModelInfo(providerId: string, configuredModel: string): { contextWindow?: number; maxOutputLimit?: number } {
+    const providers = this.getProviders();
+    const providerConfig = getProvider(providers, providerId) ?? providers[0];
+    const modelId = configuredModel || providerConfig?.id || '';
+    const group = this.lastModelGroups.find(group => group.providerId === (providerConfig?.id ?? ''));
+    const modelEntry = group?.models.find(model => typeof model !== 'string' && model.id === modelId);
+    if (typeof modelEntry !== 'string' && modelEntry) {
+      return { contextWindow: modelEntry.contextWindow, maxOutputLimit: modelEntry.maxOutputLimit };
+    }
+    const models = providerConfig ? (this.lastModelGroups.find(group => group.providerId === providerConfig.id)?.models ?? []) : [];
+    const autoEntry = models.find((model): model is ProviderModelItem => typeof model !== 'string' && model.isAuto === true);
+    if (autoEntry) return { contextWindow: autoEntry.contextWindow, maxOutputLimit: autoEntry.maxOutputLimit };
+    const first = models.find(model => typeof model !== 'string');
+    if (first) return { contextWindow: first.contextWindow, maxOutputLimit: first.maxOutputLimit };
+    return {};
+  }
+
+  private shouldAutoCompact(session: { inputTokens: number; outputTokens: number }, modelInfo: { contextWindow?: number; maxOutputLimit?: number }): boolean {
+    const contextWindow = modelInfo.contextWindow ?? 128_000;
+    const totalTokens = session.inputTokens + session.outputTokens;
+    if (totalTokens <= 0 || contextWindow <= 0) return false;
+    const usageRatio = totalTokens / contextWindow;
+    if (usageRatio < 0.75) return false;
+    return true;
+  }
+
   private async projectContextBlock(_root: vscode.Uri, query: string): Promise<string> {
     const index = await this.ensureProjectIntelligence(false);
     if (!index) return '';
@@ -2517,7 +2779,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return sections.length ? `\n\nEditor context explicitly included by the user:\n\n${sections.join('\n\n')}` : '';
   }
 
-  private async systemPrompt(root: vscode.Uri): Promise<string> {
+  private async systemPrompt(root: vscode.Uri, agentId: string): Promise<string> {
     const ideContext = `You are SleepyCode, an autonomous coding agent embedded inside VS Code. Work carefully and persist until the task is fully complete.
 
 Environment:
@@ -2547,7 +2809,6 @@ Rules:
 - Do not claim success until verification finishes.
 - End with a concise result summary.`;
 
-    const agentId = this.config().agentId;
     const agentDef = AGENT_DEFINITIONS.find(a => a.id === agentId);
     if (!agentDef?.prompt) return ideContext;
     const cached = this.agentPromptCache.get(agentId) ?? agentDef.prompt;

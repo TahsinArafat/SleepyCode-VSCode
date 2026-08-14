@@ -1,9 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 150" role="img" aria-label="SleepyCode ASCII sleeping cat terminal mark">
-  <rect x="2" y="2" width="216" height="146" rx="10" fill="none" stroke="currentColor" stroke-width="4" opacity=".55"/>
-  <g fill="currentColor" font-family="monospace" font-size="19" xml:space="preserve">
-    <text x="20" y="34">$ sleepycode_</text>
-    <text x="48" y="68">/\_/\   zZ</text>
-    <text x="46" y="94">( -.- )</text>
-    <text x="57" y="120">&gt; ^ &lt;</text>
-  </g>
+<svg style="max-height: 500px" viewBox="0 0 360 120" xmlns="http://www.w3.org/2000/svg" width="360" height="120">
+  <text font-family="monospace" font-size="18" fill="#cdd3da" x="20" y="40">&gt; /\_/\    zZ</text>
+  <text font-family="monospace" font-size="18" fill="#cdd3da" x="20" y="64">  ( -.- )</text>
+  <text font-family="monospace" font-size="18" fill="#cdd3da" x="20" y="88">  &gt; ^ &lt;</text>
+  <text font-family="monospace" font-size="18" fill="#cdd3da" x="20" y="112">  $ sleepycode_ready</text>
 </svg>

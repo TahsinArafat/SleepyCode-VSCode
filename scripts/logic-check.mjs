@@ -100,7 +100,7 @@ check(/const SLASH_COMMANDS=\[/.test(webviewRuntime) && /command:'\/skill'/.test
 check(/installedSkills\.filter\(skill=>/.test(webviewRuntime) && /The user explicitly invoked the installed skill/.test(webviewRuntime), 'slash skill autocomplete is driven by installed skills and expands to an explicit skill invocation');
 check(/skillsmp_list_installed \/ skillsmp_read_installed/.test(agent) && /inspect the Installed skills inventory included in your instructions/.test(agent) && /Installed skills inventory \(metadata only/.test(read('src/skills.ts')), 'system prompt actively discovers and loads installed skills before use');
 check(/try \{\s*if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
-check(/await this\.refreshModels\(\);\s*\(\{ model: configuredModel, maxSteps, apiKey, baseUrl \} = this\.config\(\)\)/.test(agent), 'model refresh re-reads configuration before declaring that no model is selected');
+check(/await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/.test(agent), 'model refresh re-reads configuration before declaring that no model is selected');
 check(/if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/.test(agent), 'missing SleepyAI sessions persist through structured agent error handling');
 
 check(/plan-progress/.test(webviewStyles) && /plan-count/.test(webviewCode) && /Working:/.test(webviewCode), 'task plan UI shows measurable progress and the active step');

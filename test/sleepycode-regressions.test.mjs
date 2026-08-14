@@ -22,7 +22,7 @@ test('SleepyCode rebrand removes the legacy product identity from primary surfac
   ].join('\n');
   assert.equal(pkg.name, 'sleepycode-agent');
   assert.equal(pkg.displayName, 'SleepyCode');
-  assert.equal(new RegExp(['Sleepy','IDE'].join('') + '|' + ['sleepy','ide'].join('')).test(primary), false);
+  assert.equal(new RegExp(['Sleepy', 'IDE'].join('') + '|' + ['sleepy', 'ide'].join('')).test(primary), false);
 });
 
 test('subagent events have explicit lifecycle and child-parent routing', () => {
@@ -50,7 +50,7 @@ test('message history scrolls independently from a bounded composer', () => {
 
 test('run preflight failures still reach structured error handling and cleanup', () => {
   assert.match(agent, /try \{\s*if \(!providerConfig\) throw new Error/);
-  assert.match(agent, /await this\.refreshModels\(\);\s*\(\{ model: configuredModel, maxSteps, apiKey, baseUrl \} = this\.config\(\)\)/);
+  assert.match(agent, /await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/);
   assert.match(agent, /if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/);
   assert.match(agent, /finally\s*\{[\s\S]*this\.runs\.delete\(conversationId\)/);
 });

@@ -42,8 +42,8 @@ SleepyCode brings a Codex-style agent loop to the editor you already use. Open a
 - **Commercial account experience:** Browser/device sign-in, plan state, balance, spending limits, and server-authoritative SleepyAI usage are surfaced directly in the sidebar.
 - **Advanced compatibility when needed:** Power users can manually add an OpenAI-compatible endpoint without turning third-party services into built-in defaults.
 - **Focused agent workspace:** Start from Build, Debug, Review, or Understand tasks; choose a descriptive agent mode; and keep the composer compact.
-- **Project intelligence:** SleepyCode builds a bounded local index of project files, symbols, imports, frameworks, and important entry points so relevant context can be found without re-scanning the whole repository on every request.
-- **Explicit context control:** See and toggle project intelligence, the active file, and selected code; attach files/folders; and know what will be sent with the next request.
+- **Project intelligence:** SleepyCode builds a bounded local index of project files, symbols, imports, frameworks, and important entry points so relevant context can be found without re-scanning the whole repository on every request. The index is persisted per workspace and can be rebuilt from the home/context UI or with the `/reindex` command.
+- **Explicit context control:** See and toggle project intelligence, the active file, and selected code; attach files/folders; and know what will be sent with the next request. A compact session-stats row under the composer shows current context-window usage, input/output lifetime token totals, approximate cost, and live tokens/second during runs.
 - **Visible agent work:** Follow plans, reasoning, tool activity, retries, and streamed answers from the sidebar.
 - **Workspace-aware:** Each folder gets its own project and conversation history.
 - **Changes you can review:** Each completed response records its workspace file changes so you can diff or revert a file, stage the task, create a Git commit, jump to Source Control, or restore the task checkpoint.
@@ -106,7 +106,11 @@ The SleepyAI model menu includes **Auto**. Auto is only available on the first-p
 
 When a workspace opens, SleepyCode builds a local, bounded project index. It records file paths, language, exported symbols, import specifiers, common frameworks, important configuration/entry files, and test-like files. The index is persisted in VS Code extension storage for that workspace and refreshed after source changes. File contents are read locally to build metadata; the full index is not sent to the webview or to a third-party indexing service.
 
-For each request, SleepyCode performs lexical retrieval over that metadata and adds the most relevant paths/symbols as project context. The agent is still instructed to read a file before editing it; the index is navigation context, not a substitute for source inspection. Project intelligence can be disabled for an individual request from the Context panel or rebuilt manually from the home/context UI.
+For each request, SleepyCode performs lexical retrieval over that metadata and adds the most relevant paths/symbols as project context. The agent is still instructed to read a file before editing it; the index is navigation context, not a substitute for source inspection. Project intelligence can be disabled for an individual request from the Context panel or rebuilt manually from the home/context UI with `/reindex`.
+
+### Session context window
+
+The session stats row shows the tokens currently present in the model's context window for the next request, using the last completed turn's cached input-token count as a proxy between runs. During a live run it switches to live data. Lifetime input/output totals are shown separately as cumulative session metrics.
 
 ## Safety and approvals
 

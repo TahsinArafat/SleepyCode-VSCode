@@ -147,8 +147,6 @@ export interface SleepyLimits {
 export interface SleepyBalances {
   credits?: number;
   currency?: string;
-  freeCredits?: number;
-  freeCreditsRemaining?: number;
 }
 
 export interface SleepySubscription {
@@ -216,7 +214,6 @@ export async function fetchSleepyDashboardUsage(token: string): Promise<{ limits
     const balances: SleepyBalances = {
       credits: typeof data.balanceUSD === 'number' ? Math.round(data.balanceUSD * 100) / 100 : undefined,
       currency: 'USD',
-      freeCreditsRemaining: typeof data.limits?.creditUSD === 'number' ? data.limits.creditUSD : undefined,
     };
 
     const subscription: SleepySubscription = {

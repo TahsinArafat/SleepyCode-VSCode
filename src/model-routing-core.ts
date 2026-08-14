@@ -73,3 +73,45 @@ export function chooseAutoModel(
 
   return { id: ordered[0]!.id, reason: 'A–Z fallback' };
 }
+
+export type RankedModel = {
+  id: string;
+  name?: string;
+  combinedPrice?: number;
+};
+
+/**
+ * Orders candidates cheapest-first for compaction/fallback routing:
+ * 1. Models with complete input + output pricing, sorted by combined price ascending.
+ * 2. Models without complete pricing, sorted A-Z, appended after priced models.
+ * Free models (0 + 0) naturally sort first. Ties break A-Z.
+ */
+export function rankModelsByPrice(
+  candidates: readonly AutoModelCandidate[],
+  prices: readonly AutoModelPrice[],
+): RankedModel[] {
+  const ordered = sortModelsA2Z(candidates);
+  const priceById = new Map<string, AutoModelPrice>();
+  const priceByName = new Map<string, AutoModelPrice>();
+  for (const price of prices) {
+    if (price.modelId) priceById.set(price.modelId, price);
+    if (price.name) priceByName.set(price.name, price);
+  }
+
+  const ranked = ordered.map(model => {
+    const price = priceById.get(model.id) || priceByName.get(labelOf(model));
+    const input = finiteNonNegative(price?.inputPrice);
+    const output = finiteNonNegative(price?.outputPrice);
+    if (input === undefined || output === undefined) return { id: model.id, name: model.name, combinedPrice: undefined };
+    return { id: model.id, name: model.name, combinedPrice: input + output };
+  });
+
+  ranked.sort((a, b) => {
+    if (a.combinedPrice === undefined && b.combinedPrice === undefined) return compareModelsA2Z(a, b);
+    if (a.combinedPrice === undefined) return 1;
+    if (b.combinedPrice === undefined) return -1;
+    return a.combinedPrice - b.combinedPrice || compareModelsA2Z(a, b);
+  });
+
+  return ranked;
+}
