@@ -44,6 +44,7 @@ export type WebMessage =
   | { type: 'revealInOS' }
   | { type: 'revealSkill'; folder: string }
   | { type: 'retryMessage'; conversationId: string }
+  | { type: 'continueIteration'; conversationId: string; itemId: string }
   | { type: 'branchConversation'; conversationId: string; itemId: string }
   | { type: 'editUserMessage'; conversationId: string; itemId: string; text: string; context?: ComposerContext }
   | { type: 'undoLastTurn'; conversationId: string }
@@ -124,6 +125,9 @@ export type TranscriptItem = {
   errorInfo?: AgentErrorPresentation;
   commitHash?: string;
   commitMessage?: string;
+  paused?: boolean;
+  pauseReason?: 'max_steps';
+  pauseLimit?: number;
 };
 
 export type Conversation = {

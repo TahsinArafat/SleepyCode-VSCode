@@ -152,9 +152,33 @@ SleepyCode can extend itself with `SKILL.md` packages from [SkillsMP](https://sk
 - **Discover:** Search popular or recently updated skills from the shop button beside Settings.
 - **Preview:** Read a skill's instructions and inspect its GitHub source before installation.
 - **Install:** Add the selected skill to SleepyCode's global extension storage after approval.
-- **Use anywhere:** Installed skills are available across workspaces and added to the agent's instructions from the next request.
+- **Use anywhere:** Installed skills are available across workspaces from the next request. Open **Installed** and click **Use**, or ask SleepyCode to use the skill by name. The agent then reads that installed skill's local `SKILL.md` before applying it.
 
 You can also ask directly: *“Find me a skill for web scraping”* or *“Install the planning skill from `owner/repository`.”*
+
+### Composer slash commands
+
+Type `/` at the start of the composer to open SleepyCode’s command menu. Installed skills are suggested dynamically after `/skill `.
+
+| Slash command | Action |
+| --- | --- |
+| `/skill <name> <task>` | Load the installed skill’s local `SKILL.md`, then perform the task with that workflow |
+| `/plan <task>` | Inspect first and maintain a concrete implementation plan |
+| `/fix <issue>` | Trace and fix a bug, then run relevant regression checks |
+| `/review <scope>` | Review correctness, security, regressions, maintainability, and tests |
+| `/test <scope>` | Run the most relevant checks and diagnose failures |
+| `/explain <topic>` | Explain code/project behavior without modifying it unless asked |
+| `/new` | Start a new conversation |
+| `/settings` | Open SleepyCode settings |
+| `/usage` | Open Usage & Billing |
+| `/skills` | Open installed skills |
+| `/marketplace` | Open Skill Marketplace |
+| `/memory` | Open project memory |
+| `/reindex` | Rebuild repository intelligence |
+| `/context` | Open the composer context manager |
+| `/model` | Open the model selector |
+| `/agent` | Open the agent-mode selector |
+| `/permissions` | Open approval/autonomy controls |
 
 ## Settings
 
@@ -166,7 +190,7 @@ Open the gear button in the SleepyCode sidebar or run **SleepyCode: Open Setting
 | --- | --- |
 | Active provider | SleepyAI by default; optional compatibility endpoints are selected explicitly in the sidebar and stored in extension state |
 | `sleepycode.model` | Selected model for the active provider |
-| `sleepycode.maxSteps` | Maximum tool-loop steps; `0` allows unlimited steps |
+| `sleepycode.maxSteps` | Maximum tool-loop steps per iteration; defaults to `50`. `0` allows unlimited steps. If unfinished work reaches the limit, use **Continue iteration** to resume without replaying completed work. |
 | `sleepycode.approvalMode` | Ask, Auto edits, or Open access |
 | `sleepycode.searxngUrl` | Optional SearXNG instance used by the web-search tool |
 | `sleepycode.mcpServers` | JSON configuration for stdio, HTTP, or SSE MCP servers |

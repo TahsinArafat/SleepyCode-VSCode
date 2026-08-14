@@ -12,6 +12,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, 
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
+import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
@@ -534,7 +535,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           hasMessages: items.length > 0,
           messageCount: items.length,
           changeCount: lastAssistant?.changes?.length ?? 0,
-          status: this.runs.has(id) ? 'running' : lastAssistant?.kind === 'error' ? 'failed' : lastAssistant ? 'done' : 'empty',
+          status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? 'failed' : lastAssistant ? 'done' : 'empty',
           running: this.runs.has(id),
           queued: this.queue.find(entry => entry.conversationId === id)?.text ?? null,
         };
@@ -893,7 +894,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
         sources[installName] = reference.owner + '/' + reference.repo;
         await this.context.globalState.update('sleepycode.skillSources', sources);
-        this.post({ type: 'marketplaceResult', ok: true, text: '', key });
+        this.post({ type: 'marketplaceResult', ok: true, text: `Installed '${installName}'. Open Installed and click Use, or ask SleepyCode to use the '${installName}' skill by name.`, key });
         await this.sendMarketplaceInstalled();
       } catch (error) {
         this.post({ type: 'marketplaceResult', ok: false, text: errorMessage(error), key });
@@ -929,7 +930,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (searxngUrl && !/^https?:\/\//i.test(searxngUrl)) throw new Error('SearXNG URL must start with http:// or https://.');
         parseMcpServers(message.mcpServers ?? '{}');
         const rawMaxSteps = Number(message.maxSteps);
-        const maxSteps = rawMaxSteps === 0 ? 0 : Math.max(1, Math.min(50, Math.round(rawMaxSteps) || 20));
+        const maxSteps = rawMaxSteps === 0 ? 0 : Math.max(1, Math.min(50, Math.round(rawMaxSteps) || 50));
 
         // Validate and normalize providers before persisting webview input.
         const previousProviders = this.getProviders();
@@ -1075,7 +1076,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const previousProviders = this.getProviders();
       const config = vscode.workspace.getConfiguration('sleepycode');
       const defaults = cloneProviders();
-      await config.update('maxSteps', 20, vscode.ConfigurationTarget.Global);
+      await config.update('maxSteps', 50, vscode.ConfigurationTarget.Global);
       await config.update('extraFreeModels', '', vscode.ConfigurationTarget.Global);
       await config.update('model', '', vscode.ConfigurationTarget.Global);
       await this.context.globalState.update('sleepycode.providers', defaults);
@@ -1350,6 +1351,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await this.persistProjects();
       this.syncConversations();
       await this.run('Continue', conversation.id, resume, carryTree);
+      return;
+    }
+    if (message.type === 'continueIteration') {
+      const project = this.activeProject();
+      const conversation = project?.conversations.find(item => item.id === message.conversationId);
+      if (!project || !conversation || this.runs.has(message.conversationId)) return;
+      const last = conversation.items[conversation.items.length - 1];
+      if (!last?.paused || last.id !== message.itemId) return;
+      const carryTree = last.gitTree;
+      const resume = {
+        work: last.work,
+        changes: last.changes,
+        errorText: `The previous iteration paused after reaching its ${last.pauseLimit ?? this.config().maxSteps}-step limit. Continue only the unfinished work.`,
+      };
+      conversation.items.pop();
+      project.activeConversationId = conversation.id;
+      project.updatedAt = Date.now();
+      await this.persistProjects();
+      this.syncConversations();
+      await this.run('Continue', conversation.id, resume, carryTree);
+      return;
     }
   }
 
@@ -1565,7 +1587,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const instructions = [
         await this.systemPrompt(root),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
-        `- Skills from the SkillsMP marketplace can be installed on request. Use skillsmp_search to find one, skillsmp_get_skill to preview it, and skillsmp_install_skill (it asks the user for approval) to add it to your global skills folder. Installed skills are available to the agent from the next request on; read their SKILL.md before applying them.`,
+        `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
         mcpConnection.instructions.length ? `Connected MCP server instructions:\n${mcpConnection.instructions.join('\n')}` : '',
         mcpConnection.errors.length ? `Some configured MCP servers could not connect:\n- ${mcpConnection.errors.join('\n- ')}` : '',
         skillBlock,
@@ -1721,12 +1743,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       let answer = '';
       let finishReason = '';
       let stepCount = 0;
+      let lastIterationStepCount = 0;
       let continuationCount = 0;
       let liveInput = 0;
       let liveOutput = 0;
       let streamStartTime = Date.now();
       do {
         finishReason = '';
+        let iterationStepCount = 0;
         streamStartTime = Date.now();
       const imageAttachments = (composerContext?.attachments ?? []).filter((attachment): attachment is Extract<Attachment, { kind: 'image' }> => attachment.kind === 'image' && Boolean(attachment.tempPath));
       const prompt: string | ModelMessage[] = imageAttachments.length
@@ -1810,6 +1834,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             this.post({ type: 'reasoningEnd' });
           } else if (part.type === 'start-step') {
             workStartedAt ||= Date.now();
+            iterationStepCount++;
             const first = stepCount++ === 0;
             this.post({ type: 'workPhase', conversationId, first });
           } else if (part.type === 'finish-step') {
@@ -1827,6 +1852,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             finishReason = part.finishReason;
           }
         }
+        lastIterationStepCount = iterationStepCount;
         const usage = await result.usage;
         if (usage?.inputTokens || usage?.outputTokens) {
           const durationMs = Date.now() - streamStartTime;
@@ -1841,20 +1867,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
       } while (continuationCount < 2 && !run.controller.signal.aborted);
       this.sendUsage();
-      if (!answer.trim()) answer = '(No response)';
+      const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
+      if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
       if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+      if (paused) {
+        if (planState) { planState.interrupted = true; postPlan(); }
+      } else {
+        finalizePlan();
+      }
       const keptWork = work.slice(-80);
       const workSeconds = workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0;
       const assistantItem = createTranscriptItem('assistant', answer, undefined, runGitTree, keptWork, workSeconds, liveInput, liveOutput);
+      if (paused) {
+        assistantItem.paused = true;
+        assistantItem.pauseReason = 'max_steps';
+        assistantItem.pauseLimit = maxSteps;
+      }
       if (runChanges.size) assistantItem.changes = [...runChanges.values()];
       conversation.items.push(assistantItem);
       conversation.items = conversation.items.slice(-60);
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
-      finalizePlan();
       this.post({ type: 'done', conversationId, item: assistantItem });
-      systemNotify(this.context, { subtitle: 'Task complete', message: notificationSummary(answer) || conversation.title, kind: 'info' });
+      systemNotify(this.context, {
+        subtitle: paused ? 'Iteration paused' : 'Task complete',
+        message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(answer) || conversation.title),
+        kind: paused ? 'attention' : 'info',
+      });
     } catch (error) {
       if (run.controller.signal.aborted) {
         if (planState) { planState.interrupted = true; postPlan(); }
@@ -2205,7 +2245,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       activeProvider: provider?.id ?? '',
       apiKey: provider?.isSleepy ? (getSleepyTokenSync() ?? '') : provider ? this.providerApiKey(provider) : '',
       baseUrl: provider?.isSleepy ? sleepyApiBase() : (provider?.baseURL ?? ''),
-      maxSteps: config.get<number>('maxSteps', 20),
+      maxSteps: config.get<number>('maxSteps', 50),
       approvalMode: normalizeApprovalMode(this.context.globalState.get<string>('sleepycode.approvalMode', 'ask')),
       searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
       systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt', ''),
@@ -2452,10 +2492,12 @@ Tools available to you:
 - delegate_task — spawn an isolated specialized subagent for bounded research, review, or focused implementation
 - memory_read / memory_update — durable project memory across conversations
 - plan — show a floating task plan card in the chat UI (call it before multi-step work)
-- skillsmp_search / skillsmp_get_skill / skillsmp_install_skill — skill marketplace
+- skillsmp_search / skillsmp_get_skill / skillsmp_install_skill — discover, preview, and install marketplace skills
+- skillsmp_list_installed / skillsmp_read_installed — discover installed skills and load their local SKILL.md instructions before use
 
 Rules:
-- For non-trivial tasks, call plan first. Use delegate_task when independent repository research, a second-pass review, or a bounded worker can reduce context pressure or provide independent verification. Give each subagent a precise task and only the context it needs. The plan tool is stateful: every call merges with the current plan and returns the full state. Steps NEVER advance automatically — re-call with activeStep/doneSteps after finishing each step.
+- Before non-trivial work, inspect the Installed skills inventory included in your instructions. If the user explicitly invoked /skill, named an installed skill, or a skill's name/description clearly matches the request, call skillsmp_read_installed for that exact skill before planning, editing, or executing commands. If the user asks what skills are available, call skillsmp_list_installed. Never claim a skill was used unless you loaded its installed SKILL.md for this request. Skill instructions are subordinate to SleepyCode safety, approval, workspace-boundary, and secret-handling rules.
+- For non-trivial tasks, call plan first after loading any applicable skill instructions. Use delegate_task when independent repository research, a second-pass review, or a bounded worker can reduce context pressure or provide independent verification. Give each subagent a precise task and only the context it needs. The plan tool is stateful: every call merges with the current plan and returns the full state. Steps NEVER advance automatically — re-call with activeStep/doneSteps after finishing each step.
 - Inspect relevant files before editing.
 - Use workspace-relative paths only. Never touch .env files, secrets, or paths outside the workspace.
 - Make focused edits. Preserve unrelated user changes.

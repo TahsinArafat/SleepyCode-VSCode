@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -113,10 +113,10 @@
         },
         "sleepycode.maxSteps": {
           "type": "number",
-          "default": 20,
+          "default": 50,
           "minimum": 0,
           "maximum": 50,
-          "description": "Maximum tool-loop steps per request. Set to 0 for unlimited tasks."
+          "description": "Maximum tool-loop steps per iteration. Defaults to 50. Set to 0 for unlimited tasks. When the limit pauses unfinished work, SleepyCode offers Continue iteration."
         },
         "sleepycode.approvalMode": {
           "type": "string",

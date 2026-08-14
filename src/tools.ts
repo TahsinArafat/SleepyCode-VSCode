@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { runCommand } from './git';
-import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills } from './skills';
+import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readInstalledSkill, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills } from './skills';
 import { MAX_FILE_BYTES } from './types';
 import type { AppConfig } from './types';
 import { assertNotSecret, isDestructiveCommand, isSecret, pathInside, truncate } from './util';
@@ -318,6 +318,16 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       const installed = await listInstalledSkills(ctx.skillsDir);
       if (!installed.length) return `No skills installed yet. Use skillsmp_search to find one and skillsmp_install_skill to add it.`;
       return installed.map(skill => `- ${skill.name}: ${skill.description || '(no description)'} (${skill.folder})`).join('\n');
+    },
+  });
+  tools.skillsmp_read_installed = tool({
+    description: `Read an installed skill's local SKILL.md before applying it. Use this whenever the user names an installed skill or a request clearly matches one listed in the agent instructions.`,
+    inputSchema: z.object({
+      name: z.string().min(1).describe('Installed skill name or folder, exactly as listed by skillsmp_list_installed when possible.'),
+    }),
+    execute: async ({ name }) => {
+      const { skill, content } = await readInstalledSkill(ctx.skillsDir, name);
+      return `# Installed skill: ${skill.name}\n\n${truncate(content)}`;
     },
   });
   const endpoint = ctx.config().searxngUrl;
