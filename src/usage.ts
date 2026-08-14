@@ -80,7 +80,7 @@ export function aggregateUsage(records: UsageRecord[]): UsageAggregate {
       entry.avgTokensPerSecond = entry.requestCount > 0 ? Math.round(((entry.avgTokensPerSecond ?? 0) * (entry.requestCount - 1) + record.tokensPerSecond) / entry.requestCount) : record.tokensPerSecond;
       totalDurationMs += record.durationMs;
       totalRequests++;
-      totalTokensForSpeed += (record.inputTokens + record.outputTokens);
+      totalTokensForSpeed += record.outputTokens;
     }
   }
   const models = [...byModel.values()].sort((a, b) => {

@@ -70,6 +70,7 @@ check(/sessionAllowedCommands/.test(agent) && /commandKey/.test(agent) && /works
 check(/sessionAutoApproveEditRoots/.test(agent) && /Allow edits for session/.test(agent), 'non-destructive edits can be trusted for the current workspace session');
 check(/risk: destructive \? 'high' : 'medium'/.test(agent) && /notify-risk/.test(webviewStyles), 'approval prompts surface a risk level');
 check(/for \(let attempt = 0; ; attempt\+\+\)/.test(agent) && /waitForRetry\(backoffMs, run\.controller\.signal\)/.test(agent) && /throw part\.error/.test(agent), 'retry UI is backed by real abort-aware HTTP retries without discarding structured provider errors');
+check(/MAX_RUN_RETRIES/.test(agent) && /Math\.pow\(2, runAttempt - 1\)/.test(agent) && /attemptInfo\.retryable/.test(agent) && /attemptInfo\.code === 'action_denied'/.test(agent), 'failed or unexpectedly stopped requests auto-retry with exponential backoff and skip non-transient failures');
 check(/WEBVIEW_STYLES/.test(webviewCode) && /\.\/webview\/styles/.test(webviewCode), 'webview stylesheet is extracted from the monolithic renderer');
 
 
@@ -89,7 +90,7 @@ const sleepyCodePromptIcon = read('media/sleepycode-o.svg');
 check(/font-family="monospace"/.test(sleepyCodeMark) && sleepyCodeMark.includes('/\\_/\\') && /\$ sleepycode_/.test(sleepyCodeMark), 'repository branding uses simple SleepyCode ASCII terminal art');
 
 check(packageJson.name === 'sleepycode-agent' && packageJson.displayName === 'SleepyCode' && /^\d+\.\d+\.\d+$/.test(packageJson.version), 'package identity is fully rebranded and versioned as SleepyCode');
-check(!new RegExp(['Sleepy','IDE'].join('') + '|' + ['sleepy','ide'].join('')).test([providers, agent, webviewCode, webviewStyles, util, read('README.md'), read('plan.md'), read('src/extension.ts'), JSON.stringify(packageJson)].join('\n')), 'core source, docs, and manifest contain no retired product branding');
+check(!new RegExp(['Sleepy', 'IDE'].join('') + '|' + ['sleepy', 'ide'].join('')).test([providers, agent, webviewCode, webviewStyles, util, read('README.md'), read('plan.md'), read('src/extension.ts'), JSON.stringify(packageJson)].join('\n')), 'core source, docs, and manifest contain no retired product branding');
 check(/subagentSequence/.test(agent) && /type: 'subagent'/.test(agent) && /parentId: subagentId/.test(agent) && /Subagent \(\$\{role\}\) failed/.test(agent), 'subagents use explicit unique lifecycle/parent metadata and propagate failures');
 check(/case'subagent'/.test(webviewRuntime) && /const parentId=m\.parentId/.test(webviewRuntime) && !/startsWith\(['"]subagent-['"]\)/.test(webviewRuntime), 'webview groups subagent tools by explicit parent id instead of fragile id prefixes');
 check(/delete subagentTools\.delegate_task/.test(agent) && /isolated context window/.test(agent) && /Subagents cannot recursively delegate/.test(read('src/tools.ts')), 'subagent context is isolated and recursive delegation is disabled');

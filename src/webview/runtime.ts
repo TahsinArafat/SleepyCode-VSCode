@@ -1,13 +1,13 @@
 export function getWebviewRuntime(markUri: string, gitTracked: boolean): string {
-  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),queuedText=document.getElementById('queuedText'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null;
-  const agentDropdown=document.getElementById('agentDropdown'),agentButton=document.getElementById('agentButton'),agentMenu=document.getElementById('agentMenu'),agentDot=document.getElementById('agentDot'),safetyDropdown=document.getElementById('safetyDropdown'),safetyButton=document.getElementById('safetyButton'),safetyMenu=document.getElementById('safetyMenu'),contextPanel=document.getElementById('contextPanel'),contextItems=document.getElementById('contextItems'),contextPanelMeta=document.getElementById('contextPanelMeta'),contextSummaryButton=document.getElementById('contextSummaryButton'),contextSummaryText=document.getElementById('contextSummaryText');
+  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),queuedText=document.getElementById('queuedText'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[];
+  const agentDropdown=document.getElementById('agentDropdown'),agentButton=document.getElementById('agentButton'),agentMenu=document.getElementById('agentMenu'),agentIcon=document.getElementById('agentIcon'),safetyDropdown=document.getElementById('safetyDropdown'),safetyButton=document.getElementById('safetyButton'),safetyMenu=document.getElementById('safetyMenu'),contextPanel=document.getElementById('contextPanel'),contextItems=document.getElementById('contextItems'),contextPanelMeta=document.getElementById('contextPanelMeta'),contextSummaryButton=document.getElementById('contextSummaryButton'),contextSummaryText=document.getElementById('contextSummaryText');
   const AGENTS=[
-    {id:'default',name:'SleepyCode',mode:'Auto',color:'#6c7086',desc:'General coding agent that adapts to the task.'},
-    {id:'apex',name:'Apex',mode:'Build',color:'#f43f5e',desc:'Implements production-ready features and verifies the full path.'},
-    {id:'phantom',name:'Phantom',mode:'Debug',color:'#9333ea',desc:'Reproduces failures, traces root causes, and adds regression coverage.'},
-    {id:'pivot',name:'Pivot',mode:'Prototype',color:'#eab308',desc:'Builds the smallest useful implementation for fast validation.'},
-    {id:'forge',name:'Forge',mode:'Review',color:'#14b8a6',desc:'Reviews correctness, security, regressions, and maintainability.'},
-    {id:'stack',name:'Stack',mode:'Architect',color:'#3b82f6',desc:'Designs boundaries and migrations while still shipping code.'}
+    {id:'default',name:'SleepyCode',mode:'Auto',color:'var(--vscode-charts-purple,#9333ea)',icon:'<path d="M12 3l1.9 4.1L18 9l-4.1 1.9L12 15l-1.9-4.1L6 9l4.1-1.9z"/><path d="M19 14l.9 1.9 1.9.9-1.9.9L19 19.6l-.9-1.9-1.9-.9 1.9-.9z"/><path d="M5 14l.9 1.9 1.9.9-1.9.9L5 19.6l-.9-1.9-1.9-.9 1.9-.9z"/>',desc:'General coding agent that adapts to the task.'},
+    {id:'apex',name:'Apex',mode:'Build',color:'var(--vscode-charts-red,#f43f5e)',icon:'<path d="m15 12-8.5 8.5a2.12 2.12 0 0 1-3-3L12 9"/><path d="M17.64 15 22 10.64"/><path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/>',desc:'Implements production-ready features and verifies the full path.'},
+    {id:'phantom',name:'Phantom',mode:'Debug',color:'var(--vscode-charts-blue,#3b82f6)',icon:'<path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>',desc:'Reproduces failures, traces root causes, and adds regression coverage.'},
+    {id:'pivot',name:'Pivot',mode:'Prototype',color:'var(--vscode-charts-yellow,#eab308)',icon:'<path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/>',desc:'Builds the smallest useful implementation for fast validation.'},
+    {id:'forge',name:'Forge',mode:'Review',color:'var(--vscode-charts-green,#14b8a6)',icon:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/>',desc:'Reviews correctness, security, regressions, and maintainability.'},
+    {id:'stack',name:'Stack',mode:'Architect',color:'var(--vscode-charts-orange,#f97316)',icon:'<path d="m12 2 10 5-10 5L2 7l10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/>',desc:'Designs boundaries and migrations while still shipping code.'}
   ];
   const APPROVALS=[
     {id:'ask',name:'Ask every time',desc:'Confirm edits and commands, with optional workspace-session trust for repeated non-destructive actions.'},
@@ -16,8 +16,9 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   ];
   let selectedAgentId='default';
   function findAgent(id){return AGENTS.find(a=>a.id===id)||AGENTS[0]}
-  function syncAgentPill(){const a=findAgent(selectedAgentId);if(agentButton){agentButton.textContent=a.mode;agentButton.title=a.name+' — '+a.desc}if(agentDot){agentDot.style.setProperty('--agent-color',a.color);agentDot.style.background=a.color}}
-  function renderAgentMenu(){if(!agentMenu)return;agentMenu.innerHTML='';for(const a of AGENTS){const opt=document.createElement('button');opt.type='button';opt.className='dropdown-option agent-option'+(a.id===selectedAgentId?' selected':'');opt.innerHTML='<span class="agent-option-dot" style="background:'+a.color+'"></span><span class="agent-option-main"><span class="agent-option-name">'+esc(a.name)+' — '+esc(a.mode)+'</span><span class="agent-option-desc">'+esc(a.desc)+'</span></span>';opt.onclick=()=>selectAgent(a.id);agentMenu.appendChild(opt)}}
+  function agentIconSvg(a){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+a.icon+'</svg>'}
+  function syncAgentPill(){const a=findAgent(selectedAgentId);if(agentButton){agentButton.textContent=a.mode;agentButton.title=a.name+' — '+a.desc}if(agentIcon){agentIcon.style.color=a.color;agentIcon.innerHTML=agentIconSvg(a)}}
+  function renderAgentMenu(){if(!agentMenu)return;agentMenu.innerHTML='';for(const a of AGENTS){const opt=document.createElement('button');opt.type='button';opt.className='dropdown-option agent-option'+(a.id===selectedAgentId?' selected':'');opt.innerHTML='<span class="agent-option-icon" style="color:'+a.color+'">'+agentIconSvg(a)+'</span><span class="agent-option-main"><span class="agent-option-name">'+esc(a.name)+' — '+esc(a.mode)+'</span><span class="agent-option-desc">'+esc(a.desc)+'</span></span>';opt.onclick=()=>selectAgent(a.id);agentMenu.appendChild(opt)}}
   function closeAgentMenu(){agentMenu?.classList.remove('open')}
   function toggleAgentMenu(){agentMenu?.classList.toggle('open');if(agentMenu?.classList.contains('open'))renderAgentMenu()}
   function selectAgent(id){selectedAgentId=id;syncAgentPill();closeAgentMenu();vscode.postMessage({type:'selectAgent',agentId:id})}
@@ -110,30 +111,32 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     }
     return displayModel(id);
   }
-  function updateSessionStats(){
-    const statContext=document.getElementById('statContext');
-    const statTokens=document.getElementById('statTokens');
-    const statPerf=document.getElementById('statPerf');
-    const statSpeed=document.getElementById('statSpeed');
-    if(!statContext||!statTokens)return;
+  function providerOfModel(id){
+    for(const g of modelGroups){
+      for(const m of g.models||[]){
+        if(modelIdOf(m)===id)return g.providerId;
+      }
+    }
+    return '';
+  }
+  function sessionMoney(n){if(n===undefined||n===null||!Number.isFinite(Number(n)))return'—';const v=Number(n);if(v>=1)return'$'+Number(v.toFixed(2));if(v>=0.01)return'$'+Number(v.toFixed(3));if(v===0)return'$0.0000';return'$'+Number(v.toPrecision(2))}
+  function sessionMetrics(){
     let inTok=0, outTok=0;
-    const conv=conversations.find(c=>c.id===activeConversationId);
-    if(conv&&conv.items){
-      for(const item of conv.items){
-        if(item.inputTokens||item.outputTokens){
-          inTok+=item.inputTokens||0;
-          outTok+=item.outputTokens||0;
-        }
+    for(const item of activeConversationItems){
+      if(item.inputTokens||item.outputTokens){
+        inTok+=item.inputTokens||0;
+        outTok+=item.outputTokens||0;
       }
     }
     const live=liveRuns.get(activeConversationId);
     if(live){inTok+=live.input||0;outTok+=live.output||0}
+    let effectiveModel=selectedModel||'';
+    let providerId=providerOfModel(effectiveModel);
     let ctxLimit=0;
-    if(selectedModel){
+    if(effectiveModel){
       // Auto inherits the context window of the first-party model SleepyAI would route to.
-      let effectiveModel=selectedModel;
       for(const g of modelGroups){
-        const selected=(g.models||[]).find(m=>modelIdOf(m)===selectedModel);
+        const selected=(g.models||[]).find(m=>modelIdOf(m)===effectiveModel);
         if(g.providerId==='sleepyai'&&typeof selected==='object'&&selected&&selected.isAuto){
           const concrete=(g.models||[]).filter(m=>!(typeof m==='object'&&m&&m.isAuto));
           const routed=concrete.find(m=>typeof m==='object'&&m&&m.recommended)||concrete[0];
@@ -164,10 +167,63 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
         else ctxLimit=128000;
       }
     }
-    const ctxLabel=ctxLimit>0?fmt(ctxLimit):'128k';
-    statContext.textContent=fmt(inTok+outTok)+' / '+ctxLabel;
-    statTokens.textContent='⬆ '+fmt(inTok)+'  ⬇ '+fmt(outTok);
-    if(live&&live.speed){statPerf.style.display='inline-flex';if(statSpeed)statSpeed.textContent=live.speed+' tok/s'}else{statPerf.style.display='none'}
+    let cost=null;
+    if(providerId==='sleepyai'){
+      const p=sleepyModelPrices.find(x=>x.modelId===effectiveModel||x.name===effectiveModel);
+      if(p&&p.inputPrice!==undefined&&p.outputPrice!==undefined){
+        const inputCost=inTok*(p.inputPrice/1e6);
+        const outputCost=outTok*(p.outputPrice/1e6);
+        cost={input:inputCost,output:outputCost,total:inputCost+outputCost};
+      }
+    }
+    return {inTok,outTok,total:inTok+outTok,ctxLimit,effectiveModel,providerId,cost};
+  }
+  function updateSessionStats(){
+    const statContext=document.getElementById('statContext');
+    const statTokens=document.getElementById('statTokens');
+    const statPerf=document.getElementById('statPerf');
+    const statSpeed=document.getElementById('statSpeed');
+    const statCost=document.getElementById('statCost');
+    const statGroup=document.getElementById('statPillGroup');
+    if(!statContext||!statTokens)return;
+    const s=sessionMetrics();
+    const live=liveRuns.get(activeConversationId);
+    const showStats=s.total>0||Boolean(s.effectiveModel)||Boolean(live)||(statGroup&&statGroup.classList.contains('active'));
+    if(statGroup)statGroup.classList.toggle('show',showStats);
+    const ctxLabel=s.ctxLimit>0?fmt(s.ctxLimit):'128k';
+    statContext.textContent=fmt(s.total)+' / '+ctxLabel;
+    statTokens.textContent='⬆ '+fmt(s.inTok)+'  ⬇ '+fmt(s.outTok);
+    if(s.cost&&statCost){
+      statCost.textContent=sessionMoney(s.cost.total);
+      statCost.style.display='inline-flex';
+      statCost.title='Estimated session cost ('+sessionMoney(s.cost.input)+' in / '+sessionMoney(s.cost.output)+' out)';
+    }else if(statCost){statCost.style.display='none'}
+    if(live&&live.speed&&statPerf&&statSpeed){statPerf.style.display='inline-flex';statSpeed.textContent=live.speed+' tok/s'}else if(statPerf){statPerf.style.display='none'}
+    const sessionInfo=document.getElementById('sessionInfo');
+    if(sessionInfo&&sessionInfo.classList.contains('open'))renderSessionInfo();
+  }
+  function renderSessionInfo(){
+    const sessionInfo=document.getElementById('sessionInfo');
+    if(!sessionInfo)return;
+    const s=sessionMetrics();
+    const ctxLabel=s.ctxLimit>0?fmt(s.ctxLimit):'128k';
+    const pct=s.ctxLimit>0?Math.min(100,Math.round((s.total/s.ctxLimit)*100)):0;
+    const barColor=pct>=80?'danger':pct>=50?'warn':'safe';
+    const modelLabel=s.effectiveModel||'No model selected';
+    const costHtml=s.cost
+      ?'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(sessionMoney(s.cost.total))+'</div></div><div class="session-info-cell"><div class="k">In / out cost</div><div class="v">'+esc(sessionMoney(s.cost.input))+' / '+esc(sessionMoney(s.cost.output))+'</div></div>'
+      :'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(s.providerId==='sleepyai'?'Sign in for pricing':'Not available')+'</div></div>';
+    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Total tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>Context used</span><span class="v">'+esc(fmt(s.total))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
+    const close=sessionInfo.querySelector('#sessionInfoClose');
+    if(close)close.onclick=()=>toggleSessionInfo(false);
+  }
+  function toggleSessionInfo(force){
+    const sessionInfo=document.getElementById('sessionInfo');
+    const statPillGroup=document.getElementById('statPillGroup');
+    if(!sessionInfo)return;
+    const open=force===undefined?!sessionInfo.classList.contains('open'):force;
+    if(open){renderSessionInfo();sessionInfo.classList.add('open');sessionInfo.setAttribute('aria-hidden','false');statPillGroup?.classList.add('active')}
+    else{sessionInfo.classList.remove('open');sessionInfo.setAttribute('aria-hidden','true');statPillGroup?.classList.remove('active')}
   }
   const usageView=document.getElementById('usageView'),usageContent=document.getElementById('usageContent'),usageBilling=document.getElementById('usageBilling'),usageActivity=document.getElementById('usageActivity'),usageNav=document.getElementById('usageNav');  let usageData=null,liveRuns=new Map(),usageTimer=null,usagePeriod='today',sleepyModelPrices=[];
   const marketplaceView=document.getElementById('marketplaceView'),marketplaceNav=document.getElementById('marketplaceNav'),marketplaceSearchEl=document.getElementById('marketplaceSearch'),marketplaceDiscover=document.getElementById('marketplaceDiscover'),marketplaceInstalledPane=document.getElementById('marketplaceInstalledPane'),marketplaceResults=document.getElementById('marketplaceResults'),marketplaceInstalledEl=document.getElementById('marketplaceInstalled'),marketplaceStatus=document.getElementById('marketplaceStatus'),marketplaceQuery=document.getElementById('marketplaceQuery'),marketplaceRepo=document.getElementById('marketplaceRepo'),marketplaceSort=document.getElementById('marketplaceSort'),previewModal=document.getElementById('previewModal'),previewContent=document.getElementById('previewContent'),previewInstall=document.getElementById('previewInstall'),previewProgress=document.getElementById('previewProgress'),previewProgressFill=document.getElementById('previewProgressFill'),previewProgressLabel=document.getElementById('previewProgressLabel');let installedSkills=[],marketplaceCards=[],marketplaceActions=[],marketplaceBusy=false,previewState=null,marketplaceTab='discover',marketplaceTopLoaded=false,marketplaceHeading='Popular skills',marketplaceHint='Search above to discover more skills.',installSeq=0,marketplaceDebounce=0,marketplaceInstalling={};
@@ -510,7 +566,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function submit(){let text=input.value.trim();const wasRunning=isRunning();if(wasRunning&&!text&&!attachments.length){vscode.postMessage({type:'stop'});return}if(!text&&!attachments.length)return;if(text.startsWith('/')){const slash=expandSlashPrompt(text);if(slash.handled){input.value='';closeSlashMenu();resize();return}text=slash.text}if(!selectedModel){addError('Choose a model first.');return}const sentAttachments=[...attachments];const context={includeProjectIndex,includeActiveFile,includeSelection,activeFile:editorContext.activeFile,selectionLines:editorContext.selectionLines,attachments:sentAttachments};const optimisticText=text||'Please inspect the attached files.';const edit=editMessageState?{...editMessageState}:null;editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();closeContextPanel();closeSlashMenu();resize();if(!edit){if(wasRunning){queuedByConversation.set(activeConversationId,optimisticText);updateQueuedVisibility();vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context});updateSendMode();return}send.classList.add('loading');send.classList.add('stop');const sSvg=send.querySelector('.send-svg'),xSvg=send.querySelector('.stop-svg');if(sSvg)sSvg.style.display='none';if(xSvg)xSvg.style.display='block';runningSet.add(activeConversationId);updateJump();updateSendMode();try{const now=Date.now(),optimistic={id:'tmp-'+now,role:'user',text:optimisticText,timestamp:now,attachments:sentAttachments};beginTurn(optimistic);createActivity();const st=activity&&activity.querySelector('.activity-status');if(st)st.textContent='Sending…';scroll(true)}catch(e){}vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context})}else{vscode.postMessage({type:'editUserMessage',conversationId:edit.conversationId,itemId:edit.itemId,text:optimisticText,context})}}
   function resize(){input.style.height='auto';const viewportCap=Math.max(72,Math.min(180,Math.floor(window.innerHeight*.28)));input.style.height=Math.min(input.scrollHeight,viewportCap)+'px';updateSendMode();if(followOutput)pinScroll();updateJump()}
   send.onclick=()=>{if(isRunning()&&!input.value.trim()){vscode.postMessage({type:'stop'});return}submit()};input.oninput=resize;input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}};
-  messages.addEventListener('scroll',()=>{followOutput=nearBottom();updateJump()});jumpBottom.onclick=()=>{followOutput=true;scroll(true)};projectIndicator.onclick=()=>{if(projectIndicatorPath)vscode.postMessage({type:'revealInOS'})};
+  messages.addEventListener('scroll',()=>{followOutput=nearBottom();updateJump()});jumpBottom.onclick=()=>{followOutput=true;scroll(true)};projectIndicator.onclick=()=>{if(projectIndicatorPath)vscode.postMessage({type:'revealInOS'})};document.getElementById('statPillGroup')?.addEventListener('click',()=>toggleSessionInfo());document.getElementById('statPillGroup')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleSessionInfo()}});
     const composerEl=document.querySelector('.composer');if(typeof ResizeObserver!=='undefined'&&composerEl)new ResizeObserver(()=>{updateJump();if(followOutput)pinScroll()}).observe(composerEl);window.addEventListener('resize',()=>{resize();updateJump()});
   document.getElementById('steerQueued').onclick=()=>vscode.postMessage({type:'steerQueued',conversationId:activeConversationId});document.getElementById('editQueued').onclick=()=>{const prompt=queuedByConversation.get(activeConversationId);if(!prompt)return;queuedByConversation.delete(activeConversationId);updateQueuedVisibility();vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});input.value=prompt;resize();input.focus()};document.getElementById('removeQueued').onclick=()=>vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});
   document.getElementById('loginBannerBtn').onclick=()=>vscode.postMessage({type:'requestSettings'});
@@ -712,7 +768,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'project':{const nextPath=m.path||'';if(projectIndicatorPath!==nextPath)projectIndexState={status:'idle',text:'Preparing local project index…',indexed:0,total:0,index:null};projectIndicatorFolder=m.name||'No folder open';projectIndicatorPath=nextPath;projectIndicator.classList.toggle('clickable',Boolean(projectIndicatorPath));renderProjectIndicator();renderContext();refreshEmpty();break}
     case'projectIndex':projectIndexState={status:m.status||'idle',text:m.text||'',indexed:m.indexed||0,total:m.total||0,index:m.index||null};renderContext();refreshEmpty();break;
     case'conversations':conversations=m.conversations||[];activeConversationId=m.activeId;conversationTitle.textContent=conversations.find(x=>x.id===activeConversationId)?.title||'New conversation';runningSet=new Set(conversations.filter(x=>x.running).map(x=>x.id));queuedByConversation=new Map(conversations.map(x=>[x.id,x.queued||null]));renderConversationMenu();refreshEmpty();updateQueuedVisibility();modelButton.disabled=isRunning();syncSendButton();ensureOptimisticActivity();updateSendMode();updateJump();break;
-    case'conversation':if(editMessageState&&editMessageState.conversationId!==m.id){editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();resize()}activeConversationId=m.id;renderConversation(m.items);renderLive(m.id);updateQueuedVisibility();modelButton.disabled=isRunning();updateSendMode();updateJump();updateSessionStats();break;
+    case'conversation':if(editMessageState&&editMessageState.conversationId!==m.id){editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();resize()}activeConversationId=m.id;activeConversationItems=m.items||[];renderConversation(m.items);renderLive(m.id);updateQueuedVisibility();modelButton.disabled=isRunning();updateSendMode();updateJump();updateSessionStats();break;
     case'settings':openSettings(m);break;
     case'settingsResult':{if(m.ok&&(m.text==='Settings saved.'||String(m.text||'').startsWith('Signed in to SleepyAI'))){initialSetup=false;settingsView.classList.remove('onboarding');if(pendingProviderKeyId&&pendingProviderKey){vscode.postMessage({type:'saveProviderApiKey',providerId:pendingProviderKeyId,apiKey:pendingProviderKey});pendingProviderKeyId='';pendingProviderKey=''}}clearTimeout(settingsSavedTimer);if(m.ok){settingsResult.className='settings-result';void settingsResult.offsetWidth;settingsResult.textContent='Saved';settingsResult.className='settings-result ok';settingsSavedTimer=setTimeout(()=>{settingsResult.textContent='';settingsResult.className='settings-result'},1800)}else{settingsResult.textContent=m.text;settingsResult.className='settings-result bad'}break}
     case'apiKeyState':savedApiKeys[m.provider]=m.hasApiKey;renderProviderList();break;
@@ -723,8 +779,8 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'modelsError':addError(m.text);break;
     case'showUsage':openUsageView();break;case'showMarketplace':openMarketplaceView();break;case'marketplaceInstalled':installedSkills=m.skills||[];renderInstalledSkills();if(marketplaceView.classList.contains('visible'))renderMarketplaceResults();break;case'marketplaceResults':{marketplaceBusy=false;marketplaceCards=(m.skills||[]).map(x=>({key:x.githubUrl||x.name,name:x.name,author:x.author||'',description:x.description||'',meta:(x.stars?String(x.stars)+' ★':'')+(x.author?' · '+esc(x.author):''),installed:installedMatch(x.author,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:x.githubUrl?{source:x.githubUrl,path:''}:null,install:x.githubUrl?{source:x.githubUrl,skill:undefined}:null}));marketplaceHeading=m.query?'Search results':'Popular skills';marketplaceHint=m.query?'Try another search to explore more.':'Search above to discover more skills.';marketplaceStatusText(m.query?'Found '+(m.total||(m.skills||[]).length)+' skills for "'+m.query+'".':'',true);renderMarketplaceResults();break}case'marketplaceRepoSkills':{marketplaceBusy=false;const source=m.owner+'/'+m.repo;marketplaceCards=(m.skills||[]).map(x=>({key:source+'/'+x.path,name:x.name,author:source,description:'',meta:'from '+esc(source),installed:installedMatch(source,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:{source,path:x.path},install:{source,skill:x.name}}));marketplaceHeading='Skills in '+source;marketplaceHint='Preview a skill before installing it.';marketplaceStatusText((m.skills||[]).length+' skills found.',true);renderMarketplaceResults();break}case'marketplacePreview':{previewContent.innerHTML=markdown(m.markdown||'');previewInstall.style.display='';document.getElementById('previewTitle').textContent=m.title||'Skill preview';break}case'marketplaceInstallProgress':{const st=marketplaceInstalling[m.key];if(st){st.done=m.done||0;st.total=m.total||0;st.label='Installing… '+(m.done||0)+'/'+(m.total||0)+' files';updateCardProgress(m.key);updatePreviewProgress(m.key)}break}case'marketplaceResult':{if(m.key)delete marketplaceInstalling[m.key];marketplaceStatusText(m.text,!!m.ok);if(m.ok){if(previewState&&previewState.key===m.key){closeSkillPreview()}if(marketplaceView.classList.contains('visible'))vscode.postMessage({type:'requestMarketplaceInstalled'})}else{if(previewState&&previewState.key===m.key){previewProgress.classList.add('visible','error');previewProgressFill.style.width='100%';previewProgressLabel.textContent=m.text||'Install failed.'}renderMarketplaceResults()}break}case'marketplaceError':{marketplaceBusy=false;marketplaceStatusText(m.text||'Request failed.',false);renderMarketplaceResults();break}
     case'usage':usageData=m;if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break;
-    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
-    case'user':{liveByConversation.set(m.conversationId,freshLive());if(m.conversationId===activeConversationId){const tmpBubble=currentTurn?.querySelector('.user-text');if(currentTurn&&tmpBubble){const footer=currentTurn.querySelector('.message-footer');if(footer)footer.remove();currentTurn.appendChild(messageFooter(m.item,false))}else{beginTurn(m.item)}}break}
+    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,speed:m.speed||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
+    case'user':{liveByConversation.set(m.conversationId,freshLive());if(m.conversationId===activeConversationId)activeConversationItems.push(m.item);if(m.conversationId===activeConversationId){const tmpBubble=currentTurn?.querySelector('.user-text');if(currentTurn&&tmpBubble){const footer=currentTurn.querySelector('.message-footer');if(footer)footer.remove();currentTurn.appendChild(messageFooter(m.item,false))}else{beginTurn(m.item)}}break}
     case'resume':{const s=liveState(m.conversationId);s.phase='thinking';s.activity=null;s.currentRaw='';if(m.conversationId===activeConversationId){currentTurn=document.querySelector('.turn:last-child')||null;current=activity=activityBody=reasoning=null;followOutput=true;scroll(true)}break}
     case'workPhase':{const s=liveState(m.conversationId);s.phase='work';if(s.activity)s.activity.reasoningParts.push('');if(m.conversationId===activeConversationId)nextWorkPhase();break}
     case'delta':{const s=liveState(m.conversationId);s.currentRaw+=m.text;s.phase='text';closeLiveActivity(s);if(m.conversationId===activeConversationId&&currentTurn){if(!current)createTextSegment();current.dataset.raw+=m.text;current.innerHTML=markdown(current.dataset.raw);scroll()}break}
@@ -739,11 +795,11 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'command':break;
     case'error':{if(m.conversationId){const s=liveState(m.conversationId);s.errorText=m.text;s.errorRetry=false;s.phase='error';closeLiveActivity(s);if(m.conversationId===activeConversationId){addError(m.text);finish()}}else{addError(m.text);finish()}break}
     case'steered':if(m.conversationId===activeConversationId)finish();break;
-    case'generationError':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId)showGenerationError(m.item);break;
+    case'generationError':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();showGenerationError(m.item)}break;
     case'queuedPrompt':if(m.prompt)queuedByConversation.set(m.conversationId,m.prompt);else queuedByConversation.delete(m.conversationId);updateQueuedVisibility();break;
     case'state':if(m.running)runningSet.add(m.conversationId);else runningSet.delete(m.conversationId);modelButton.disabled=isRunning();updateSendMode();updateJump();break;
     case'notify':{const choice=await showNotifyModal({title:m.title,body:m.detail,ok:m.okLabel,cancel:m.cancelLabel,secondary:m.secondaryLabel,danger:Boolean(m.danger),risk:m.risk});vscode.postMessage({type:'notifyResponse',id:m.id,choice});break}
-    case'done':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId)finish(m.item);break;
+    case'done':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();finish(m.item)}break;
   }})
   vscode.postMessage({type:'ready'});vscode.postMessage({type:'requestMarketplaceInstalled'})
 `;

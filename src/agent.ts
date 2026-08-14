@@ -34,6 +34,7 @@ type PlanState = {
 };
 
 const MAX_CONCURRENT_RUNS = 3;
+const MAX_RUN_RETRIES = 5;
 
 export const AGENT_DEFINITIONS: { id: string; name: string; color: string; prompt?: string }[] = [
   { id: 'default', name: 'SleepyCode', color: '#6c7086' },
@@ -1413,8 +1414,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (resume) {
       this.post({ type: 'resume', conversationId });
     } else {
-       const userItem = createTranscriptItem('user', userText);
-       userItem.attachments = composerContext?.attachments;
+      const userItem = createTranscriptItem('user', userText);
+      userItem.attachments = composerContext?.attachments;
       conversation.items.push(userItem);
       if (conversation.items.length === 1) conversation.title = conversationTitle(userText);
       this.post({ type: 'user', conversationId, item: userItem });
@@ -1740,161 +1741,200 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ? `Previous conversation:\n${recent}\n\nCurrent request:\n${userText}${promptContext}`
           : `${userText}${promptContext}`;
       }
-      let answer = '';
-      let finishReason = '';
-      let stepCount = 0;
-      let lastIterationStepCount = 0;
-      let continuationCount = 0;
-      let liveInput = 0;
-      let liveOutput = 0;
-      let streamStartTime = Date.now();
-      do {
-        finishReason = '';
-        let iterationStepCount = 0;
-        streamStartTime = Date.now();
-      const imageAttachments = (composerContext?.attachments ?? []).filter((attachment): attachment is Extract<Attachment, { kind: 'image' }> => attachment.kind === 'image' && Boolean(attachment.tempPath));
-      const prompt: string | ModelMessage[] = imageAttachments.length
-        ? [{ role: 'user', content: [
-          { type: 'text', text: streamPrompt },
-          ...await Promise.all(imageAttachments.map(async attachment => ({ type: 'file' as const, mediaType: attachment.mimeType, data: await readFile(attachment.tempPath!) }))),
-        ] }]
-        : streamPrompt;
-      const result = await agent.stream({
-          prompt,
-          abortSignal: run.controller.signal,
-          onToolExecutionStart: ({ toolCall }) => {
-            if (toolCall.toolName === 'plan') {
-              const input = toolCall.input as { title?: string; steps?: string[]; activeStep?: number; doneSteps?: number[] };
-              const parsedSteps = Array.isArray(input?.steps)
-                ? input.steps.filter((step): step is string => typeof step === 'string' && step.trim().length > 0).map(step => step.trim())
-                : [];
-              const passedDone = new Set<number>();
-              for (const index of input?.doneSteps ?? []) {
-                if (Number.isInteger(index) && (index as number) >= 0) passedDone.add(index as number);
-              }
-              if (parsedSteps.length) {
-                const title = typeof input?.title === 'string' && input.title.trim() ? input.title.trim() : planState?.title ?? 'Plan';
-                const done = new Set<number>();
-                for (const index of passedDone) if (index < parsedSteps.length) done.add(index);
-                for (const index of planState?.done ?? []) if (index < parsedSteps.length) done.add(index);
-                let active = Number.isInteger(input?.activeStep) ? (input.activeStep as number) : (planState && planState.active >= 0 ? planState.active : 0);
-                if (active >= parsedSteps.length) active = parsedSteps.length - 1;
-                planState = { title, steps: parsedSteps, active: Math.max(0, active), done, manual: true, interrupted: false };
-              } else if (planState) {
-                for (const index of passedDone) {
-                  if (index < planState.steps.length) planState.done.add(index);
+      const maxRunRetries = MAX_RUN_RETRIES;
+      let runAttempt = 0;
+      const baseStreamPrompt = streamPrompt;
+      const baseWork = work.slice();
+      while (true) {
+        let answer = '';
+        let finishReason = '';
+        let stepCount = 0;
+        let lastIterationStepCount = 0;
+        let continuationCount = 0;
+        let liveInput = 0;
+        let liveOutput = 0;
+        let runInput = 0;
+        let runOutput = 0;
+        let liveStartTime = Date.now();
+        let streamStartTime = Date.now();
+        try {
+          do {
+            finishReason = '';
+            let iterationStepCount = 0;
+            streamStartTime = Date.now();
+            const imageAttachments = (composerContext?.attachments ?? []).filter((attachment): attachment is Extract<Attachment, { kind: 'image' }> => attachment.kind === 'image' && Boolean(attachment.tempPath));
+            const prompt: string | ModelMessage[] = imageAttachments.length
+              ? [{
+                role: 'user', content: [
+                  { type: 'text', text: streamPrompt },
+                  ...await Promise.all(imageAttachments.map(async attachment => ({ type: 'file' as const, mediaType: attachment.mimeType, data: await readFile(attachment.tempPath!) }))),
+                ]
+              }]
+              : streamPrompt;
+            const result = await agent.stream({
+              prompt,
+              abortSignal: run.controller.signal,
+              onToolExecutionStart: ({ toolCall }) => {
+                if (toolCall.toolName === 'plan') {
+                  const input = toolCall.input as { title?: string; steps?: string[]; activeStep?: number; doneSteps?: number[] };
+                  const parsedSteps = Array.isArray(input?.steps)
+                    ? input.steps.filter((step): step is string => typeof step === 'string' && step.trim().length > 0).map(step => step.trim())
+                    : [];
+                  const passedDone = new Set<number>();
+                  for (const index of input?.doneSteps ?? []) {
+                    if (Number.isInteger(index) && (index as number) >= 0) passedDone.add(index as number);
+                  }
+                  if (parsedSteps.length) {
+                    const title = typeof input?.title === 'string' && input.title.trim() ? input.title.trim() : planState?.title ?? 'Plan';
+                    const done = new Set<number>();
+                    for (const index of passedDone) if (index < parsedSteps.length) done.add(index);
+                    for (const index of planState?.done ?? []) if (index < parsedSteps.length) done.add(index);
+                    let active = Number.isInteger(input?.activeStep) ? (input.activeStep as number) : (planState && planState.active >= 0 ? planState.active : 0);
+                    if (active >= parsedSteps.length) active = parsedSteps.length - 1;
+                    planState = { title, steps: parsedSteps, active: Math.max(0, active), done, manual: true, interrupted: false };
+                  } else if (planState) {
+                    for (const index of passedDone) {
+                      if (index < planState.steps.length) planState.done.add(index);
+                    }
+                    if (typeof input?.title === 'string' && input.title.trim()) planState.title = input.title.trim();
+                    if (Number.isInteger(input?.activeStep) && (input.activeStep as number) >= 0) {
+                      planState.active = Math.min(planState.steps.length - 1, input.activeStep as number);
+                    }
+                    planState.manual = true;
+                    planState.interrupted = false;
+                  }
+                  if (planState) {
+                    planItem = { kind: 'plan', text: planState.title, title: planState.title, steps: planState.steps, doneSteps: [], activeStep: planState.active, interrupted: false };
+                    let lastPlanIndex = -1;
+                    for (let index = work.length - 1; index >= 0; index--) {
+                      if (work[index]?.kind === 'plan') { lastPlanIndex = index; break; }
+                    }
+                    if (lastPlanIndex >= 0) work[lastPlanIndex] = planItem; else work.push(planItem);
+                    postPlan();
+                  }
+                  return;
                 }
-                if (typeof input?.title === 'string' && input.title.trim()) planState.title = input.title.trim();
-                if (Number.isInteger(input?.activeStep) && (input.activeStep as number) >= 0) {
-                  planState.active = Math.min(planState.steps.length - 1, input.activeStep as number);
-                }
-                planState.manual = true;
-                planState.interrupted = false;
-              }
-              if (planState) {
-                planItem = { kind: 'plan', text: planState.title, title: planState.title, steps: planState.steps, doneSteps: [], activeStep: planState.active, interrupted: false };
-                let lastPlanIndex = -1;
-                for (let index = work.length - 1; index >= 0; index--) {
-                  if (work[index]?.kind === 'plan') { lastPlanIndex = index; break; }
-                }
-                if (lastPlanIndex >= 0) work[lastPlanIndex] = planItem; else work.push(planItem);
-                postPlan();
-              }
-              return;
-            }
-            const taskEntry: WorkItem = { kind: 'task', text: toolTask(toolCall.toolName, toolCall.input), done: false };
-            activeTasks.set(toolCall.toolCallId, taskEntry);
-            work.push(taskEntry);
-            workStartedAt ||= Date.now();
-            this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, name: taskEntry.text });
-            this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
-          },
-          onToolExecutionEnd: ({ toolCall }) => {
-            if (toolCall.toolName === 'plan') return;
-            const taskEntry = activeTasks.get(toolCall.toolCallId);
-            if (taskEntry) taskEntry.done = true;
-            this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, name: toolTask(toolCall.toolName, toolCall.input) });
-          },
-        });
+                const taskEntry: WorkItem = { kind: 'task', text: toolTask(toolCall.toolName, toolCall.input), done: false };
+                activeTasks.set(toolCall.toolCallId, taskEntry);
+                work.push(taskEntry);
+                workStartedAt ||= Date.now();
+                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, name: taskEntry.text });
+                this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
+              },
+              onToolExecutionEnd: ({ toolCall }) => {
+                if (toolCall.toolName === 'plan') return;
+                const taskEntry = activeTasks.get(toolCall.toolCallId);
+                if (taskEntry) taskEntry.done = true;
+                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, name: toolTask(toolCall.toolName, toolCall.input) });
+              },
+            });
 
-        for await (const part of result.stream) {
-          if (part.type === 'text-delta') {
-            answer += part.text;
-            this.post({ type: 'delta', conversationId, text: part.text });
-          } else if (part.type === 'reasoning-delta') {
-            workStartedAt ||= Date.now();
-            const remaining = MAX_PERSISTED_REASONING - reasoningBuffer.length;
-            if (remaining > 0) reasoningBuffer += part.text.slice(0, remaining);
-            if (reasoningBuffer.length >= MAX_PERSISTED_REASONING) reasoningTruncated = true;
-            this.post({ type: 'reasoningDelta', conversationId, text: part.text });
-          } else if (part.type === 'reasoning-end') {
-            if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
-            reasoningBuffer = '';
-            reasoningTruncated = false;
-            this.post({ type: 'reasoningEnd' });
-          } else if (part.type === 'start-step') {
-            workStartedAt ||= Date.now();
-            iterationStepCount++;
-            const first = stepCount++ === 0;
-            this.post({ type: 'workPhase', conversationId, first });
-          } else if (part.type === 'finish-step') {
-            const usage = part.usage;
-            const input = usage?.inputTokens ?? 0;
-            const output = usage?.outputTokens ?? 0;
-            if (input || output) {
-              liveInput += input;
-              liveOutput += output;
-              this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput });
+            for await (const part of result.stream) {
+              if (part.type === 'text-delta') {
+                answer += part.text;
+                this.post({ type: 'delta', conversationId, text: part.text });
+              } else if (part.type === 'reasoning-delta') {
+                workStartedAt ||= Date.now();
+                const remaining = MAX_PERSISTED_REASONING - reasoningBuffer.length;
+                if (remaining > 0) reasoningBuffer += part.text.slice(0, remaining);
+                if (reasoningBuffer.length >= MAX_PERSISTED_REASONING) reasoningTruncated = true;
+                this.post({ type: 'reasoningDelta', conversationId, text: part.text });
+              } else if (part.type === 'reasoning-end') {
+                if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+                reasoningBuffer = '';
+                reasoningTruncated = false;
+                this.post({ type: 'reasoningEnd' });
+              } else if (part.type === 'start-step') {
+                workStartedAt ||= Date.now();
+                iterationStepCount++;
+                const first = stepCount++ === 0;
+                this.post({ type: 'workPhase', conversationId, first });
+              } else if (part.type === 'finish-step') {
+                const usage = part.usage;
+                const input = usage?.inputTokens ?? 0;
+                const output = usage?.outputTokens ?? 0;
+                if (input || output) {
+                  liveInput += input;
+                  liveOutput += output;
+                  const liveSpeed = Math.round((liveOutput / Math.max(1, Date.now() - liveStartTime)) * 1000);
+                  this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput, speed: liveSpeed });
+                }
+              } else if (part.type === 'error') {
+                throw part.error;
+              } else if (part.type === 'finish') {
+                finishReason = part.finishReason;
+              }
             }
-          } else if (part.type === 'error') {
-            throw part.error;
-          } else if (part.type === 'finish') {
-            finishReason = part.finishReason;
+            lastIterationStepCount = iterationStepCount;
+            const usage = await result.usage;
+            if (usage?.inputTokens || usage?.outputTokens) {
+              const uin = usage.inputTokens ?? 0;
+              const uout = usage.outputTokens ?? 0;
+              runInput += uin;
+              runOutput += uout;
+              const durationMs = Date.now() - streamStartTime;
+              const tokensPerSecond = durationMs > 0 ? Math.round((uout / durationMs) * 1000) : 0;
+              recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, durationMs, tokensPerSecond });
+            }
+            if (finishReason === 'error') throw new Error('The model stopped because the provider reported a generation error.');
+            if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');
+            if (!shouldAutoContinue(answer, finishReason, continuationCount)) break;
+            continuationCount++;
+            streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
+          } while (continuationCount < 2 && !run.controller.signal.aborted);
+          this.sendUsage();
+          const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
+          if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
+          if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+          if (paused) {
+            if (planState) { planState.interrupted = true; postPlan(); }
+          } else {
+            finalizePlan();
           }
+          const keptWork = work.slice(-80);
+          const workSeconds = workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0;
+          const assistantItem = createTranscriptItem('assistant', answer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput);
+          if (paused) {
+            assistantItem.paused = true;
+            assistantItem.pauseReason = 'max_steps';
+            assistantItem.pauseLimit = maxSteps;
+          }
+          if (runChanges.size) assistantItem.changes = [...runChanges.values()];
+          conversation.items.push(assistantItem);
+          conversation.items = conversation.items.slice(-60);
+          conversation.updatedAt = Date.now();
+          project.updatedAt = Date.now();
+          await this.persistProjects();
+          if (runAttempt) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runAttempt, max: maxRunRetries });
+          this.post({ type: 'done', conversationId, item: assistantItem });
+          systemNotify(this.context, {
+            subtitle: paused ? 'Iteration paused' : 'Task complete',
+            message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(answer) || conversation.title),
+            kind: paused ? 'attention' : 'info',
+          });
+          break;
+        } catch (attemptError) {
+          if (run.controller.signal.aborted) throw attemptError;
+          const attemptInfo = classifyAgentError(attemptError, providerConfig);
+          if (!attemptInfo.retryable || attemptInfo.code === 'action_denied' || runAttempt >= maxRunRetries) {
+            if (runAttempt) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: runAttempt, max: maxRunRetries });
+            throw attemptError;
+          }
+          runAttempt++;
+          const backoffMs = Math.min(30_000, 1000 * Math.pow(2, runAttempt - 1));
+          this.post({ type: 'retry', conversationId, attempt: runAttempt, max: maxRunRetries, error: attemptInfo.message, backoffMs });
+          await waitForRetry(backoffMs, run.controller.signal);
+          streamPrompt = baseStreamPrompt;
+          work.length = 0;
+          work.push(...baseWork);
+          planState = undefined;
+          planItem = undefined;
+          activeTasks.clear();
+          reasoningBuffer = '';
+          reasoningTruncated = false;
+          workStartedAt = 0;
         }
-        lastIterationStepCount = iterationStepCount;
-        const usage = await result.usage;
-        if (usage?.inputTokens || usage?.outputTokens) {
-          const durationMs = Date.now() - streamStartTime;
-          const totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-          const tokensPerSecond = durationMs > 0 ? Math.round((totalTokens / durationMs) * 1000) : 0;
-          recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0, durationMs, tokensPerSecond });
-        }
-        if (finishReason === 'error') throw new Error('The model stopped because the provider reported a generation error.');
-        if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');
-        if (!shouldAutoContinue(answer, finishReason, continuationCount)) break;
-        continuationCount++;
-        streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
-      } while (continuationCount < 2 && !run.controller.signal.aborted);
-      this.sendUsage();
-      const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
-      if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
-      if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
-      if (paused) {
-        if (planState) { planState.interrupted = true; postPlan(); }
-      } else {
-        finalizePlan();
       }
-      const keptWork = work.slice(-80);
-      const workSeconds = workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0;
-      const assistantItem = createTranscriptItem('assistant', answer, undefined, runGitTree, keptWork, workSeconds, liveInput, liveOutput);
-      if (paused) {
-        assistantItem.paused = true;
-        assistantItem.pauseReason = 'max_steps';
-        assistantItem.pauseLimit = maxSteps;
-      }
-      if (runChanges.size) assistantItem.changes = [...runChanges.values()];
-      conversation.items.push(assistantItem);
-      conversation.items = conversation.items.slice(-60);
-      conversation.updatedAt = Date.now();
-      project.updatedAt = Date.now();
-      await this.persistProjects();
-      this.post({ type: 'done', conversationId, item: assistantItem });
-      systemNotify(this.context, {
-        subtitle: paused ? 'Iteration paused' : 'Task complete',
-        message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(answer) || conversation.title),
-        kind: paused ? 'attention' : 'info',
-      });
     } catch (error) {
       if (run.controller.signal.aborted) {
         if (planState) { planState.interrupted = true; postPlan(); }
