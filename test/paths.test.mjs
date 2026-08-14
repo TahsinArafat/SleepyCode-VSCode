@@ -79,7 +79,7 @@ describe('resolvePathSafe', () => {
 
   it('resolves a normal relative path', () => {
     const result = resolvePathSafe(root, 'src/file.ts');
-    assert.ok(result.startsWith(root + '/'));
+    assert.ok(result.startsWith(realpathSync(root) + path.sep));
   });
 
   it('rejects absolute paths', () => {
@@ -96,7 +96,7 @@ describe('resolvePathSafe', () => {
 
   it('handles Windows-style paths', () => {
     const result = resolvePathSafe(root, 'src\\file.ts');
-    assert.ok(result.startsWith(root + '/'));
+    assert.ok(result.startsWith(realpathSync(root) + path.sep));
   });
 
   it('allows a deeply nested path that does not exist yet', () => {

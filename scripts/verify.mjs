@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 
 const raw = readFileSync('src/webview.ts', 'utf8');
 const runtimeRaw = readFileSync('src/webview/runtime.ts', 'utf8');
-const runtimeMatch = runtimeRaw.match(/return String\.raw`([\s\S]*?)`;\n}/);
+const runtimeMatch = runtimeRaw.match(/return String\.raw`([\s\S]*?)`;\r?\n}/);
 if (!runtimeMatch) throw new Error('webview runtime template not found');
 const js = runtimeMatch[1]
   .replaceAll('${gitTracked}', 'true')
