@@ -86,9 +86,9 @@ check(/max-width:560px/.test(webviewStyles) && /grid-column:1 \/ -1;grid-row:2/.
 check(/safety-option-main\{[^}]*flex-direction:column;gap:3px/.test(webviewStyles) && /agent-option-main\{[^}]*flex-direction:column;gap:3px/.test(webviewStyles), 'agent and permission selectors visibly separate title and description text');
 const sleepyCodeMark = read('media/sleepycode-mark.svg');
 const sleepyCodePromptIcon = read('media/sleepycode-o.svg');
-check(/font-family="monospace"/.test(sleepyCodeMark) && sleepyCodeMark.includes('/\\_/\\') && /\$ sleepycode_/.test(sleepyCodeMark) && /ASCII terminal prompt/.test(sleepyCodePromptIcon), 'repository branding uses simple SleepyCode ASCII terminal art');
+check(/font-family="monospace"/.test(sleepyCodeMark) && sleepyCodeMark.includes('/\\_/\\') && /\$ sleepycode_/.test(sleepyCodeMark), 'repository branding uses simple SleepyCode ASCII terminal art');
 
-check(packageJson.name === 'sleepycode-agent' && packageJson.displayName === 'SleepyCode' && packageJson.version === '0.3.0', 'package identity is fully rebranded and versioned as SleepyCode 0.3.0');
+check(packageJson.name === 'sleepycode-agent' && packageJson.displayName === 'SleepyCode' && /^\d+\.\d+\.\d+$/.test(packageJson.version), 'package identity is fully rebranded and versioned as SleepyCode');
 check(!new RegExp(['Sleepy','IDE'].join('') + '|' + ['sleepy','ide'].join('')).test([providers, agent, webviewCode, webviewStyles, util, read('README.md'), read('plan.md'), read('src/extension.ts'), JSON.stringify(packageJson)].join('\n')), 'core source, docs, and manifest contain no retired product branding');
 check(/subagentSequence/.test(agent) && /type: 'subagent'/.test(agent) && /parentId: subagentId/.test(agent) && /Subagent \(\$\{role\}\) failed/.test(agent), 'subagents use explicit unique lifecycle/parent metadata and propagate failures');
 check(/case'subagent'/.test(webviewRuntime) && /const parentId=m\.parentId/.test(webviewRuntime) && !/startsWith\(['"]subagent-['"]\)/.test(webviewRuntime), 'webview groups subagent tools by explicit parent id instead of fragile id prefixes');

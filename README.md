@@ -206,7 +206,7 @@ See the [SearXNG installation documentation](https://docs.searxng.org/admin/inst
 
 ```bash
 git clone https://github.com/TahsinArafat/SleepyCode-VSCode.git
-cd SleepyCode
+cd SleepyCode-VSCode
 npm install
 npm run check
 npm run build
