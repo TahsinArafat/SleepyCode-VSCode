@@ -1,0 +1,176 @@
+{
+  "name": "sleepycode-agent",
+  "displayName": "SleepyCode",
+  "description": "SleepyAI's coding agent for Visual Studio Code.",
+  "version": "0.3.0",
+  "publisher": "TahsinArafat",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TahsinArafat/SleepyCode-VSCode"
+  },
+  "categories": [
+    "AI",
+    "Machine Learning",
+    "Programming Languages",
+    "Chat",
+    "Data Science",
+    "Other"
+  ],
+  "keywords": [
+    "sleepyai",
+    "ai",
+    "coding agent",
+    "codex",
+    "chat",
+    "copilot",
+    "automation",
+    "llm",
+    "mcp",
+    "vscode extension",
+    "developer tools"
+  ],
+  "activationEvents": [
+    "onView:sleepycode.chat",
+    "onCommand:sleepycode.openChat",
+    "onCommand:sleepycode.testSystemNotification"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "media/icon.png",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sleepycode",
+          "title": "SleepyCode",
+          "icon": "media/sleepycode-o.svg"
+        }
+      ]
+    },
+    "views": {
+      "sleepycode": [
+        {
+          "type": "webview",
+          "id": "sleepycode.chat",
+          "name": "SleepyCode"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "sleepycode.openChat",
+        "title": "SleepyCode: Open Chat",
+        "icon": "media/sleepycode-o.svg"
+      },
+      {
+        "command": "sleepycode.focus",
+        "title": "SleepyCode: Focus Chat",
+        "icon": "media/sleepycode-o.svg"
+      },
+      {
+        "command": "sleepycode.settings",
+        "title": "SleepyCode: Open Settings"
+      },
+      {
+        "command": "sleepycode.usage",
+        "title": "SleepyCode: Usage & Billing"
+      },
+      {
+        "command": "sleepycode.memory",
+        "title": "SleepyCode: Open Project Memory"
+      },
+      {
+        "command": "sleepycode.marketplace",
+        "title": "SleepyCode: Skill Marketplace"
+      },
+      {
+        "command": "sleepycode.clear",
+        "title": "SleepyCode: New Chat"
+      },
+      {
+        "command": "sleepycode.testSystemNotification",
+        "title": "SleepyCode: Test System Notification"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "sleepycode.openChat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SleepyCode",
+      "properties": {
+        "sleepycode.model": {
+          "type": "string",
+          "default": "",
+          "description": "Selected model ID for the active provider. Choose it from the sidebar."
+        },
+        "sleepycode.maxSteps": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 50,
+          "description": "Maximum tool-loop steps per request. Set to 0 for unlimited tasks."
+        },
+        "sleepycode.approvalMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "edits",
+            "autonomous"
+          ],
+          "default": "ask",
+          "description": "Controls whether file edits and commands require confirmation. 'Auto edits' auto-applies file edits but still asks before every command; 'Open access' runs everything without confirmation."
+        },
+        "sleepycode.searxngUrl": {
+          "type": "string",
+          "default": "http://localhost:8888",
+          "description": "Base URL for a SearXNG instance with JSON output enabled. Defaults to a local instance on port 8888; leave empty to disable web search."
+        },
+        "sleepycode.mcpServers": {
+          "type": "string",
+          "default": "{}",
+          "description": "JSON object of MCP servers. Each entry may use an HTTP/SSE URL or a stdio command with args, env, and cwd."
+        },
+        "sleepycode.extraFreeModels": {
+          "type": "string",
+          "default": "",
+          "description": "Additional comma-separated model IDs to show for the active provider when discovery is incomplete or unavailable."
+        },
+        "sleepycode.systemNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show native SleepyCode system notifications (task completed, approval needed, task failed) when VS Code is not focused."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit && node scripts/verify.mjs && node scripts/logic-check.mjs && npm test && npm run test:core && node scripts/verify-notifier.mjs",
+    "test": "node --test 'test/**/*.test.mjs'",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "npm run verify:release && npm run check && npm run build && vsce package",
+    "test:core": "node --experimental-strip-types --test test/*.direct.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/mcp": "^2.0.30",
+    "@ai-sdk/openai-compatible": "^3.0.26",
+    "ai": "^7.0.57",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/vscode": "^1.106.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
+  }
+}

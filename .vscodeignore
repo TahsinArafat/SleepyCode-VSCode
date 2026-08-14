@@ -1,0 +1,17 @@
+.github/**
+.vscode/**
+src/**
+test/**
+scripts/**
+node_modules/**
+*.ts
+*.mjs
+*.map
+*.patch
+*.zip
+package-lock.json
+tsconfig.json
+plan.md
+.gitignore
+.vscodeignore
+artifacts/**

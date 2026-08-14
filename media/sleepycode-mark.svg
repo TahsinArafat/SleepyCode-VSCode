@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 150" role="img" aria-label="SleepyCode ASCII sleeping cat terminal mark">
+  <rect x="2" y="2" width="216" height="146" rx="10" fill="none" stroke="currentColor" stroke-width="4" opacity=".55"/>
+  <g fill="currentColor" font-family="monospace" font-size="19" xml:space="preserve">
+    <text x="20" y="34">$ sleepycode_</text>
+    <text x="48" y="68">/\_/\   zZ</text>
+    <text x="46" y="94">( -.- )</text>
+    <text x="57" y="120">&gt; ^ &lt;</text>
+  </g>
+</svg>

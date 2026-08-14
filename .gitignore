@@ -1,0 +1,10 @@
+node_modules/
+dist/
+artifacts/
+*.vsix
+*.zip
+*.patch
+.DS_Store
+.env
+.env.*
+!.env.example
