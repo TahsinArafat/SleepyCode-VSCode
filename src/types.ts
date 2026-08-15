@@ -36,7 +36,9 @@ export type WebMessage =
   | { type: 'openFile'; path: string }
   | { type: 'chooseContext' }
   | { type: 'compact'; conversationId?: string }
+  | { type: 'cancelCompact'; conversationId?: string }
   | { type: 'compactStatus'; conversationId: string; ok: boolean; summary?: string; inputTokens?: number; outputTokens?: number }
+  | { type: 'compactProgress'; conversationId: string; phase: 'start' | 'summarizing' | 'done' | 'cancelled' | 'error'; summary?: string; inputTokens?: number; outputTokens?: number; newContextTokens?: number; contextWindow?: number }
   | { type: 'requestFilePicker' }
   | { type: 'pasteImage'; dataUrl: string; mimeType: string; name: string; size: number }
   | { type: 'dropFiles'; paths: string[] }

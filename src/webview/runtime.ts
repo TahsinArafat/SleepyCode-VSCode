@@ -101,6 +101,36 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function showNotifyModal(opts){return new Promise(resolve=>{notifyQueue.push({opts,resolve});drainNotify()})}
   function drainNotify(){if(notifyBusy||!notifyQueue.length)return;notifyBusy=true;const job=notifyQueue.shift(),opts=job.opts;notifyTitle.textContent=opts.title||'SleepyCode';notifyBody.textContent=opts.body||'';notifyModal.classList.toggle('danger',Boolean(opts.danger));notifyIcon.style.display=opts.icon===false?'none':'';const risk=opts.risk||'';notifyRisk.textContent=risk==='high'?'High risk':risk==='medium'?'Review required':risk==='low'?'Low risk':'';notifyRisk.className='notify-risk'+(risk?' '+risk:'');notifyRisk.style.display=risk?'':'none';notifyOk.textContent=opts.ok||'OK';notifyOk.classList.toggle('danger',Boolean(opts.danger));notifyCancel.textContent=opts.cancel||'Cancel';notifyCancel.style.display=opts.cancel?'':'none';notifySecondary.textContent=opts.secondary||'';notifySecondary.style.display=opts.secondary?'':'none';notifyBackdrop.classList.add('open');setTimeout(()=>{(opts.cancel!==false?notifyCancel:notifyOk).focus()},0);window.__resolveNotify=(choice)=>{notifyBusy=false;notifyBackdrop.classList.remove('open');job.resolve(choice);drainNotify()}}
   notifyOk.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('ok')};notifyCancel.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifySecondary.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('secondary')};notifyClose.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifyBackdrop.onclick=e=>{if(e.target===notifyBackdrop&&window.__resolveNotify)window.__resolveNotify('cancel')};document.addEventListener('keydown',e=>{if(e.key==='Escape'&&window.__resolveNotify)window.__resolveNotify('cancel')});
+  function handleCompactProgress(m){
+    const overlay=document.getElementById('compactionOverlay');
+    const status=document.getElementById('compactionStatus');
+    const cancelBtn=document.getElementById('compactionCancel');
+    if(!overlay||!status)return;
+    if(m.phase==='start'){
+      status.textContent='Compacting conversation…';
+      if(cancelBtn)cancelBtn.style.display='';
+      overlay.classList.add('visible');
+    }else if(m.phase==='summarizing'){
+      status.textContent='Summarizing conversation…';
+      overlay.classList.add('visible');
+    }else if(m.phase==='done'){
+      const freed=m.newContextTokens!==undefined?' · New context: '+fmt(m.newContextTokens||0)+' tokens':'';
+      status.textContent=(m.summary||'Compacted.')+freed;
+      if(cancelBtn)cancelBtn.style.display='none';
+      overlay.classList.add('visible');
+      setTimeout(()=>{overlay.classList.remove('visible');updateSessionStats()},2500);
+    }else if(m.phase==='cancelled'){
+      status.textContent='Compaction cancelled.';
+      if(cancelBtn)cancelBtn.style.display='none';
+      overlay.classList.add('visible');
+      setTimeout(()=>{overlay.classList.remove('visible')},1500);
+    }else if(m.phase==='error'){
+      status.textContent=m.summary||'Compaction failed.';
+      if(cancelBtn)cancelBtn.style.display='none';
+      overlay.classList.add('visible');
+      setTimeout(()=>{overlay.classList.remove('visible')},3000);
+    }
+  }
   const displayModel=s=>String(s||'').toLowerCase();
   const modelIdOf=m=>typeof m==='object'&&m?m.id:String(m||'');
   const modelNameOf=m=>typeof m==='object'&&m?m.name||m.id:String(m||'');
@@ -575,6 +605,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   document.getElementById('steerQueued').onclick=()=>vscode.postMessage({type:'steerQueued',conversationId:activeConversationId});document.getElementById('editQueued').onclick=()=>{const prompt=queuedByConversation.get(activeConversationId);if(!prompt)return;queuedByConversation.delete(activeConversationId);updateQueuedVisibility();vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});input.value=prompt;resize();input.focus()};document.getElementById('removeQueued').onclick=()=>vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});
   document.getElementById('loginBannerBtn').onclick=()=>vscode.postMessage({type:'requestSettings'});
   const undoBtn=document.getElementById('undoButton'),redoBtn=document.getElementById('redoButton');if(undoBtn)undoBtn.onclick=async()=>{const choice=await showNotifyModal({title:'Undo last turn?',body:'This will remove the last assistant response and your last message. You can redo later.',ok:'Undo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'undoLastTurn',conversationId:activeConversationId})};if(redoBtn)redoBtn.onclick=async()=>{const choice=await showNotifyModal({title:'Redo last turn?',body:'This will restore the last undone turn.',ok:'Redo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'redoLastTurn',conversationId:activeConversationId})};
+  const compactionCancelBtn=document.getElementById('compactionCancel');if(compactionCancelBtn)compactionCancelBtn.onclick=()=>vscode.postMessage({type:'cancelCompact',conversationId:activeConversationId});
   const settingsView=document.getElementById('settingsView'),maxSteps=document.getElementById('maxSteps'),maxStepsUnlimited=document.getElementById('maxStepsUnlimited'),approvalMode=document.getElementById('approvalMode'),searxngUrl=document.getElementById('searxngUrl'),mcpServers=document.getElementById('mcpServers'),extraFreeModels=document.getElementById('extraFreeModels'),settingsResult=document.getElementById('settingsResult'),providerList=document.getElementById('providerList'),onlyDefaultModels=document.getElementById('onlyDefaultModels'),confirmDelete=document.getElementById('confirmDelete'),compactionModel=document.getElementById('compactionModel'),subagentModelExplorer=document.getElementById('subagentModelExplorer'),subagentModelReviewer=document.getElementById('subagentModelReviewer'),subagentModelWorker=document.getElementById('subagentModelWorker');let initialSetup=false,savedApiKeys={},providersList=[],activeProvider='',settingsSavedTimer=null,sleepyAccount=null,sleepyBusy=false,sleepyStatusText='';
   const resetSettingsBtn=document.getElementById('resetSettings');let resetClicks=0,autosaveTimer=null;
   function resetArmGuard(){resetClicks=0;resetSettingsBtn.textContent='Reset to defaults'}
@@ -841,7 +872,8 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'queuedPrompt':if(m.prompt)queuedByConversation.set(m.conversationId,m.prompt);else queuedByConversation.delete(m.conversationId);updateQueuedVisibility();break;
     case'state':if(m.running)runningSet.add(m.conversationId);else runningSet.delete(m.conversationId);modelButton.disabled=isRunning();updateSendMode();updateJump();break;
     case'notify':{const choice=await showNotifyModal({title:m.title,body:m.detail,ok:m.okLabel,cancel:m.cancelLabel,secondary:m.secondaryLabel,danger:Boolean(m.danger),risk:m.risk});vscode.postMessage({type:'notifyResponse',id:m.id,choice});break}
-    case'compactStatus':{void showNotifyModal({title:m.ok?'Conversation compacted':'Compaction skipped',body:m.summary||'Done.',ok:'OK',cancel:false});break}
+    case'compactStatus':{if(!m.ok){const compacting=document.getElementById('compactionOverlay');if(compacting)compacting.classList.remove('visible');void showNotifyModal({title:'Compaction skipped',body:m.summary||'Done.',ok:'OK',cancel:false})}break}
+    case'compactProgress':{handleCompactProgress(m);break}
     case'done':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();finish(m.item)}break;
   }})
   vscode.postMessage({type:'ready'});vscode.postMessage({type:'requestMarketplaceInstalled'})

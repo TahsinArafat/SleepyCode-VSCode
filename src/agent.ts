@@ -114,6 +114,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private lastSleepyPriceRefresh = 0;
   private reviewTempDirs = new Set<string>();
   private subagentSequence = 0;
+  private compactionControllers = new Map<string, AbortController>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
@@ -607,6 +608,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'requestSettings') return void this.showSettings();
     if (message.type === 'compact') return this.compactConversation(message.conversationId);
+    if (message.type === 'cancelCompact') return this.cancelCompaction(message.conversationId);
     if (message.type === 'newConversation') return this.newConversation();
     if (message.type === 'openConversation') {
       const project = this.activeProject();
@@ -2052,6 +2054,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return { project, conversation, item };
   }
 
+  private cancelCompaction(conversationId?: string): void {
+    const project = this.activeProject();
+    const targetId = conversationId ?? project?.activeConversationId ?? '';
+    const controller = this.compactionControllers.get(targetId);
+    if (controller) {
+      controller.abort();
+      this.compactionControllers.delete(targetId);
+    }
+    this.post({ type: 'compactProgress', conversationId: targetId, phase: 'cancelled' });
+  }
+
   private async compactConversation(conversationId?: string): Promise<void> {
     const project = this.activeProject();
     if (!project) return;
@@ -2065,8 +2078,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Wait until the current run finishes.' });
       return;
     }
+    if (this.compactionControllers.has(targetId ?? '')) return; // already compacting
+    const controller = new AbortController();
+    this.compactionControllers.set(targetId ?? '', controller);
+    this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'start' });
     const lastAssistant = [...conversation.items].reverse().find(item => item.role === 'assistant');
-    const compacted = await this.summarizeConversation(conversation.items, this.selectionFor(conversation));
+    const preTokens = this.sessionMetricsForConversation(conversation);
+    let compacted: TranscriptItem[] | undefined;
+    try {
+      this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'summarizing' });
+      compacted = await this.summarizeConversation(conversation.items, this.selectionFor(conversation), controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'cancelled' });
+        return;
+      }
+      this.compactionControllers.delete(targetId ?? '');
+      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: `Compaction failed: ${errorMessage(error)}` });
+      return;
+    }
+    if (!compacted) {
+      this.compactionControllers.delete(targetId ?? '');
+      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Compaction produced no output.' });
+      return;
+    }
     conversation.items = compacted;
     if (lastAssistant) {
       conversation.title = lastAssistant.text?.trim().slice(0, 80) ?? conversation.title;
@@ -2077,14 +2112,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.syncConversations();
     const inputTokens = conversation.items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
     const outputTokens = conversation.items.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
+    const newContextTokens = inputTokens + outputTokens;
+    const selection = this.selectionFor(conversation);
+    const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
+    const contextWindow = modelInfo.contextWindow;
+    this.compactionControllers.delete(targetId ?? '');
     this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: true, summary: `Compacted to ${conversation.items.length} messages.`, inputTokens, outputTokens });
+    this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'done', summary: `Compacted to ${conversation.items.length} messages. Freed ${Math.max(0, preTokens.inputTokens + preTokens.outputTokens - newContextTokens).toLocaleString()} tokens.`, inputTokens, outputTokens, newContextTokens, contextWindow });
   }
 
-  private async summarizeConversation(items: TranscriptItem[], selection: { model: string; provider: string; agentId: string }): Promise<TranscriptItem[]> {
+  private async summarizeConversation(items: TranscriptItem[], selection: { model: string; provider: string; agentId: string }, signal?: AbortSignal): Promise<TranscriptItem[]> {
     const text = items
       .map(item => {
         const role = item.role === 'user' ? 'User' : 'Assistant';
-        const content = item.text.trim().replace(/\s+/g, ' ').slice(0, 4000);
+        // Skip reasoning/thinking tokens: use only the main text content, not work[].kind === 'reasoning'
+        const reasoningText = (item.work ?? []).filter(w => w.kind === 'reasoning').map(w => w.text).join('\n').trim();
+        let content = item.text.trim().replace(/\s+/g, ' ').slice(0, 4000);
+        // Exclude reasoning text from compaction input — think tokens should not be summarized
+        if (reasoningText && content.includes(reasoningText.slice(0, 200))) {
+          content = content.replace(reasoningText.slice(0, 200), '').trim();
+        }
         return `[${role}] ${content}`;
       })
       .join('\n\n');
@@ -2116,16 +2163,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         });
         // Cheapest model first; on failure, fall through to the next cheapest.
         for (const modelId of candidates) {
+          if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
           try {
-            const result = await generateText({ model: provider(modelId), prompt, maxOutputTokens: 1024 });
+            const result = await generateText({ model: provider(modelId), prompt, maxOutputTokens: 1024, ...(signal ? { abortSignal: signal } : {}) });
             const text = result.text.trim();
             if (text) { summaryText = text; break; }
-          } catch {
+          } catch (error) {
+            if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
             // Try the next cheapest available model.
           }
         }
       }
     }
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
     if (!summaryText) summaryText = `Compacted context.\nOriginal message count: ${items.length}.`;
     const summary = createTranscriptItem('assistant', summaryText.trim() || 'Compacted context.');
     const inputTokens = items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
