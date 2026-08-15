@@ -169,12 +169,24 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     }
     const live=liveRuns.get(activeConversationId);
     if(live){inTok+=live.input||0;outTok+=live.output||0}
-    // Context occupancy mirrors estimateContextTokens in src/compaction-core.ts:
-    // fixed system overhead + chars/4 over the recent history window. Per-item
-    // token counters are lifetime spend (each run re-sends the whole history),
-    // so summing them must NOT be used as the context-window fill level.
+    // Context occupancy prefers the provider-reported prompt_tokens from the most
+    // recent run (the true measured context size), falling back to the chars/4
+    // estimate only for fresh or just-compacted sessions with no measurement yet.
+    // Per-item inputTokens/outputTokens are lifetime spend (each run re-sends the
+    // whole history), so summing them must NOT be used as the fill level.
     let contextTokens=0;
-    if(activeConversationItems.length){
+    let measured=false;
+    // A live run's latest step prompt_tokens is the freshest measured context
+    // size, so it takes precedence over the last committed assistant item (which
+    // reflects the PREVIOUS run). This keeps the context pill updating live.
+    if(live&&typeof live.contextTokens==='number'&&live.contextTokens>0){contextTokens=live.contextTokens;measured=true}
+    else{
+      for(let i=activeConversationItems.length-1;i>=0;i--){
+        const t=activeConversationItems[i].contextTokens;
+        if(typeof t==='number'&&t>0){contextTokens=t;measured=true;break}
+      }
+    }
+    if(!measured&&activeConversationItems.length){
       let chars=0;
       for(const item of activeConversationItems.slice(-10))chars+=(item.text||'').length;
       contextTokens=1500+Math.ceil(chars/4);
@@ -225,7 +237,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
         cost={input:inputCost,output:outputCost,total:inputCost+outputCost};
       }
     }
-    return {inTok,outTok,total:inTok+outTok,contextTokens,ctxLimit,effectiveModel,providerId,cost};
+    return {inTok,outTok,total:inTok+outTok,contextTokens,measured,ctxLimit,effectiveModel,providerId,cost};
   }
   function updateSessionStats(){
     const statContext=document.getElementById('statContext');
@@ -240,8 +252,8 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     const showStats=s.total>0||Boolean(s.effectiveModel)||Boolean(live)||(statGroup&&statGroup.classList.contains('active'));
     if(statGroup)statGroup.classList.toggle('show',showStats);
     const ctxLabel=s.ctxLimit>0?fmt(s.ctxLimit):'128k';
-    statContext.textContent=fmt(s.contextTokens)+' / '+ctxLabel;
-    statContext.title='Estimated context window usage';
+    statContext.textContent=(s.measured?'':'~')+fmt(s.contextTokens)+' / '+ctxLabel;
+    statContext.title=s.measured?'Context window usage reported by the provider':'Estimated context window usage';
     statTokens.textContent='⬆ '+fmt(s.inTok)+'  ⬇ '+fmt(s.outTok);
     statTokens.title='Session token spend (cumulative)';
     if(s.cost&&statCost){
@@ -264,7 +276,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     const costHtml=s.cost
       ?'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(sessionMoney(s.cost.total))+'</div></div><div class="session-info-cell"><div class="k">In / out cost</div><div class="v">'+esc(sessionMoney(s.cost.input))+' / '+esc(sessionMoney(s.cost.output))+'</div></div>'
       :'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(s.providerId==='sleepyai'?'Sign in for pricing':'Not available')+'</div></div>';
-    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Session tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>Context used (estimated)</span><span class="v">'+esc(fmt(s.contextTokens))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
+    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Session tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>'+(s.measured?'Context used':'Context used (estimated)')+'</span><span class="v">'+esc((s.measured?'':'~')+fmt(s.contextTokens))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
     const close=sessionInfo.querySelector('#sessionInfoClose');
     if(close)close.onclick=()=>toggleSessionInfo(false);
   }
@@ -870,7 +882,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'modelsError':addError(m.text);break;
     case'showUsage':openUsageView();break;case'showMarketplace':openMarketplaceView();break;case'marketplaceInstalled':installedSkills=m.skills||[];renderInstalledSkills();if(marketplaceView.classList.contains('visible'))renderMarketplaceResults();break;case'marketplaceResults':{marketplaceBusy=false;marketplaceCards=(m.skills||[]).map(x=>({key:x.githubUrl||x.name,name:x.name,author:x.author||'',description:x.description||'',meta:(x.stars?String(x.stars)+' ★':'')+(x.author?' · '+esc(x.author):''),installed:installedMatch(x.author,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:x.githubUrl?{source:x.githubUrl,path:''}:null,install:x.githubUrl?{source:x.githubUrl,skill:undefined}:null}));marketplaceHeading=m.query?'Search results':'Popular skills';marketplaceHint=m.query?'Try another search to explore more.':'Search above to discover more skills.';marketplaceStatusText(m.query?'Found '+(m.total||(m.skills||[]).length)+' skills for "'+m.query+'".':'',true);renderMarketplaceResults();break}case'marketplaceRepoSkills':{marketplaceBusy=false;const source=m.owner+'/'+m.repo;marketplaceCards=(m.skills||[]).map(x=>({key:source+'/'+x.path,name:x.name,author:source,description:'',meta:'from '+esc(source),installed:installedMatch(source,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:{source,path:x.path},install:{source,skill:x.name}}));marketplaceHeading='Skills in '+source;marketplaceHint='Preview a skill before installing it.';marketplaceStatusText((m.skills||[]).length+' skills found.',true);renderMarketplaceResults();break}case'marketplacePreview':{previewContent.innerHTML=markdown(m.markdown||'');previewInstall.style.display='';document.getElementById('previewTitle').textContent=m.title||'Skill preview';break}case'marketplaceInstallProgress':{const st=marketplaceInstalling[m.key];if(st){st.done=m.done||0;st.total=m.total||0;st.label='Installing… '+(m.done||0)+'/'+(m.total||0)+' files';updateCardProgress(m.key);updatePreviewProgress(m.key)}break}case'marketplaceResult':{if(m.key)delete marketplaceInstalling[m.key];marketplaceStatusText(m.text,!!m.ok);if(m.ok){if(previewState&&previewState.key===m.key){closeSkillPreview()}if(marketplaceView.classList.contains('visible'))vscode.postMessage({type:'requestMarketplaceInstalled'})}else{if(previewState&&previewState.key===m.key){previewProgress.classList.add('visible','error');previewProgressFill.style.width='100%';previewProgressLabel.textContent=m.text||'Install failed.'}renderMarketplaceResults()}break}case'marketplaceError':{marketplaceBusy=false;marketplaceStatusText(m.text||'Request failed.',false);renderMarketplaceResults();break}
     case'usage':usageData=m;if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break;
-    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,speed:m.speed||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
+    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,speed:m.speed||0,contextTokens:m.contextTokens||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
     case'user':{liveByConversation.set(m.conversationId,freshLive());if(m.conversationId===activeConversationId)activeConversationItems.push(m.item);if(m.conversationId===activeConversationId){const tmpBubble=currentTurn?.querySelector('.user-text');if(currentTurn&&tmpBubble){const footer=currentTurn.querySelector('.message-footer');if(footer)footer.remove();currentTurn.appendChild(messageFooter(m.item,false))}else{beginTurn(m.item)}}break}
     case'resume':{const s=liveState(m.conversationId);s.phase='thinking';s.activity=null;s.currentRaw='';if(m.conversationId===activeConversationId){currentTurn=document.querySelector('.turn:last-child')||null;current=activity=activityBody=reasoning=null;followOutput=true;scroll(true)}break}
     case'workPhase':{const s=liveState(m.conversationId);s.phase='work';if(s.activity)s.activity.reasoningParts.push('');if(m.conversationId===activeConversationId)nextWorkPhase();break}

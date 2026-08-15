@@ -123,6 +123,7 @@ export type TranscriptItem = {
   seconds?: number;
   inputTokens?: number;
   outputTokens?: number;
+  contextTokens?: number;
   attachments?: Attachment[];
   changes?: FileChange[];
   errorInfo?: AgentErrorPresentation;

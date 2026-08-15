@@ -108,15 +108,19 @@ test('system instructions actively discover and load installed skills before use
   assert.match(skills, /Actively consider this list for every substantive request/);
 });
 
-test('context occupancy is estimated from transcript text, never from cumulative token counters', () => {
+test('context occupancy is measured from provider prompt_tokens, never from cumulative counters', () => {
   // The pre-fix "5.33M / 1M" bug summed per-item lifetime token counters and
   // displayed the total as context-window usage. That pattern must not return.
   assert.doesNotMatch(agent, /sessionMetricsForConversation/);
   const sessionMetrics = runtime.match(/function sessionMetrics\(\)\{[\s\S]*?\n  \}/)?.[0] ?? '';
   assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
   assert.doesNotMatch(sessionMetrics, /contextTokens\s*=\s*inTok\+outTok/);
+  // Measured prompt_tokens (item.contextTokens) is preferred over the chars/4
+  // estimate, which remains only as a fallback for fresh/compacted sessions.
+  assert.match(sessionMetrics, /contextTokens=t;measured=true/);
   assert.match(sessionMetrics, /contextTokens=1500\+Math\.ceil\(chars\/4\)/);
-  assert.match(runtime, /statContext\.textContent=fmt\(s\.contextTokens\)/);
+  assert.match(runtime, /statContext\.textContent=\(s\.measured\?'':'~'\)\+fmt\(s\.contextTokens\)/);
+  assert.match(compactionCore, /export function contextOccupancy/);
   assert.match(compactionCore, /export function estimateContextTokens/);
 });
 
@@ -166,6 +170,22 @@ test('compaction candidates get real output headroom, not the reasoning-starving
   assert.ok(COMPACTION_OUTPUT_BUDGET >= 4096, 'budget leaves room for reasoning + summary');
 });
 
+test('compaction summarizer uses streamText, not generateText (relay always streams SSE)', () => {
+  // The SleepyAI relay answers every request with an SSE stream even when the
+  // client sends stream:false. generateText parses the body as JSON, throws
+  // "Invalid JSON response", and compaction hops model after model while the
+  // dashboard shows a valid completion. streamText requests stream:true and
+  // parses that same SSE — the same transport the main run loop uses.
+  const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(summarize, 'summarizeConversation found');
+  assert.doesNotMatch(summarize, /generateText\(/);
+  assert.match(summarize, /await streamText\(\{ model: provider\(candidateId\)/);
+  assert.match(summarize, /await result\.usage/);
+  assert.match(summarize, /await result\.text/);
+  assert.doesNotMatch(agent, /import \{ ToolLoopAgent, generateText/);
+  assert.match(agent, /import \{ ToolLoopAgent, streamText/);
+});
+
 test('compaction fails loudly with per-candidate reasons instead of a placeholder summary', () => {
   const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
   assert.ok(summarize, 'summarizeConversation found');
@@ -186,4 +206,18 @@ test('compaction fails loudly with per-candidate reasons instead of a placeholde
 test('/compact fires immediately and only as an exact command', () => {
   assert.match(runtime, /case'\/compact':handleCompactProgress\(\{conversationId:activeConversationId,phase:'start'\}\)/);
   assert.match(runtime, /if\(trimmed\.toLowerCase\(\)===first&&runDirectSlash\(first\)\)/);
+});
+
+test('context window updates live from the latest step prompt_tokens, not only after the run', () => {
+  // The context pill must reflect the provider's prompt_tokens for the CURRENT
+  // run as it progresses. The liveUsage message carries the latest step's
+  // prompt_tokens (not the cumulative liveInput, which is lifetime spend).
+  assert.match(agent, /type: 'liveUsage'.*contextTokens: input/s);
+  // The webview stores the live context tokens and prefers them over the last
+  // committed assistant item (which reflects the previous run).
+  assert.match(runtime, /contextTokens:m\.contextTokens\|\|0/);
+  const sessionMetrics = runtime.match(/function sessionMetrics\(\)\{[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
+  assert.match(sessionMetrics, /live\.contextTokens/);
+  assert.match(sessionMetrics, /contextTokens=live\.contextTokens;measured=true/);
 });

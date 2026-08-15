@@ -13,6 +13,7 @@ export type CompactableItem = {
   role: 'user' | 'assistant';
   text?: string;
   kind?: 'error';
+  contextTokens?: number;
 };
 
 /**
@@ -68,6 +69,20 @@ export function estimateContextTokens(items: readonly CompactableItem[]): number
   let chars = 0;
   for (const item of recent) chars += (item.text ?? '').length;
   return CONTEXT_SYSTEM_OVERHEAD_TOKENS + Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+/**
+ * Current context-window occupancy: the provider-reported prompt_tokens from the
+ * most recent run when available (the true measured context size), falling back
+ * to the chars/4 estimate for fresh or just-compacted sessions that have not
+ * produced a measured run yet. `measured` reports which path was used.
+ */
+export function contextOccupancy(items: readonly CompactableItem[]): { tokens: number; measured: boolean } {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const tokens = items[index]?.contextTokens;
+    if (typeof tokens === 'number' && tokens > 0) return { tokens, measured: true };
+  }
+  return { tokens: estimateContextTokens(items), measured: false };
 }
 
 /** True when the estimated occupancy reaches the auto-compaction threshold. */

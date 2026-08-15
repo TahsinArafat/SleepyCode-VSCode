@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   compactionOutputBudget,
   compactionPromptInput,
+  contextOccupancy,
   estimateContextTokens,
   selectCarriedItems,
   shouldAutoCompact,
@@ -120,6 +121,32 @@ test('compactionOutputBudget leaves headroom for reasoning models by default', (
   assert.equal(compactionOutputBudget(undefined), COMPACTION_OUTPUT_BUDGET);
   assert.equal(compactionOutputBudget(null), COMPACTION_OUTPUT_BUDGET);
   assert.equal(compactionOutputBudget(0), COMPACTION_OUTPUT_BUDGET);
+});
+
+test('contextOccupancy prefers the measured provider prompt_tokens from the latest item', () => {
+  const items = [
+    assistant('old reply', { contextTokens: 9_700 }),
+    user('latest question'),
+    assistant('latest reply', { contextTokens: 42_000 }),
+  ];
+  assert.deepEqual(contextOccupancy(items), { tokens: 42_000, measured: true });
+});
+
+test('contextOccupancy falls back to the text estimate when no measurement exists', () => {
+  const items = [user('x'.repeat(400))];
+  assert.deepEqual(contextOccupancy(items), { tokens: estimateContextTokens(items), measured: false });
+});
+
+test('contextOccupancy ignores stale measurements on older items', () => {
+  // The measured prompt_tokens lives on the most recent assistant item; an older
+  // measurement must not win just because it appears later in the array order.
+  const items = [
+    assistant('first', { contextTokens: 99_000 }),
+    user('second'),
+    assistant('second', { contextTokens: 12_000 }),
+  ];
+  assert.equal(contextOccupancy(items).tokens, 12_000);
+  assert.equal(contextOccupancy(items).measured, true);
 });
 
 test('compactionOutputBudget clamps to the provider advertised limit', () => {

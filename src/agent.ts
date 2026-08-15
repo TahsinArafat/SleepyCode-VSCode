@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { ToolLoopAgent, generateText, isLoopFinished, isStepCount } from 'ai';
+import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
 import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
@@ -12,7 +12,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, 
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
-import { compactionOutputBudget, compactionPromptInput, estimateContextTokens, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { compactionOutputBudget, compactionPromptInput, contextOccupancy, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -1822,6 +1822,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         let liveOutput = 0;
         let runInput = 0;
         let runOutput = 0;
+        let lastStepInput = 0;
         let liveStartTime = Date.now();
         let streamStartTime = Date.now();
         try {
@@ -1920,11 +1921,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 const usage = part.usage;
                 const input = usage?.inputTokens ?? 0;
                 const output = usage?.outputTokens ?? 0;
+                // The most recent step's prompt_tokens is the true context size the
+                // provider counted for the last call — the closest measured proxy for
+                // current context-window occupancy.
+                lastStepInput = input;
                 if (input || output) {
                   liveInput += input;
                   liveOutput += output;
                   const liveSpeed = Math.round((liveOutput / Math.max(1, Date.now() - liveStartTime)) * 1000);
-                  this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput, speed: liveSpeed });
+                  // contextTokens is the LATEST step's prompt_tokens — the true
+                  // context size the provider counted for the current call. It is
+                  // pushed live so the context-window pill updates during the run,
+                  // not only after the assistant item is committed.
+                  this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput, speed: liveSpeed, contextTokens: input });
                 }
               } else if (part.type === 'error') {
                 throw part.error;
@@ -1961,6 +1970,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           const keptWork = work.slice(-80);
           const workSeconds = workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0;
           const assistantItem = createTranscriptItem('assistant', answer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput);
+          if (lastStepInput) assistantItem.contextTokens = lastStepInput;
           if (paused) {
             assistantItem.paused = true;
             assistantItem.pauseReason = 'max_steps';
@@ -2081,7 +2091,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.compactionControllers.has(targetId ?? '')) return; // already compacting
     const controller = new AbortController();
     this.compactionControllers.set(targetId ?? '', controller);
-    const beforeTokens = estimateContextTokens(conversation.items);
+    const beforeTokens = contextOccupancy(conversation.items).tokens;
     progress('start', { auto: options?.auto === true });
     try {
       progress('summarizing', { auto: options?.auto === true });
@@ -2094,7 +2104,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.syncConversations();
       // Note: usage was already recorded per attempt inside summarizeConversation
       // (including rejected empty responses — reasoning burn is real spend).
-      const afterTokens = estimateContextTokens(conversation.items);
+      const afterTokens = contextOccupancy(conversation.items).tokens;
       const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
       progress('done', {
         auto: options?.auto === true,
@@ -2122,7 +2132,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // A queued follow-up for this conversation is about to start; compacting now
     // would swap the transcript while that run reads it.
     if (this.queue.some(entry => entry.conversationId === conversation.id)) return;
-    const contextTokens = estimateContextTokens(conversation.items);
+    const contextTokens = contextOccupancy(conversation.items).tokens;
     const modelInfo = this.getEffectiveModelInfo(providerId, model);
     if (!shouldAutoCompact(contextTokens, modelInfo.contextWindow)) return;
     const now = Date.now();
@@ -2199,10 +2209,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // never falls through to the next model.
           const attemptSignal = AbortSignal.any([signal, AbortSignal.timeout(180_000)]);
           try {
-            const result = await generateText({ model: provider(candidateId), prompt, maxOutputTokens: budget, maxRetries: 1, abortSignal: attemptSignal });
+            // The SleepyAI relay answers EVERY request with an SSE stream, even a
+            // non-streaming one. generateText sends stream:false and parses the
+            // body as JSON, so it throws "Invalid JSON response" on the SSE
+            // envelope and compaction hops model after model while the dashboard
+            // shows a valid completion. streamText requests stream:true and parses
+            // that same SSE correctly — the same transport the main run loop uses.
+            const result = await streamText({ model: provider(candidateId), prompt, maxOutputTokens: budget, maxRetries: 1, abortSignal: attemptSignal });
+            // Awaiting any auto-consuming promise runs the stream to completion and
+            // surfaces transport/parse errors here (caught below).
+            const attemptUsage = await result.usage;
             // Every completed call costs tokens (reasoning included) — record it even
             // when the response is rejected, otherwise reasoning burn stays invisible.
-            const attemptUsage = result.usage;
             if (attemptUsage.inputTokens || attemptUsage.outputTokens) {
               recordUsage(this.context, {
                 model: candidateId,
@@ -2212,7 +2230,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               });
               this.sendUsage();
             }
-            const candidateText = result.text.trim();
+            const candidateText = (await result.text).trim();
             if (candidateText) {
               summaryText = candidateText;
               modelId = candidateId;
@@ -2222,9 +2240,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
             // Empty text almost always means the model spent the whole output
             // budget on reasoning (finishReason 'length') — not a usable summary.
-            const reasoningChars = (result.finalStep.reasoningText ?? '').length;
-            const warning = (result.warnings ?? []).map(entry => ('feature' in entry ? `${entry.feature}${entry.details ? `: ${entry.details}` : ''}` : entry.type)).find(Boolean);
-            failures.push(`${candidateId}: empty response (finish: ${result.finishReason || 'unknown'}${reasoningChars ? `, ${reasoningChars} reasoning chars` : ''}${warning ? `, ${warning}` : ''})`);
+            const finalStep = await result.finalStep;
+            const finishReason = await result.finishReason;
+            const warnings = await result.warnings;
+            const reasoningChars = (finalStep.reasoningText ?? '').length;
+            const warning = (warnings ?? []).map(entry => ('feature' in entry ? `${entry.feature}${entry.details ? `: ${entry.details}` : ''}` : entry.type)).find(Boolean);
+            failures.push(`${candidateId}: empty response (finish: ${finishReason || 'unknown'}${reasoningChars ? `, ${reasoningChars} reasoning chars` : ''}${warning ? `, ${warning}` : ''})`);
           } catch (error) {
             if (signal.aborted) throw error; // cancellation must not fall through to the next model
             failures.push(`${candidateId}: ${errorMessage(error).slice(0, 140)}`);

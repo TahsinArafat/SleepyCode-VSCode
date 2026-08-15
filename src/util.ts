@@ -58,6 +58,7 @@ export function normalizeTranscriptItem(item: Partial<TranscriptItem>, fallbackT
     seconds: item.seconds,
     inputTokens: item.inputTokens,
     outputTokens: item.outputTokens,
+    contextTokens: item.contextTokens,
     attachments: item.attachments,
     changes: item.changes,
     errorInfo: item.errorInfo,
@@ -177,7 +178,7 @@ export function providerErrorMessage(error: unknown): string {
         if (typeof body.error === 'string') return body.error;
         if (body.error && typeof body.error.message === 'string') return body.error.message;
         if (typeof body.message === 'string') return body.message;
-      } catch {}
+      } catch { }
     }
   }
   return errorMessage(error);
@@ -233,23 +234,23 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
   ) {
     return sleepy
       ? {
-          code: 'auth_required',
-          title: 'SleepyAI session expired',
-          message: 'Your SleepyAI session is no longer valid. Sign in again to continue.',
-          retryable: false,
-          primaryAction: 'signin',
-          primaryLabel: 'Sign in again',
-          secondaryAction: 'account',
-          secondaryLabel: 'Open account',
-        }
+        code: 'auth_required',
+        title: 'SleepyAI session expired',
+        message: 'Your SleepyAI session is no longer valid. Sign in again to continue.',
+        retryable: false,
+        primaryAction: 'signin',
+        primaryLabel: 'Sign in again',
+        secondaryAction: 'account',
+        secondaryLabel: 'Open account',
+      }
       : {
-          code: 'auth_required',
-          title: `${providerName} authentication failed`,
-          message: friendlyError(error, provider),
-          retryable: false,
-          primaryAction: 'settings',
-          primaryLabel: 'Open settings',
-        };
+        code: 'auth_required',
+        title: `${providerName} authentication failed`,
+        message: friendlyError(error, provider),
+        retryable: false,
+        primaryAction: 'settings',
+        primaryLabel: 'Open settings',
+      };
   }
 
   if (
@@ -273,21 +274,21 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
   ) {
     return sleepy
       ? {
-          code: 'credits_exhausted',
-          title: 'SleepyAI credits unavailable',
-          message: 'Your SleepyAI account does not currently have enough available credit for this request.',
-          retryable: false,
-          primaryAction: 'account',
-          primaryLabel: 'Manage plan',
-        }
+        code: 'credits_exhausted',
+        title: 'SleepyAI credits unavailable',
+        message: 'Your SleepyAI account does not currently have enough available credit for this request.',
+        retryable: false,
+        primaryAction: 'account',
+        primaryLabel: 'Manage plan',
+      }
       : {
-          code: 'provider_error',
-          title: `${providerName} billing issue`,
-          message: friendlyError(error, provider),
-          retryable: false,
-          primaryAction: 'settings',
-          primaryLabel: 'Open settings',
-        };
+        code: 'provider_error',
+        title: `${providerName} billing issue`,
+        message: friendlyError(error, provider),
+        retryable: false,
+        primaryAction: 'settings',
+        primaryLabel: 'Open settings',
+      };
   }
 
   if (
@@ -295,21 +296,21 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
   ) {
     return sleepy
       ? {
-          code: 'account_limit',
-          title: 'SleepyAI usage limit reached',
-          message: 'This request is blocked by your current SleepyAI usage allowance or spending limit.',
-          retryable: false,
-          primaryAction: 'account',
-          primaryLabel: 'View usage & plan',
-        }
+        code: 'account_limit',
+        title: 'SleepyAI usage limit reached',
+        message: 'This request is blocked by your current SleepyAI usage allowance or spending limit.',
+        retryable: false,
+        primaryAction: 'account',
+        primaryLabel: 'View usage & plan',
+      }
       : {
-          code: 'provider_error',
-          title: `${providerName} usage limit reached`,
-          message: friendlyError(error, provider),
-          retryable: false,
-          primaryAction: 'settings',
-          primaryLabel: 'Open settings',
-        };
+        code: 'provider_error',
+        title: `${providerName} usage limit reached`,
+        message: friendlyError(error, provider),
+        retryable: false,
+        primaryAction: 'settings',
+        primaryLabel: 'Open settings',
+      };
   }
 
   if (status === 429 || /\brate limit\b|too many requests|\bratelimit\b/.test(lower)) {
