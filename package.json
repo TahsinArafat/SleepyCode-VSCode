@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
