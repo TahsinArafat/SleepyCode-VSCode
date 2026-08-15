@@ -79,8 +79,8 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function selectSlash(index){const item=slashResults[index];if(!item)return;if(item.skill){input.value='/skill '+quoteSlashSkill(item.skill)+' '}else{input.value=item.command+(item.kind==='prompt'?' ':'')}closeSlashMenu();input.focus();input.setSelectionRange(input.value.length,input.value.length);resize()}
   function renderSlashCommandsPalette(){if(!slashMenu)return;const actions=SLASH_COMMANDS.map(item=>'<button type="button" class="slash-option" data-slash-index="-1" data-command="'+esc(item.command)+'"><span class="slash-command">'+esc(item.command)+'</span><span class="slash-copy"><span class="slash-label">'+esc(item.label||'')+'</span><span class="slash-desc">'+esc(item.desc||'')+'</span></span></button>').join('');slashMenu.innerHTML=actions;slashMenu.classList.add('open');slashResults=[];slashSelectedIndex=0;slashMenu.querySelectorAll('[data-command]').forEach(button=>button.onclick=()=>{const cmd=button.dataset.command||'';closeSlashMenu();if(runDirectSlash(cmd))return;input.value=cmd+' ';input.focus();input.setSelectionRange(input.value.length,input.value.length);resize()})}
   function updateSlashMenu(){const value=input.value.slice(0,input.selectionStart);if(!value.startsWith('/')){closeSlashMenu();return}const skillMatch=value.match(/^\/skill\s+(?:"([^"]*)|([^\s]*))$/i);if(skillMatch){const q=(skillMatch[1]??skillMatch[2]??'').toLowerCase();const results=installedSkills.filter(skill=>!q||String(skill.name||'').toLowerCase().includes(q)||String(skill.description||'').toLowerCase().includes(q)).slice(0,20).map(skill=>({command:'/skill '+quoteSlashSkill(skill.name),label:skill.name,desc:skill.description||'Installed skill',kind:'prompt',skill:skill.name}));renderSlashMenu(results);return}const commandMatch=value.match(/^\/([^\s]*)$/);if(!commandMatch){closeSlashMenu();return}const q=('/'+commandMatch[1]).toLowerCase();renderSlashMenu(SLASH_COMMANDS.filter(item=>item.command.toLowerCase().startsWith(q)))}
-  function runDirectSlash(command){switch(command){case'/new':vscode.postMessage({type:'newConversation'});return true;case'/compact':vscode.postMessage({type:'compact',conversationId:activeConversationId});return true;case'/settings':vscode.postMessage({type:'requestSettings'});return true;case'/usage':openUsageView();vscode.postMessage({type:'requestUsage'});vscode.postMessage({type:'sleepyAccountData'});return true;case'/skills':marketplaceTab='installed';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/marketplace':marketplaceTab='discover';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/memory':vscode.postMessage({type:'openMemory'});return true;case'/reindex':projectIndexState={status:'indexing',text:'Reindexing project…',indexed:0,total:0,index:null};renderContext();refreshEmpty();vscode.postMessage({type:'reindexProject'});return true;case'/context':closeModelMenu();closeAgentMenu();toggleContextPanel();return true;case'/model':closeContextPanel();closeAgentMenu();toggleModelMenu();return true;case'/agent':closeContextPanel();closeModelMenu();toggleAgentMenu();return true;case'/permissions':{closeContextPanel();closeModelMenu();closeAgentMenu();const open=!safetyMenu.classList.contains('open');safetyMenu.classList.toggle('open',open);safetyButton?.setAttribute('aria-expanded',String(open));if(open)renderSafetyMenu();return true}case'/commands':renderSlashCommandsPalette();return true;default:return false}}
-  function expandSlashPrompt(text){const trimmed=text.trim();const first=(trimmed.match(/^\/[^\s]+/)||[])[0]?.toLowerCase()||'';if(runDirectSlash(first))return{handled:true,text:''};const skill=trimmed.match(/^\/skill\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))(?:\s+([\s\S]+))?$/i);if(skill){const name=skill[1]||skill[2]||skill[3]||'',task=(skill[4]||'').trim();if(!task){void showNotifyModal({title:'Use installed skill',body:'Add a task after the skill name. Example: /skill '+name+' review the authentication flow',ok:'OK'});return{handled:true,text:''}}return{handled:false,text:'The user explicitly invoked the installed skill "'+name+'" with /skill. You MUST call skillsmp_read_installed for "'+name+'" before planning, editing, or executing the task. Then follow that SKILL.md within SleepyCode safety rules.\n\nTask:\n'+task}}const arg=trimmed.replace(/^\/[^\s]+\s*/,'');if(first==='/plan')return{handled:false,text:'Inspect the relevant project context first. Create and maintain a concrete task plan before making changes.\n\nTask:\n'+arg};if(first==='/fix')return{handled:false,text:'Fix this issue by tracing the root cause, making the smallest correct change, and running relevant regression checks.\n\nIssue:\n'+arg};if(first==='/review')return{handled:false,text:'Review this scope for correctness, security, regressions, maintainability, and missing tests. Report concrete findings and fix high-confidence issues when appropriate.\n\nScope:\n'+arg};if(first==='/test')return{handled:false,text:'Run the most relevant tests/checks for this scope. Diagnose failures, fix failures caused by the current work, and report the verification result.\n\nScope:\n'+arg};if(first==='/explain')return{handled:false,text:'Explain this using precise repository context, relevant files/symbols, and execution flow. Do not modify code unless explicitly requested.\n\nTopic:\n'+arg};return{handled:false,text}}
+  function runDirectSlash(command){switch(command){case'/new':vscode.postMessage({type:'newConversation'});return true;case'/compact':handleCompactProgress({conversationId:activeConversationId,phase:'start'});vscode.postMessage({type:'compact',conversationId:activeConversationId});return true;case'/settings':vscode.postMessage({type:'requestSettings'});return true;case'/usage':openUsageView();vscode.postMessage({type:'requestUsage'});vscode.postMessage({type:'sleepyAccountData'});return true;case'/skills':marketplaceTab='installed';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/marketplace':marketplaceTab='discover';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/memory':vscode.postMessage({type:'openMemory'});return true;case'/reindex':projectIndexState={status:'indexing',text:'Reindexing project…',indexed:0,total:0,index:null};renderContext();refreshEmpty();vscode.postMessage({type:'reindexProject'});return true;case'/context':closeModelMenu();closeAgentMenu();toggleContextPanel();return true;case'/model':closeContextPanel();closeAgentMenu();toggleModelMenu();return true;case'/agent':closeContextPanel();closeModelMenu();toggleAgentMenu();return true;case'/permissions':{closeContextPanel();closeModelMenu();closeAgentMenu();const open=!safetyMenu.classList.contains('open');safetyMenu.classList.toggle('open',open);safetyButton?.setAttribute('aria-expanded',String(open));if(open)renderSafetyMenu();return true}case'/commands':renderSlashCommandsPalette();return true;default:return false}}
+  function expandSlashPrompt(text){const trimmed=text.trim();const first=(trimmed.match(/^\/[^\s]+/)||[])[0]?.toLowerCase()||'';if(trimmed.toLowerCase()===first&&runDirectSlash(first))return{handled:true,text:''};const skill=trimmed.match(/^\/skill\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))(?:\s+([\s\S]+))?$/i);if(skill){const name=skill[1]||skill[2]||skill[3]||'',task=(skill[4]||'').trim();if(!task){void showNotifyModal({title:'Use installed skill',body:'Add a task after the skill name. Example: /skill '+name+' review the authentication flow',ok:'OK'});return{handled:true,text:''}}return{handled:false,text:'The user explicitly invoked the installed skill "'+name+'" with /skill. You MUST call skillsmp_read_installed for "'+name+'" before planning, editing, or executing the task. Then follow that SKILL.md within SleepyCode safety rules.\n\nTask:\n'+task}}const arg=trimmed.replace(/^\/[^\s]+\s*/,'');if(first==='/plan')return{handled:false,text:'Inspect the relevant project context first. Create and maintain a concrete task plan before making changes.\n\nTask:\n'+arg};if(first==='/fix')return{handled:false,text:'Fix this issue by tracing the root cause, making the smallest correct change, and running relevant regression checks.\n\nIssue:\n'+arg};if(first==='/review')return{handled:false,text:'Review this scope for correctness, security, regressions, maintainability, and missing tests. Report concrete findings and fix high-confidence issues when appropriate.\n\nScope:\n'+arg};if(first==='/test')return{handled:false,text:'Run the most relevant tests/checks for this scope. Diagnose failures, fix failures caused by the current work, and report the verification result.\n\nScope:\n'+arg};if(first==='/explain')return{handled:false,text:'Explain this using precise repository context, relevant files/symbols, and execution flow. Do not modify code unless explicitly requested.\n\nTopic:\n'+arg};return{handled:false,text}}
   let mentionResults=[],mentionStart=-1,mentionSelectedIndex=0;
   function closeMentionMenu(){mentionMenu.classList.remove('open');mentionMenu.innerHTML='';mentionSelectedIndex=0}
   function syncMentionSelection(){const options=[...mentionMenu.querySelectorAll('[data-mention-index]')];options.forEach((option,index)=>option.classList.toggle('selected',index===mentionSelectedIndex));options[mentionSelectedIndex]?.scrollIntoView({block:'nearest'})}
@@ -101,36 +101,6 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function showNotifyModal(opts){return new Promise(resolve=>{notifyQueue.push({opts,resolve});drainNotify()})}
   function drainNotify(){if(notifyBusy||!notifyQueue.length)return;notifyBusy=true;const job=notifyQueue.shift(),opts=job.opts;notifyTitle.textContent=opts.title||'SleepyCode';notifyBody.textContent=opts.body||'';notifyModal.classList.toggle('danger',Boolean(opts.danger));notifyIcon.style.display=opts.icon===false?'none':'';const risk=opts.risk||'';notifyRisk.textContent=risk==='high'?'High risk':risk==='medium'?'Review required':risk==='low'?'Low risk':'';notifyRisk.className='notify-risk'+(risk?' '+risk:'');notifyRisk.style.display=risk?'':'none';notifyOk.textContent=opts.ok||'OK';notifyOk.classList.toggle('danger',Boolean(opts.danger));notifyCancel.textContent=opts.cancel||'Cancel';notifyCancel.style.display=opts.cancel?'':'none';notifySecondary.textContent=opts.secondary||'';notifySecondary.style.display=opts.secondary?'':'none';notifyBackdrop.classList.add('open');setTimeout(()=>{(opts.cancel!==false?notifyCancel:notifyOk).focus()},0);window.__resolveNotify=(choice)=>{notifyBusy=false;notifyBackdrop.classList.remove('open');job.resolve(choice);drainNotify()}}
   notifyOk.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('ok')};notifyCancel.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifySecondary.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('secondary')};notifyClose.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifyBackdrop.onclick=e=>{if(e.target===notifyBackdrop&&window.__resolveNotify)window.__resolveNotify('cancel')};document.addEventListener('keydown',e=>{if(e.key==='Escape'&&window.__resolveNotify)window.__resolveNotify('cancel')});
-  function handleCompactProgress(m){
-    const overlay=document.getElementById('compactionOverlay');
-    const status=document.getElementById('compactionStatus');
-    const cancelBtn=document.getElementById('compactionCancel');
-    if(!overlay||!status)return;
-    if(m.phase==='start'){
-      status.textContent='Compacting conversation…';
-      if(cancelBtn)cancelBtn.style.display='';
-      overlay.classList.add('visible');
-    }else if(m.phase==='summarizing'){
-      status.textContent='Summarizing conversation…';
-      overlay.classList.add('visible');
-    }else if(m.phase==='done'){
-      const freed=m.newContextTokens!==undefined?' · New context: '+fmt(m.newContextTokens||0)+' tokens':'';
-      status.textContent=(m.summary||'Compacted.')+freed;
-      if(cancelBtn)cancelBtn.style.display='none';
-      overlay.classList.add('visible');
-      setTimeout(()=>{overlay.classList.remove('visible');updateSessionStats()},2500);
-    }else if(m.phase==='cancelled'){
-      status.textContent='Compaction cancelled.';
-      if(cancelBtn)cancelBtn.style.display='none';
-      overlay.classList.add('visible');
-      setTimeout(()=>{overlay.classList.remove('visible')},1500);
-    }else if(m.phase==='error'){
-      status.textContent=m.summary||'Compaction failed.';
-      if(cancelBtn)cancelBtn.style.display='none';
-      overlay.classList.add('visible');
-      setTimeout(()=>{overlay.classList.remove('visible')},3000);
-    }
-  }
   const displayModel=s=>String(s||'').toLowerCase();
   const modelIdOf=m=>typeof m==='object'&&m?m.id:String(m||'');
   const modelNameOf=m=>typeof m==='object'&&m?m.name||m.id:String(m||'');
@@ -152,6 +122,43 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     return '';
   }
   function sessionMoney(n){if(n===undefined||n===null||!Number.isFinite(Number(n)))return'—';const v=Number(n);if(v>=1)return'$'+Number(v.toFixed(2));if(v>=0.01)return'$'+Number(v.toFixed(3));if(v===0)return'$0.0000';return'$'+Number(v.toPrecision(2))}
+  let compactionHideTimer=0;
+  function hideCompactionOverlay(){clearTimeout(compactionHideTimer);const overlay=document.getElementById('compactionOverlay');if(overlay)overlay.classList.remove('visible','done','error','cancelled')}
+  function handleCompactProgress(m){
+    if(m.conversationId&&activeConversationId&&m.conversationId!==activeConversationId)return;
+    const overlay=document.getElementById('compactionOverlay'),text=document.getElementById('compactionText'),cancel=document.getElementById('compactionCancel');
+    if(!overlay||!text)return;
+    clearTimeout(compactionHideTimer);
+    overlay.classList.remove('done','error','cancelled');
+    if(m.phase==='start'){
+      text.textContent=m.auto?'Auto-compacting conversation…':'Compacting conversation…';
+      overlay.classList.add('visible');
+      if(cancel){cancel.style.display='';cancel.disabled=false;cancel.textContent='Cancel'}
+    }else if(m.phase==='summarizing'){
+      text.textContent='Summarizing with compaction model…';
+      overlay.classList.add('visible');
+    }else if(m.phase==='done'){
+      overlay.classList.add('visible','done');
+      if(cancel)cancel.style.display='none';
+      const before=typeof m.beforeTokens==='number'?fmt(m.beforeTokens):'?';
+      const after=typeof m.afterTokens==='number'?fmt(m.afterTokens):'?';
+      text.textContent='Compacted: '+before+' → '+after+' tokens'+(m.contextWindow?' of '+fmt(m.contextWindow)+' window':'')+(m.itemCount?' · '+m.itemCount+' messages':'');
+      updateSessionStats();
+      compactionHideTimer=setTimeout(()=>overlay.classList.remove('visible','done'),2600);
+    }else if(m.phase==='cancelled'){
+      overlay.classList.add('visible','cancelled');
+      if(cancel)cancel.style.display='none';
+      text.textContent='Compaction cancelled.';
+      compactionHideTimer=setTimeout(()=>overlay.classList.remove('visible','cancelled'),1600);
+    }else if(m.phase==='error'){
+      overlay.classList.add('visible','error');
+      if(cancel)cancel.style.display='none';
+      text.textContent=m.text||'Compaction failed.';
+      compactionHideTimer=setTimeout(()=>overlay.classList.remove('visible','error'),4000);
+    }
+  }
+  const compactionCancelBtn=document.getElementById('compactionCancel');
+  if(compactionCancelBtn)compactionCancelBtn.onclick=()=>{compactionCancelBtn.disabled=true;compactionCancelBtn.textContent='Cancelling…';vscode.postMessage({type:'cancelCompact',conversationId:activeConversationId})};
   function sessionMetrics(){
     let inTok=0, outTok=0;
     for(const item of activeConversationItems){
@@ -162,6 +169,16 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     }
     const live=liveRuns.get(activeConversationId);
     if(live){inTok+=live.input||0;outTok+=live.output||0}
+    // Context occupancy mirrors estimateContextTokens in src/compaction-core.ts:
+    // fixed system overhead + chars/4 over the recent history window. Per-item
+    // token counters are lifetime spend (each run re-sends the whole history),
+    // so summing them must NOT be used as the context-window fill level.
+    let contextTokens=0;
+    if(activeConversationItems.length){
+      let chars=0;
+      for(const item of activeConversationItems.slice(-10))chars+=(item.text||'').length;
+      contextTokens=1500+Math.ceil(chars/4);
+    }
     let effectiveModel=selectedModel||'';
     let providerId=providerOfModel(effectiveModel);
     let ctxLimit=0;
@@ -208,7 +225,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
         cost={input:inputCost,output:outputCost,total:inputCost+outputCost};
       }
     }
-    return {inTok,outTok,total:inTok+outTok,ctxLimit,effectiveModel,providerId,cost};
+    return {inTok,outTok,total:inTok+outTok,contextTokens,ctxLimit,effectiveModel,providerId,cost};
   }
   function updateSessionStats(){
     const statContext=document.getElementById('statContext');
@@ -223,8 +240,10 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     const showStats=s.total>0||Boolean(s.effectiveModel)||Boolean(live)||(statGroup&&statGroup.classList.contains('active'));
     if(statGroup)statGroup.classList.toggle('show',showStats);
     const ctxLabel=s.ctxLimit>0?fmt(s.ctxLimit):'128k';
-    statContext.textContent=fmt(s.total)+' / '+ctxLabel;
+    statContext.textContent=fmt(s.contextTokens)+' / '+ctxLabel;
+    statContext.title='Estimated context window usage';
     statTokens.textContent='⬆ '+fmt(s.inTok)+'  ⬇ '+fmt(s.outTok);
+    statTokens.title='Session token spend (cumulative)';
     if(s.cost&&statCost){
       statCost.textContent=sessionMoney(s.cost.total);
       statCost.style.display='inline-flex';
@@ -239,13 +258,13 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     if(!sessionInfo)return;
     const s=sessionMetrics();
     const ctxLabel=s.ctxLimit>0?fmt(s.ctxLimit):'128k';
-    const pct=s.ctxLimit>0?Math.min(100,Math.round((s.total/s.ctxLimit)*100)):0;
+    const pct=s.ctxLimit>0?Math.min(100,Math.round((s.contextTokens/s.ctxLimit)*100)):0;
     const barColor=pct>=80?'danger':pct>=50?'warn':'safe';
     const modelLabel=s.effectiveModel||'No model selected';
     const costHtml=s.cost
       ?'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(sessionMoney(s.cost.total))+'</div></div><div class="session-info-cell"><div class="k">In / out cost</div><div class="v">'+esc(sessionMoney(s.cost.input))+' / '+esc(sessionMoney(s.cost.output))+'</div></div>'
       :'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(s.providerId==='sleepyai'?'Sign in for pricing':'Not available')+'</div></div>';
-    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Total tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>Context used</span><span class="v">'+esc(fmt(s.total))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
+    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Session tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>Context used (estimated)</span><span class="v">'+esc(fmt(s.contextTokens))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
     const close=sessionInfo.querySelector('#sessionInfoClose');
     if(close)close.onclick=()=>toggleSessionInfo(false);
   }
@@ -605,7 +624,6 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   document.getElementById('steerQueued').onclick=()=>vscode.postMessage({type:'steerQueued',conversationId:activeConversationId});document.getElementById('editQueued').onclick=()=>{const prompt=queuedByConversation.get(activeConversationId);if(!prompt)return;queuedByConversation.delete(activeConversationId);updateQueuedVisibility();vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});input.value=prompt;resize();input.focus()};document.getElementById('removeQueued').onclick=()=>vscode.postMessage({type:'removeQueued',conversationId:activeConversationId});
   document.getElementById('loginBannerBtn').onclick=()=>vscode.postMessage({type:'requestSettings'});
   const undoBtn=document.getElementById('undoButton'),redoBtn=document.getElementById('redoButton');if(undoBtn)undoBtn.onclick=async()=>{const choice=await showNotifyModal({title:'Undo last turn?',body:'This will remove the last assistant response and your last message. You can redo later.',ok:'Undo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'undoLastTurn',conversationId:activeConversationId})};if(redoBtn)redoBtn.onclick=async()=>{const choice=await showNotifyModal({title:'Redo last turn?',body:'This will restore the last undone turn.',ok:'Redo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'redoLastTurn',conversationId:activeConversationId})};
-  const compactionCancelBtn=document.getElementById('compactionCancel');if(compactionCancelBtn)compactionCancelBtn.onclick=()=>vscode.postMessage({type:'cancelCompact',conversationId:activeConversationId});
   const settingsView=document.getElementById('settingsView'),maxSteps=document.getElementById('maxSteps'),maxStepsUnlimited=document.getElementById('maxStepsUnlimited'),approvalMode=document.getElementById('approvalMode'),searxngUrl=document.getElementById('searxngUrl'),mcpServers=document.getElementById('mcpServers'),extraFreeModels=document.getElementById('extraFreeModels'),settingsResult=document.getElementById('settingsResult'),providerList=document.getElementById('providerList'),onlyDefaultModels=document.getElementById('onlyDefaultModels'),confirmDelete=document.getElementById('confirmDelete'),compactionModel=document.getElementById('compactionModel'),subagentModelExplorer=document.getElementById('subagentModelExplorer'),subagentModelReviewer=document.getElementById('subagentModelReviewer'),subagentModelWorker=document.getElementById('subagentModelWorker');let initialSetup=false,savedApiKeys={},providersList=[],activeProvider='',settingsSavedTimer=null,sleepyAccount=null,sleepyBusy=false,sleepyStatusText='';
   const resetSettingsBtn=document.getElementById('resetSettings');let resetClicks=0,autosaveTimer=null;
   function resetArmGuard(){resetClicks=0;resetSettingsBtn.textContent='Reset to defaults'}
@@ -841,7 +859,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'project':{const nextPath=m.path||'';if(projectIndicatorPath!==nextPath)projectIndexState={status:'idle',text:'Preparing local project index…',indexed:0,total:0,index:null};projectIndicatorFolder=m.name||'No folder open';projectIndicatorPath=nextPath;projectIndicator.classList.toggle('clickable',Boolean(projectIndicatorPath));renderProjectIndicator();renderContext();refreshEmpty();break}
     case'projectIndex':projectIndexState={status:m.status||'idle',text:m.text||'',indexed:m.indexed||0,total:m.total||0,index:m.index||null};renderContext();refreshEmpty();break;
     case'conversations':conversations=m.conversations||[];activeConversationId=m.activeId;conversationTitle.textContent=conversations.find(x=>x.id===activeConversationId)?.title||'New conversation';runningSet=new Set(conversations.filter(x=>x.running).map(x=>x.id));queuedByConversation=new Map(conversations.map(x=>[x.id,x.queued||null]));renderConversationMenu();refreshEmpty();updateQueuedVisibility();modelButton.disabled=isRunning();syncSendButton();ensureOptimisticActivity();updateSendMode();updateJump();break;
-    case'conversation':if(editMessageState&&editMessageState.conversationId!==m.id){editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();resize()}activeConversationId=m.id;activeConversationItems=m.items||[];if(m.model){selectedModel=m.model;modelButton.textContent=findModelName(m.model);modelButton.title=m.model;updateActiveModelLine()}if(m.agentId){selectedAgentId=m.agentId;syncAgentPill()}renderConversation(m.items);renderLive(m.id);updateQueuedVisibility();modelButton.disabled=isRunning();updateSendMode();updateJump();updateSessionStats();break;
+    case'conversation':if(editMessageState&&editMessageState.conversationId!==m.id){editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();resize()}if(m.id!==activeConversationId)hideCompactionOverlay();activeConversationId=m.id;activeConversationItems=m.items||[];if(m.model){selectedModel=m.model;modelButton.textContent=findModelName(m.model);modelButton.title=m.model;updateActiveModelLine()}if(m.agentId){selectedAgentId=m.agentId;syncAgentPill()}renderConversation(m.items);renderLive(m.id);updateQueuedVisibility();modelButton.disabled=isRunning();updateSendMode();updateJump();updateSessionStats();break;
     case'settings':openSettings(m);break;
     case'settingsResult':{if(m.ok&&(m.text==='Settings saved.'||String(m.text||'').startsWith('Signed in to SleepyAI'))){initialSetup=false;settingsView.classList.remove('onboarding');if(pendingProviderKeyId&&pendingProviderKey){vscode.postMessage({type:'saveProviderApiKey',providerId:pendingProviderKeyId,apiKey:pendingProviderKey});pendingProviderKeyId='';pendingProviderKey=''}}clearTimeout(settingsSavedTimer);if(m.ok){settingsResult.className='settings-result';void settingsResult.offsetWidth;settingsResult.textContent='Saved';settingsResult.className='settings-result ok';settingsSavedTimer=setTimeout(()=>{settingsResult.textContent='';settingsResult.className='settings-result'},1800)}else{settingsResult.textContent=m.text;settingsResult.className='settings-result bad'}break}
     case'apiKeyState':savedApiKeys[m.provider]=m.hasApiKey;renderProviderList();break;
@@ -872,8 +890,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'queuedPrompt':if(m.prompt)queuedByConversation.set(m.conversationId,m.prompt);else queuedByConversation.delete(m.conversationId);updateQueuedVisibility();break;
     case'state':if(m.running)runningSet.add(m.conversationId);else runningSet.delete(m.conversationId);modelButton.disabled=isRunning();updateSendMode();updateJump();break;
     case'notify':{const choice=await showNotifyModal({title:m.title,body:m.detail,ok:m.okLabel,cancel:m.cancelLabel,secondary:m.secondaryLabel,danger:Boolean(m.danger),risk:m.risk});vscode.postMessage({type:'notifyResponse',id:m.id,choice});break}
-    case'compactStatus':{if(!m.ok){const compacting=document.getElementById('compactionOverlay');if(compacting)compacting.classList.remove('visible');void showNotifyModal({title:'Compaction skipped',body:m.summary||'Done.',ok:'OK',cancel:false})}break}
-    case'compactProgress':{handleCompactProgress(m);break}
+    case'compactProgress':handleCompactProgress(m);break;
     case'done':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();finish(m.item)}break;
   }})
   vscode.postMessage({type:'ready'});vscode.postMessage({type:'requestMarketplaceInstalled'})

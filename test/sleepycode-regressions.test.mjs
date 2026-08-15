@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const agent = read('src/agent.ts');
 const runtime = read('src/webview/runtime.ts');
+const webviewHtml = read('src/webview.ts');
+const compactionCore = read('src/compaction-core.ts');
 const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
@@ -103,4 +105,51 @@ test('system instructions actively discover and load installed skills before use
   assert.match(agent, /Skill instructions are subordinate to SleepyCode safety/);
   assert.match(skills, /Installed skills inventory \(metadata only/);
   assert.match(skills, /Actively consider this list for every substantive request/);
+});
+
+test('context occupancy is estimated from transcript text, never from cumulative token counters', () => {
+  // The pre-fix "5.33M / 1M" bug summed per-item lifetime token counters and
+  // displayed the total as context-window usage. That pattern must not return.
+  assert.doesNotMatch(agent, /sessionMetricsForConversation/);
+  const sessionMetrics = runtime.match(/function sessionMetrics\(\)\{[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
+  assert.doesNotMatch(sessionMetrics, /contextTokens\s*=\s*inTok\+outTok/);
+  assert.match(sessionMetrics, /contextTokens=1500\+Math\.ceil\(chars\/4\)/);
+  assert.match(runtime, /statContext\.textContent=fmt\(s\.contextTokens\)/);
+  assert.match(compactionCore, /export function estimateContextTokens/);
+});
+
+test('auto-compaction runs after the run leaves this.runs, with a cooldown', () => {
+  const finallyBlock = agent.match(/\} finally \{\s*await mcpConnection\?\.close\(\);[\s\S]*?this\.postQueued/)?.[0] ?? '';
+  assert.ok(finallyBlock, 'run() finally block found');
+  assert.match(finallyBlock, /this\.runs\.delete\(conversationId\);[\s\S]*?maybeAutoCompact\(conversation/);
+  assert.match(agent, /lastAutoCompactAt\.get\(conversation\.id\) \?\? 0\) < 120_000/);
+  assert.doesNotMatch(agent, /if \(providerConfig\.id === 'sleepyai'\) \{\s*const session/);
+});
+
+test('compaction progress replaces the modal protocol and supports cancellation', () => {
+  assert.doesNotMatch(agent + runtime + types, /compactStatus/);
+  assert.match(types, /type: 'compactProgress'/);
+  assert.match(types, /type: 'cancelCompact'/);
+  assert.match(runtime, /case'compactProgress':handleCompactProgress\(m\)/);
+  assert.match(runtime, /vscode\.postMessage\(\{type:'cancelCompact'/);
+  assert.match(agent, /compactionControllers\.get\(compactTargetId\)\?\.abort\(\)/);
+  assert.match(agent, /abortSignal: signal/);
+  assert.match(agent, /if \(signal\.aborted\) throw error; \/\/ cancellation must not fall through/);
+  assert.match(webviewHtml, /id="compactionOverlay"/);
+  assert.match(styles, /\.compaction-overlay\{/);
+});
+
+test('summary items record only the compaction call usage, not pre-compaction totals', () => {
+  const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(summarize, 'summarizeConversation found');
+  assert.doesNotMatch(summarize, /items\.reduce\(\(sum, item\)/);
+  assert.match(summarize, /usage = await result\.usage/);
+  assert.match(summarize, /if \(usage\?\.inputTokens\) summary\.inputTokens = usage\.inputTokens/);
+  assert.match(summarize, /compactionPromptInput\(items\)/);
+});
+
+test('/compact fires immediately and only as an exact command', () => {
+  assert.match(runtime, /case'\/compact':handleCompactProgress\(\{conversationId:activeConversationId,phase:'start'\}\)/);
+  assert.match(runtime, /if\(trimmed\.toLowerCase\(\)===first&&runDirectSlash\(first\)\)/);
 });

@@ -12,6 +12,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, 
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
+import { compactionPromptInput, estimateContextTokens, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -115,6 +116,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private reviewTempDirs = new Set<string>();
   private subagentSequence = 0;
   private compactionControllers = new Map<string, AbortController>();
+  private lastAutoCompactAt = new Map<string, number>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
@@ -608,7 +610,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'requestSettings') return void this.showSettings();
     if (message.type === 'compact') return this.compactConversation(message.conversationId);
-    if (message.type === 'cancelCompact') return this.cancelCompaction(message.conversationId);
+    if (message.type === 'cancelCompact') {
+      const compactProject = this.activeProject();
+      const compactTargetId = message.conversationId ?? compactProject?.activeConversationId ?? '';
+      this.compactionControllers.get(compactTargetId)?.abort();
+      return;
+    }
     if (message.type === 'newConversation') return this.newConversation();
     if (message.type === 'openConversation') {
       const project = this.activeProject();
@@ -1942,15 +1949,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             continuationCount++;
             streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
           } while (continuationCount < 2 && !run.controller.signal.aborted);
-          if (providerConfig.id === 'sleepyai') {
-            const session = this.sessionMetricsForConversation(conversation);
-            session.inputTokens += runInput;
-            session.outputTokens += runOutput;
-            const effectiveModelInfo = this.getEffectiveModelInfo(providerConfig.id, configuredModel);
-            if (this.shouldAutoCompact(session, effectiveModelInfo)) {
-              void this.compactConversation(conversationId);
-            }
-          }
           this.sendUsage();
           const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
           if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
@@ -2034,6 +2032,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.runs.delete(conversationId);
       this.post({ type: 'state', conversationId, running: false, label: '' });
       this.syncConversations(false);
+      // Auto-compaction must run after this.runs.delete above: compactConversation
+      // refuses to compact while a run is active for the conversation.
+      if (providerConfig) this.maybeAutoCompact(conversation, providerConfig.id, this.selectionFor(conversation).model);
       const own = this.queue.find(entry => entry.conversationId === conversationId);
       const next = own ?? this.queue[0];
       if (next && this.runs.size < MAX_CONCURRENT_RUNS) {
@@ -2054,87 +2055,103 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return { project, conversation, item };
   }
 
-  private cancelCompaction(conversationId?: string): void {
-    const project = this.activeProject();
-    const targetId = conversationId ?? project?.activeConversationId ?? '';
-    const controller = this.compactionControllers.get(targetId);
-    if (controller) {
-      controller.abort();
-      this.compactionControllers.delete(targetId);
-    }
-    this.post({ type: 'compactProgress', conversationId: targetId, phase: 'cancelled' });
-  }
-
-  private async compactConversation(conversationId?: string): Promise<void> {
+  /**
+   * Compacts a conversation into a summary + carried tail. Emits compactProgress
+   * phases (start → summarizing → done | cancelled | error) so the webview can
+   * show live progress and offer cancellation. Conversation items and title are
+   * only mutated after a successful summary; failures leave state untouched.
+   */
+  private async compactConversation(conversationId?: string, options?: { auto?: boolean }): Promise<void> {
     const project = this.activeProject();
     if (!project) return;
     const targetId = conversationId ?? project.activeConversationId;
     const conversation = project.conversations.find(entry => entry.id === targetId);
-    if (!conversation || conversation.items.length < 4) {
-      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Nothing to compact yet.' });
+    const progress = (phase: 'start' | 'summarizing' | 'done' | 'cancelled' | 'error', extra: { auto?: boolean; text?: string; beforeTokens?: number; afterTokens?: number; contextWindow?: number; itemCount?: number } = {}): void => {
+      this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase, ...extra });
+    };
+    if (!conversation) return; // deleted mid-flight — nothing to report
+    if (conversation.items.length < 4) {
+      progress('error', { text: 'Nothing to compact yet.', auto: options?.auto === true });
       return;
     }
     if (this.runs.has(targetId ?? '')) {
-      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Wait until the current run finishes.' });
+      progress('error', { text: 'Wait until the current run finishes.', auto: options?.auto === true });
       return;
     }
     if (this.compactionControllers.has(targetId ?? '')) return; // already compacting
     const controller = new AbortController();
     this.compactionControllers.set(targetId ?? '', controller);
-    this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'start' });
-    const lastAssistant = [...conversation.items].reverse().find(item => item.role === 'assistant');
-    const preTokens = this.sessionMetricsForConversation(conversation);
-    let compacted: TranscriptItem[] | undefined;
+    const beforeTokens = estimateContextTokens(conversation.items);
+    progress('start', { auto: options?.auto === true });
     try {
-      this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'summarizing' });
-      compacted = await this.summarizeConversation(conversation.items, this.selectionFor(conversation), controller.signal);
-    } catch (error) {
-      if (controller.signal.aborted) {
-        this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'cancelled' });
-        return;
+      progress('summarizing', { auto: options?.auto === true });
+      const selection = this.selectionFor(conversation);
+      const summarized = await this.summarizeConversation(conversation.items, selection, controller.signal);
+      conversation.items = summarized.items;
+      conversation.updatedAt = Date.now();
+      project.updatedAt = Date.now();
+      await this.persistProjects();
+      this.syncConversations();
+      if (summarized.usage && (summarized.usage.inputTokens || summarized.usage.outputTokens)) {
+        recordUsage(this.context, {
+          model: summarized.modelId,
+          provider: summarized.providerId,
+          inputTokens: summarized.usage.inputTokens ?? 0,
+          outputTokens: summarized.usage.outputTokens ?? 0,
+        });
+        this.sendUsage();
       }
+      const afterTokens = estimateContextTokens(conversation.items);
+      const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
+      progress('done', {
+        auto: options?.auto === true,
+        beforeTokens,
+        afterTokens,
+        contextWindow: modelInfo.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        itemCount: conversation.items.length,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) progress('cancelled', { auto: options?.auto === true });
+      else progress('error', { text: errorMessage(error), auto: options?.auto === true });
+    } finally {
       this.compactionControllers.delete(targetId ?? '');
-      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: `Compaction failed: ${errorMessage(error)}` });
-      return;
     }
-    if (!compacted) {
-      this.compactionControllers.delete(targetId ?? '');
-      this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: false, summary: 'Compaction produced no output.' });
-      return;
-    }
-    conversation.items = compacted;
-    if (lastAssistant) {
-      conversation.title = lastAssistant.text?.trim().slice(0, 80) ?? conversation.title;
-    }
-    project.updatedAt = Date.now();
-    conversation.updatedAt = Date.now();
-    await this.persistProjects();
-    this.syncConversations();
-    const inputTokens = conversation.items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
-    const outputTokens = conversation.items.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
-    const newContextTokens = inputTokens + outputTokens;
-    const selection = this.selectionFor(conversation);
-    const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
-    const contextWindow = modelInfo.contextWindow;
-    this.compactionControllers.delete(targetId ?? '');
-    this.post({ type: 'compactStatus', conversationId: targetId ?? '', ok: true, summary: `Compacted to ${conversation.items.length} messages.`, inputTokens, outputTokens });
-    this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase: 'done', summary: `Compacted to ${conversation.items.length} messages. Freed ${Math.max(0, preTokens.inputTokens + preTokens.outputTokens - newContextTokens).toLocaleString()} tokens.`, inputTokens, outputTokens, newContextTokens, contextWindow });
   }
 
-  private async summarizeConversation(items: TranscriptItem[], selection: { model: string; provider: string; agentId: string }, signal?: AbortSignal): Promise<TranscriptItem[]> {
-    const text = items
-      .map(item => {
-        const role = item.role === 'user' ? 'User' : 'Assistant';
-        // Skip reasoning/thinking tokens: use only the main text content, not work[].kind === 'reasoning'
-        const reasoningText = (item.work ?? []).filter(w => w.kind === 'reasoning').map(w => w.text).join('\n').trim();
-        let content = item.text.trim().replace(/\s+/g, ' ').slice(0, 4000);
-        // Exclude reasoning text from compaction input — think tokens should not be summarized
-        if (reasoningText && content.includes(reasoningText.slice(0, 200))) {
-          content = content.replace(reasoningText.slice(0, 200), '').trim();
-        }
-        return `[${role}] ${content}`;
-      })
-      .join('\n\n');
+  /**
+   * Auto-compaction entry point, invoked from the run() finally block — i.e. only
+   * after the run has been removed from this.runs, otherwise compactConversation's
+   * active-run guard would always reject it. Cooldown prevents pathological loops
+   * when a conversation stays above the threshold even after compaction.
+   */
+  private maybeAutoCompact(conversation: Conversation, providerId: string, model: string): void {
+    if (conversation.items.length < 8) return;
+    // A queued follow-up for this conversation is about to start; compacting now
+    // would swap the transcript while that run reads it.
+    if (this.queue.some(entry => entry.conversationId === conversation.id)) return;
+    const contextTokens = estimateContextTokens(conversation.items);
+    const modelInfo = this.getEffectiveModelInfo(providerId, model);
+    if (!shouldAutoCompact(contextTokens, modelInfo.contextWindow)) return;
+    const now = Date.now();
+    if (now - (this.lastAutoCompactAt.get(conversation.id) ?? 0) < 120_000) return;
+    this.lastAutoCompactAt.set(conversation.id, now);
+    void this.compactConversation(conversation.id, { auto: true });
+  }
+
+  /**
+   * Summarizes the transcript with the cheapest available model. Reasoning/"think"
+   * traces never reach the summarizer (only visible message text is included).
+   * The summary item records the compaction call's OWN token usage — copying the
+   * original items' cumulative counters kept the session total inflated and
+   * re-triggered auto-compaction forever. Carried items are sanitized copies:
+   * stale per-run token counters and reasoning work are stripped.
+   */
+  private async summarizeConversation(
+    items: TranscriptItem[],
+    selection: { model: string; provider: string; agentId: string },
+    signal: AbortSignal,
+  ): Promise<{ items: TranscriptItem[]; usage?: { inputTokens?: number; outputTokens?: number }; modelId: string; providerId: string }> {
+    const text = compactionPromptInput(items);
     const prompt = [
       'Summarize the conversation below into a compact continuation context.',
       'Preserve: active goal, unresolved blockers, open todos, key decisions, and latest state.',
@@ -2144,6 +2161,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       text,
     ].join('\n');
     let summaryText = '';
+    let usage: { inputTokens?: number; outputTokens?: number } | undefined;
+    let modelId = '';
+    let providerId = '';
     const candidates = this.compactionModelCandidates(selection);
     if (candidates.length) {
       const providers = this.getProviders();
@@ -2162,34 +2182,50 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           },
         });
         // Cheapest model first; on failure, fall through to the next cheapest.
-        for (const modelId of candidates) {
-          if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
+        for (const candidateId of candidates) {
+          if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
           try {
-            const result = await generateText({ model: provider(modelId), prompt, maxOutputTokens: 1024, ...(signal ? { abortSignal: signal } : {}) });
-            const text = result.text.trim();
-            if (text) { summaryText = text; break; }
+            const result = await generateText({ model: provider(candidateId), prompt, maxOutputTokens: 1024, abortSignal: signal });
+            const candidateText = result.text.trim();
+            if (candidateText) {
+              summaryText = candidateText;
+              modelId = candidateId;
+              providerId = providerConfig.id;
+              usage = await result.usage;
+              break;
+            }
           } catch (error) {
-            if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+            if (signal.aborted) throw error; // cancellation must not fall through to the next model
             // Try the next cheapest available model.
           }
         }
       }
     }
-    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
     if (!summaryText) summaryText = `Compacted context.\nOriginal message count: ${items.length}.`;
     const summary = createTranscriptItem('assistant', summaryText.trim() || 'Compacted context.');
-    const inputTokens = items.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0);
-    const outputTokens = items.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0);
-    if (inputTokens) summary.inputTokens = inputTokens;
-    if (outputTokens) summary.outputTokens = outputTokens;
-    const lastUser = [...items].reverse().find(item => item.role === 'user');
-    const lastAssistant = [...items].reverse().find(item => item.role === 'assistant');
-    return [
-      lastUser ?? createTranscriptItem('user', 'Continue the previous conversation.'),
-      summary,
-      createTranscriptItem('user', 'Continue from the compacted context above.'),
-      ...(lastAssistant && lastAssistant !== lastUser ? [lastAssistant] : []),
-    ];
+    if (usage?.inputTokens) summary.inputTokens = usage.inputTokens;
+    if (usage?.outputTokens) summary.outputTokens = usage.outputTokens;
+    const { lastUser, lastAssistant } = selectCarriedItems(items);
+    const carried = [lastUser, lastAssistant]
+      .filter((item): item is TranscriptItem => Boolean(item))
+      .map(item => {
+        const copy = createTranscriptItem(item.role, item.text, undefined, item.gitTree);
+        copy.timestamp = item.timestamp;
+        if (item.attachments?.length) copy.attachments = item.attachments;
+        if (item.changes?.length) copy.changes = item.changes;
+        if (item.commitHash) {
+          copy.commitHash = item.commitHash;
+          copy.commitMessage = item.commitMessage;
+        }
+        return copy;
+      });
+    return {
+      items: [summary, ...carried, createTranscriptItem('user', 'Continue from the compacted context above.')],
+      usage,
+      modelId,
+      providerId,
+    };
   }
 
   /**
@@ -2731,16 +2767,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private sessionMetricsForConversation(conversation: Conversation): { inputTokens: number; outputTokens: number } {
-    let inputTokens = 0;
-    let outputTokens = 0;
-    for (const item of conversation.items) {
-      inputTokens += item.inputTokens ?? 0;
-      outputTokens += item.outputTokens ?? 0;
-    }
-    return { inputTokens, outputTokens };
-  }
-
   private getEffectiveModelInfo(providerId: string, configuredModel: string): { contextWindow?: number; maxOutputLimit?: number } {
     const providers = this.getProviders();
     const providerConfig = getProvider(providers, providerId) ?? providers[0];
@@ -2758,14 +2784,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return {};
   }
 
-  private shouldAutoCompact(session: { inputTokens: number; outputTokens: number }, modelInfo: { contextWindow?: number; maxOutputLimit?: number }): boolean {
-    const contextWindow = modelInfo.contextWindow ?? 128_000;
-    const totalTokens = session.inputTokens + session.outputTokens;
-    if (totalTokens <= 0 || contextWindow <= 0) return false;
-    const usageRatio = totalTokens / contextWindow;
-    if (usageRatio < 0.75) return false;
-    return true;
-  }
+  // Auto-compaction threshold logic lives in compaction-core.ts (shouldAutoCompact)
+  // so it can be unit-tested and shared with the webview's occupancy estimate.
 
   private async projectContextBlock(_root: vscode.Uri, query: string): Promise<string> {
     const index = await this.ensureProjectIntelligence(false);
