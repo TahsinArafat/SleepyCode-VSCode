@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { COMPACTION_OUTPUT_BUDGET } from '../src/compaction-core.ts';
 
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const agent = read('src/agent.ts');
@@ -134,7 +135,10 @@ test('compaction progress replaces the modal protocol and supports cancellation'
   assert.match(runtime, /case'compactProgress':handleCompactProgress\(m\)/);
   assert.match(runtime, /vscode\.postMessage\(\{type:'cancelCompact'/);
   assert.match(agent, /compactionControllers\.get\(compactTargetId\)\?\.abort\(\)/);
-  assert.match(agent, /abortSignal: signal/);
+  // The raw signal is wrapped with a per-attempt timeout; user cancellation must
+  // still be detected against the ORIGINAL signal, never fail over to the next model.
+  assert.match(agent, /AbortSignal\.any\(\[signal, AbortSignal\.timeout\(/);
+  assert.match(agent, /abortSignal: attemptSignal/);
   assert.match(agent, /if \(signal\.aborted\) throw error; \/\/ cancellation must not fall through/);
   assert.match(webviewHtml, /id="compactionOverlay"/);
   assert.match(styles, /\.compaction-overlay\{/);
@@ -144,9 +148,39 @@ test('summary items record only the compaction call usage, not pre-compaction to
   const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
   assert.ok(summarize, 'summarizeConversation found');
   assert.doesNotMatch(summarize, /items\.reduce\(\(sum, item\)/);
-  assert.match(summarize, /usage = await result\.usage/);
+  assert.match(summarize, /usage = attemptUsage/);
   assert.match(summarize, /if \(usage\?\.inputTokens\) summary\.inputTokens = usage\.inputTokens/);
   assert.match(summarize, /compactionPromptInput\(items\)/);
+});
+
+test('compaction candidates get real output headroom, not the reasoning-starving 1024 cap', () => {
+  const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(summarize, 'summarizeConversation found');
+  // Reasoning models spend output tokens on thinking before text: the old fixed
+  // maxOutputTokens: 1024 made every reasoning model return EMPTY text while the
+  // provider dashboard showed a valid completion, so compaction hopped model
+  // after model. The budget must come from the shared helper with headroom.
+  assert.doesNotMatch(summarize, /maxOutputTokens:\s*1024/);
+  assert.match(summarize, /maxOutputTokens:\s*budget/);
+  assert.match(summarize, /compactionOutputBudget\(/);
+  assert.ok(COMPACTION_OUTPUT_BUDGET >= 4096, 'budget leaves room for reasoning + summary');
+});
+
+test('compaction fails loudly with per-candidate reasons instead of a placeholder summary', () => {
+  const summarize = agent.match(/private async summarizeConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(summarize, 'summarizeConversation found');
+  // The placeholder fallback ("Compacted context. Original message count: N.")
+  // replaced the whole transcript with garbage and reported success.
+  assert.doesNotMatch(summarize, /Original message count/);
+  assert.match(summarize, /failures\.push/);
+  assert.match(summarize, /No model could summarize the conversation/);
+  // Every completed attempt (even a rejected empty one) burns tokens: record it.
+  assert.match(summarize, /recordUsage\(this\.context/);
+  // A hung candidate must fail over, and usage must not be double-recorded by the caller.
+  assert.match(summarize, /AbortSignal\.timeout/);
+  const compact = agent.match(/private async compactConversation\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(compact, 'compactConversation found');
+  assert.doesNotMatch(compact, /recordUsage\(/);
 });
 
 test('/compact fires immediately and only as an exact command', () => {

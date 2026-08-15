@@ -34,6 +34,27 @@ export const COMPACTION_HISTORY_ITEMS = 10;
 /** Fraction of the context window at which auto-compaction kicks in. */
 export const AUTO_COMPACT_RATIO = 0.75;
 
+/**
+ * Default output-token budget for the summarizer call. Reasoning models spend
+ * output tokens on thinking BEFORE writing text: with a small budget (the old
+ * 1024) they finish with reasoning-only output and result.text comes back
+ * empty — the provider dashboard shows a "valid" completion while the
+ * extension sees nothing and hops to the next model. 8192 leaves room for
+ * thinking plus the requested ~1200-word summary (~1600 tokens).
+ */
+export const COMPACTION_OUTPUT_BUDGET = 8_192;
+
+/**
+ * Output budget for a compaction call with a specific model: the default
+ * budget, clamped down to the provider's advertised maxOutputLimit when one
+ * is known (sending more than the limit makes strict providers reject the
+ * request, which again looks like a model that "does not answer").
+ */
+export function compactionOutputBudget(maxOutputLimit?: number | null): number {
+  if (maxOutputLimit && maxOutputLimit > 0) return Math.min(COMPACTION_OUTPUT_BUDGET, Math.floor(maxOutputLimit));
+  return COMPACTION_OUTPUT_BUDGET;
+}
+
 /** Assumed context window when the provider does not report one. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 

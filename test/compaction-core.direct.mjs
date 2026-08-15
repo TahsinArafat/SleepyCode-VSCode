@@ -4,8 +4,10 @@ import {
   AUTO_COMPACT_RATIO,
   CHARS_PER_TOKEN,
   COMPACTION_HISTORY_ITEMS,
+  COMPACTION_OUTPUT_BUDGET,
   CONTEXT_SYSTEM_OVERHEAD_TOKENS,
   DEFAULT_CONTEXT_WINDOW,
+  compactionOutputBudget,
   compactionPromptInput,
   estimateContextTokens,
   selectCarriedItems,
@@ -109,4 +111,21 @@ test('selectCarriedItems tolerates empty and user-only transcripts', () => {
   const { lastUser, lastAssistant } = selectCarriedItems([user('only')]);
   assert.equal(lastUser?.text, 'only');
   assert.equal(lastAssistant, undefined);
+});
+
+test('compactionOutputBudget leaves headroom for reasoning models by default', () => {
+  // Regression: a 1024 cap made reasoning models return empty text (dashboard
+  // shows a "valid" completion; the extension saw nothing and hopped models).
+  assert.ok(COMPACTION_OUTPUT_BUDGET >= 4096);
+  assert.equal(compactionOutputBudget(undefined), COMPACTION_OUTPUT_BUDGET);
+  assert.equal(compactionOutputBudget(null), COMPACTION_OUTPUT_BUDGET);
+  assert.equal(compactionOutputBudget(0), COMPACTION_OUTPUT_BUDGET);
+});
+
+test('compactionOutputBudget clamps to the provider advertised limit', () => {
+  // Exceeding a provider's maxOutputLimit makes strict providers 400 the request,
+  // which also looks like "the model does not answer".
+  assert.equal(compactionOutputBudget(2048), 2048);
+  assert.equal(compactionOutputBudget(1_000_000), COMPACTION_OUTPUT_BUDGET);
+  assert.equal(compactionOutputBudget(COMPACTION_OUTPUT_BUDGET), COMPACTION_OUTPUT_BUDGET);
 });

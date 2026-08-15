@@ -12,7 +12,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, 
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
-import { compactionPromptInput, estimateContextTokens, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { compactionOutputBudget, compactionPromptInput, estimateContextTokens, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -2092,15 +2092,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       project.updatedAt = Date.now();
       await this.persistProjects();
       this.syncConversations();
-      if (summarized.usage && (summarized.usage.inputTokens || summarized.usage.outputTokens)) {
-        recordUsage(this.context, {
-          model: summarized.modelId,
-          provider: summarized.providerId,
-          inputTokens: summarized.usage.inputTokens ?? 0,
-          outputTokens: summarized.usage.outputTokens ?? 0,
-        });
-        this.sendUsage();
-      }
+      // Note: usage was already recorded per attempt inside summarizeConversation
+      // (including rejected empty responses — reasoning burn is real spend).
       const afterTokens = estimateContextTokens(conversation.items);
       const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
       progress('done', {
@@ -2145,6 +2138,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * original items' cumulative counters kept the session total inflated and
    * re-triggered auto-compaction forever. Carried items are sanitized copies:
    * stale per-run token counters and reasoning work are stripped.
+   *
+   * Candidate-loop invariants (regression: "extension hops model after model
+   * while the dashboard shows valid responses"):
+   * - Reasoning models spend output tokens on thinking BEFORE text, so the
+   *   output budget must leave headroom — a 1024 cap returned empty text for
+   *   every reasoning model and each attempt looked successful server-side.
+   * - Every completed attempt's usage is recorded immediately (rejected empty
+   *   responses still burn real tokens; that spend must not stay invisible).
+   * - Failure reasons are collected per candidate and thrown when no model
+   *   produces text. A placeholder summary would silently destroy the
+   *   transcript — compaction must fail loudly and leave items untouched.
    */
   private async summarizeConversation(
     items: TranscriptItem[],
@@ -2164,6 +2168,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let usage: { inputTokens?: number; outputTokens?: number } | undefined;
     let modelId = '';
     let providerId = '';
+    const failures: string[] = [];
     const candidates = this.compactionModelCandidates(selection);
     if (candidates.length) {
       const providers = this.getProviders();
@@ -2184,25 +2189,59 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Cheapest model first; on failure, fall through to the next cheapest.
         for (const candidateId of candidates) {
           if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
+          // Reasoning models spend output tokens on thinking before writing any
+          // text: a small cap returns an EMPTY response even though the provider
+          // dashboard shows a valid completion. Give the summarizer real headroom,
+          // clamped to the model's advertised output limit when one is known.
+          const budget = compactionOutputBudget(this.getEffectiveModelInfo(providerConfig.id, candidateId).maxOutputLimit);
+          // A hung candidate must not stall compaction: fail over after 3 minutes.
+          // The original signal is still checked in catch, so user cancellation
+          // never falls through to the next model.
+          const attemptSignal = AbortSignal.any([signal, AbortSignal.timeout(180_000)]);
           try {
-            const result = await generateText({ model: provider(candidateId), prompt, maxOutputTokens: 1024, abortSignal: signal });
+            const result = await generateText({ model: provider(candidateId), prompt, maxOutputTokens: budget, maxRetries: 1, abortSignal: attemptSignal });
+            // Every completed call costs tokens (reasoning included) — record it even
+            // when the response is rejected, otherwise reasoning burn stays invisible.
+            const attemptUsage = result.usage;
+            if (attemptUsage.inputTokens || attemptUsage.outputTokens) {
+              recordUsage(this.context, {
+                model: candidateId,
+                provider: providerConfig.id,
+                inputTokens: attemptUsage.inputTokens ?? 0,
+                outputTokens: attemptUsage.outputTokens ?? 0,
+              });
+              this.sendUsage();
+            }
             const candidateText = result.text.trim();
             if (candidateText) {
               summaryText = candidateText;
               modelId = candidateId;
               providerId = providerConfig.id;
-              usage = await result.usage;
+              usage = attemptUsage;
               break;
             }
+            // Empty text almost always means the model spent the whole output
+            // budget on reasoning (finishReason 'length') — not a usable summary.
+            const reasoningChars = (result.finalStep.reasoningText ?? '').length;
+            const warning = (result.warnings ?? []).map(entry => ('feature' in entry ? `${entry.feature}${entry.details ? `: ${entry.details}` : ''}` : entry.type)).find(Boolean);
+            failures.push(`${candidateId}: empty response (finish: ${result.finishReason || 'unknown'}${reasoningChars ? `, ${reasoningChars} reasoning chars` : ''}${warning ? `, ${warning}` : ''})`);
           } catch (error) {
             if (signal.aborted) throw error; // cancellation must not fall through to the next model
-            // Try the next cheapest available model.
+            failures.push(`${candidateId}: ${errorMessage(error).slice(0, 140)}`);
           }
         }
       }
     }
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Aborted.');
-    if (!summaryText) summaryText = `Compacted context.\nOriginal message count: ${items.length}.`;
+    // NEVER substitute a placeholder summary: replacing the transcript with
+    // "Compacted context." silently destroys the conversation it was meant to
+    // preserve. Fail loudly instead — compactConversation leaves items untouched
+    // when this throws.
+    if (!summaryText) {
+      const detail = failures.slice(-3).join(' · ');
+      const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+      throw new Error(detail ? `No model could summarize the conversation: ${detail}${more}` : 'No compaction model is available — pick a model in Settings.');
+    }
     const summary = createTranscriptItem('assistant', summaryText.trim() || 'Compacted context.');
     if (usage?.inputTokens) summary.inputTokens = usage.inputTokens;
     if (usage?.outputTokens) summary.outputTokens = usage.outputTokens;
