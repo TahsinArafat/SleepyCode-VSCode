@@ -8,6 +8,7 @@ const agent = read('src/agent.ts');
 const runtime = read('src/webview/runtime.ts');
 const webviewHtml = read('src/webview.ts');
 const compactionCore = read('src/compaction-core.ts');
+const util = read('src/util.ts');
 const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
@@ -220,4 +221,39 @@ test('context window updates live from the latest step prompt_tokens, not only a
   assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
   assert.match(sessionMetrics, /live\.contextTokens/);
   assert.match(sessionMetrics, /contextTokens=live\.contextTokens;measured=true/);
+});
+
+test('compaction emits a divider marker, not a synthetic continuation message', () => {
+  // The old "Continue from the compacted context above." user message was sent to
+  // the model as a fake turn and cluttered the transcript. It must be gone, replaced
+  // by an empty-text divider marker that is never sent to the model.
+  assert.doesNotMatch(agent, /Continue from the compacted context above\./);
+  assert.match(agent, /createTranscriptItem\('user', '', 'divider'\)/);
+  assert.match(types, /kind\?: 'error' \| 'divider'/);
+  assert.match(util, /kind\?: 'error' \| 'divider'/);
+});
+
+test('divider markers are excluded from the run prompt and summarizer input', () => {
+  assert.match(agent, /\.filter\(item => item\.kind !== 'divider'\)/);
+  assert.match(compactionCore, /\.filter\(item => item\.kind !== 'divider'\)/);
+  assert.match(compactionCore, /if \(item\.kind === 'divider'\) continue/);
+});
+
+test('compaction is undoable and redoable via divider boundary snapshots', () => {
+  assert.match(agent, /compactionUndoStacks = new Map/);
+  assert.match(agent, /compactionRedoStacks = new Map/);
+  assert.match(agent, /private undoCompaction\(conversation/);
+  assert.match(agent, /private redoCompaction\(conversation/);
+  assert.match(agent, /before: before\.slice\(\), after: summarized\.items\.slice\(\)/);
+  assert.match(agent, /kind === 'divider'\) \{\s*if \(!this\.undoCompaction\(conversation\)\) return;/s);
+  assert.match(agent, /if \(this\.redoCompaction\(conversation\)\)/);
+  assert.match(agent, /compactionUndoable, compactionRedoable/);
+});
+
+test('webview renders the compaction divider and adapts undo/redo copy', () => {
+  assert.match(runtime, /item\.kind==='divider'\)\{messages\.appendChild\(dividerRow\(\)\)/);
+  assert.match(runtime, /compactionUndoable\?\{title:'Undo compaction\?'/);
+  assert.match(runtime, /compactionRedoable\?\{title:'Redo compaction\?'/);
+  assert.match(runtime, /compactionUndoable=Boolean\(m\.compactionUndoable\)/);
+  assert.match(styles, /\.compaction-divider\{/);
 });

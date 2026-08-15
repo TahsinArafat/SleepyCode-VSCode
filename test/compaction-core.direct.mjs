@@ -44,10 +44,10 @@ test('compaction shrinks the context estimate instead of preserving it (5.33M/1M
     outputTokens: 30_000,
   }));
   const before = estimateContextTokens(longTranscript);
-  // The compacted transcript: summary + carried last exchange + continue marker.
+  // The compacted transcript: summary + carried last exchange + divider marker.
   const compacted = [
     assistant('Summary of prior work and current state.', { inputTokens: 12_000, outputTokens: 600 }),
-    user('Continue from the compacted context above.'),
+    user('', { kind: 'divider' }),
   ];
   const after = estimateContextTokens(compacted);
   assert.ok(before > 100_000, `expected large pre-compaction estimate, got ${before}`);
@@ -112,6 +112,31 @@ test('selectCarriedItems tolerates empty and user-only transcripts', () => {
   const { lastUser, lastAssistant } = selectCarriedItems([user('only')]);
   assert.equal(lastUser?.text, 'only');
   assert.equal(lastAssistant, undefined);
+});
+
+test('compactionPromptInput skips divider markers', () => {
+  const input = compactionPromptInput([
+    user('hello'),
+    user('', { kind: 'divider' }),
+    assistant('world'),
+  ]);
+  assert.equal(input, '[User] hello\n\n[Assistant] world');
+});
+
+test('selectCarriedItems skips divider markers as carried content', () => {
+  const items = [
+    user('first'),
+    assistant('reply'),
+    user('', { kind: 'divider' }),
+  ];
+  const { lastUser, lastAssistant } = selectCarriedItems(items);
+  assert.equal(lastUser?.text, 'first');
+  assert.equal(lastAssistant?.text, 'reply');
+});
+
+test('estimateContextTokens ignores divider markers', () => {
+  const withDivider = [user('x'.repeat(400)), user('', { kind: 'divider' })];
+  assert.equal(estimateContextTokens(withDivider), CONTEXT_SYSTEM_OVERHEAD_TOKENS + 400 / CHARS_PER_TOKEN);
 });
 
 test('compactionOutputBudget leaves headroom for reasoning models by default', () => {

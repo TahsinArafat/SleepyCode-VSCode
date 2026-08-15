@@ -12,7 +12,7 @@
 export type CompactableItem = {
   role: 'user' | 'assistant';
   text?: string;
-  kind?: 'error';
+  kind?: 'error' | 'divider';
   contextTokens?: number;
 };
 
@@ -67,7 +67,10 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export function estimateContextTokens(items: readonly CompactableItem[]): number {
   const recent = items.slice(-COMPACTION_HISTORY_ITEMS);
   let chars = 0;
-  for (const item of recent) chars += (item.text ?? '').length;
+  for (const item of recent) {
+    if (item.kind === 'divider') continue; // markers carry no model-visible text
+    chars += (item.text ?? '').length;
+  }
   return CONTEXT_SYSTEM_OVERHEAD_TOKENS + Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
@@ -99,6 +102,7 @@ export function shouldAutoCompact(contextTokens: number, contextWindow?: number 
  */
 export function compactionPromptInput(items: readonly CompactableItem[], maxItemChars = 4_000): string {
   return items
+    .filter(item => item.kind !== 'divider') // markers are never sent to the summarizer
     .map(item => {
       const role = item.role === 'user' ? 'User' : 'Assistant';
       const content = (item.text ?? '')
@@ -120,6 +124,7 @@ export function selectCarriedItems<T extends CompactableItem>(items: readonly T[
   let lastAssistant: T | undefined;
   for (let index = items.length - 1; index >= 0; index--) {
     const item = items[index]!;
+    if (item.kind === 'divider') continue;
     if (!lastUser && item.role === 'user') lastUser = item;
     if (!lastAssistant && item.role === 'assistant' && item.kind !== 'error') lastAssistant = item;
     if (lastUser && lastAssistant) break;

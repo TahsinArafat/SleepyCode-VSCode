@@ -117,7 +117,7 @@ export type TranscriptItem = {
   role: 'user' | 'assistant';
   text: string;
   timestamp: number;
-  kind?: 'error';
+  kind?: 'error' | 'divider';
   gitTree?: string;
   work?: WorkItem[];
   seconds?: number;

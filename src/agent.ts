@@ -104,6 +104,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly terminals = new TerminalManager();
   private lastCheckpointPrune = 0;
   private undoStacks = new Map<string, TranscriptItem[][]>(); // conversationId -> stack of popped turn pairs
+  private compactionUndoStacks = new Map<string, { before: TranscriptItem[]; after: TranscriptItem[] }[]>(); // conversationId -> undoable compactions
+  private compactionRedoStacks = new Map<string, { before: TranscriptItem[]; after: TranscriptItem[] }[]>(); // conversationId -> redone compactions
   private agentPromptCache = new Map<string, string>(); // agentId -> prompt text
   private sessionAllowedCommands = new Set<string>();
   private sessionAutoApproveEditRoots = new Set<string>();
@@ -551,7 +553,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const active = this.activeConversation();
       if (active) {
         const selection = this.selectionFor(active);
-        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId });
+        const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
+        const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
+        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, compactionUndoable, compactionRedoable });
       }
     }
   }
@@ -789,6 +793,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       if (!conversation.items.length) return;
+      // A compaction boundary (divider marker) undoes the whole compaction.
+      if (conversation.items[conversation.items.length - 1]?.kind === 'divider') {
+        if (!this.undoCompaction(conversation)) return;
+        conversation.updatedAt = Date.now();
+        project.updatedAt = Date.now();
+        await this.persistProjects();
+        this.syncConversations();
+        return;
+      }
       const root = this.workspaceRoot();
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
       // Remove last assistant message (and restore git if checkpoint exists)
@@ -822,6 +835,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const project = this.activeProject();
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
+      // Redo a compaction first when one is pending at this boundary.
+      if (this.redoCompaction(conversation)) {
+        conversation.updatedAt = Date.now();
+        project.updatedAt = Date.now();
+        await this.persistProjects();
+        this.syncConversations();
+        return;
+      }
       const stack = this.undoStacks.get(message.conversationId);
       if (!stack || !stack.length) return;
       const items = stack.pop()!;
@@ -1802,6 +1823,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           : userText;
       } else {
         const recent = conversation.items.slice(-10, -1)
+          .filter(item => item.kind !== 'divider')
           .map(item => `${item.role.toUpperCase()}: ${item.text}`)
           .join('\n\n');
         streamPrompt = recent
@@ -2096,8 +2118,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     try {
       progress('summarizing', { auto: options?.auto === true });
       const selection = this.selectionFor(conversation);
-      const summarized = await this.summarizeConversation(conversation.items, selection, controller.signal);
+      const before = conversation.items;
+      const summarized = await this.summarizeConversation(before, selection, controller.signal);
       conversation.items = summarized.items;
+      // Snapshot the boundary so the divider can be undone/redone. A fresh
+      // compaction supersedes any pending redo at this boundary.
+      const undo = this.compactionUndoStacks.get(targetId ?? '') ?? [];
+      undo.push({ before: before.slice(), after: summarized.items.slice() });
+      this.compactionUndoStacks.set(targetId ?? '', undo.slice(-3));
+      this.compactionRedoStacks.delete(targetId ?? '');
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
@@ -2139,6 +2168,47 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (now - (this.lastAutoCompactAt.get(conversation.id) ?? 0) < 120_000) return;
     this.lastAutoCompactAt.set(conversation.id, now);
     void this.compactConversation(conversation.id, { auto: true });
+  }
+
+  /**
+   * Restores the transcript that a compaction replaced. Only call this when the
+   * last item is the compaction divider marker; the snapshot stack is in-memory
+   * (like turn-undo) so it does not survive an extension reload.
+   */
+  private undoCompaction(conversation: Conversation): boolean {
+    const stack = this.compactionUndoStacks.get(conversation.id);
+    if (!stack?.length) return false;
+    const snapshot = stack.pop()!;
+    if (!stack.length) this.compactionUndoStacks.delete(conversation.id);
+    const redo = this.compactionRedoStacks.get(conversation.id) ?? [];
+    redo.push(snapshot);
+    this.compactionRedoStacks.set(conversation.id, redo.slice(-3));
+    conversation.items = snapshot.before;
+    return true;
+  }
+
+  /**
+   * Re-applies the most recently undone compaction. The redo is only valid while
+   * the conversation is still exactly the restored pre-compaction state; once the
+   * user sends or undoes a turn at that boundary the redo is discarded.
+   */
+  private redoCompaction(conversation: Conversation): boolean {
+    const stack = this.compactionRedoStacks.get(conversation.id);
+    if (!stack?.length) return false;
+    const snapshot = stack[stack.length - 1];
+    if (!snapshot) return false;
+    const lastBefore = snapshot.before[snapshot.before.length - 1];
+    if (conversation.items.length !== snapshot.before.length || conversation.items[conversation.items.length - 1]?.id !== lastBefore?.id) {
+      this.compactionRedoStacks.delete(conversation.id);
+      return false;
+    }
+    stack.pop();
+    if (!stack.length) this.compactionRedoStacks.delete(conversation.id);
+    const undo = this.compactionUndoStacks.get(conversation.id) ?? [];
+    undo.push(snapshot);
+    this.compactionUndoStacks.set(conversation.id, undo.slice(-3));
+    conversation.items = snapshot.after;
+    return true;
   }
 
   /**
@@ -2281,7 +2351,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return copy;
       });
     return {
-      items: [summary, ...carried, createTranscriptItem('user', 'Continue from the compacted context above.')],
+      items: [summary, ...carried, createTranscriptItem('user', '', 'divider')],
       usage,
       modelId,
       providerId,
