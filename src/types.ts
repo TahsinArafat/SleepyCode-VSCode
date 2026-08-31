@@ -116,6 +116,8 @@ export type TranscriptItem = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  /** Text streamed before an error interrupted the run; kept so a retry can continue from the halfway point. */
+  partialText?: string;
   timestamp: number;
   kind?: 'error' | 'divider';
   gitTree?: string;

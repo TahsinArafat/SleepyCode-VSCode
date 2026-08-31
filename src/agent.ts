@@ -1404,7 +1404,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       const last = conversation.items[conversation.items.length - 1];
       const resume = last?.kind === 'error'
-        ? { work: last.work, errorText: last.text, changes: last.changes }
+        ? { work: last.work, errorText: last.text, changes: last.changes, partialText: last.partialText }
         : undefined;
       const carryTree = last?.kind === 'error' ? last.gitTree : undefined;
       if (last?.kind === 'error') conversation.items.pop();
@@ -1422,10 +1422,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const last = conversation.items[conversation.items.length - 1];
       if (!last?.paused || last.id !== message.itemId) return;
       const carryTree = last.gitTree;
+      const pausePlaceholder = `Iteration paused after reaching the ${last.pauseLimit ?? this.config().maxSteps}-step limit.`;
       const resume = {
         work: last.work,
         changes: last.changes,
         errorText: `The previous iteration paused after reaching its ${last.pauseLimit ?? this.config().maxSteps}-step limit. Continue only the unfinished work.`,
+        partialText: last.text.trim() && last.text !== pausePlaceholder ? last.text : undefined,
       };
       conversation.items.pop();
       project.activeConversationId = conversation.id;
@@ -1448,7 +1450,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'queuedPrompt', conversationId, prompt: entry?.text ?? null });
   }
 
-  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[] }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
+  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; partialText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
     const root = this.workspaceRoot();
     if (!root) {
       this.post({ type: 'error', text: 'Open a folder or workspace first.' });
@@ -1473,7 +1475,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let runGitTree = gitTracked ? carryTree : undefined;
     let carriedGitTree = carryTree;
     if (resume) {
-      this.post({ type: 'resume', conversationId });
+      this.post({ type: 'resume', conversationId, partialText: resume.partialText ?? '' });
     } else {
       const userItem = createTranscriptItem('user', userText);
       userItem.attachments = composerContext?.attachments;
@@ -1519,6 +1521,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const activeTasks = new Map<string, WorkItem>();
     let reasoningBuffer = '';
     let reasoningTruncated = false;
+    // Longest streamed text before an interruption; preserved on error items so
+    // a manual retry can continue from the halfway point instead of restarting.
+    let partialAnswer = '';
     let workStartedAt = 0;
     let planItem: WorkItem | undefined;
     let planState: PlanState | undefined;
@@ -1817,9 +1822,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           inProgressLines ? `Current task (continue from here):\n${inProgressLines}` : '',
           doneLines ? `Work already completed (do not redo):\n${doneLines}` : '',
           resume?.errorText ? `The last attempt ended with:\n${resume.errorText}` : '',
+          resume?.partialText ? `You had already written this partial response before the interruption. Continue it from exactly where it stops: do NOT restart the response and do NOT reproduce this text. Pick up mid-sentence and finish naturally.\n\nPartial response:\n${resume.partialText.slice(-6000)}` : '',
         ].filter(Boolean).join('\n\n');
+        const resumeDirection = resume?.partialText
+          ? 'The previous attempt was interrupted mid-response. A partial response was already written (see below). Continue from exactly where it stopped: do NOT redo completed work, do NOT restart the response. Finish the remaining work and complete the response naturally.'
+          : 'The previous attempt of this task was interrupted. Continue from exactly where it stopped, using the plan and last task below: do NOT redo completed work or replay the original request. Work through only the remaining steps, verify the result, then give only the concise final summary.';
         streamPrompt = resumeContext
-          ? `The previous attempt of this task was interrupted. Continue from exactly where it stopped, using the plan and last task below: do NOT redo completed work or replay the original request. Work through only the remaining steps, verify the result, then give only the concise final summary.\n\n${resumeContext}`
+          ? `${resumeDirection}\n\n${resumeContext}`
           : userText;
       } else {
         const recent = conversation.items.slice(-10, -1)
@@ -1922,6 +1931,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             for await (const part of result.stream) {
               if (part.type === 'text-delta') {
                 answer += part.text;
+                if (answer.length > partialAnswer.length) partialAnswer = answer;
                 this.post({ type: 'delta', conversationId, text: part.text });
               } else if (part.type === 'reasoning-delta') {
                 workStartedAt ||= Date.now();
@@ -1991,7 +2001,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           }
           const keptWork = work.slice(-80);
           const workSeconds = workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0;
-          const assistantItem = createTranscriptItem('assistant', answer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput);
+          // When continuing a partial response, prepend the preserved half so the
+          // committed message reads as one uninterrupted answer.
+          const finalAnswer = resume?.partialText ? resume.partialText + answer : answer;
+          const assistantItem = createTranscriptItem('assistant', finalAnswer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput);
           if (lastStepInput) assistantItem.contextTokens = lastStepInput;
           if (paused) {
             assistantItem.paused = true;
@@ -2008,7 +2021,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'done', conversationId, item: assistantItem });
           systemNotify(this.context, {
             subtitle: paused ? 'Iteration paused' : 'Task complete',
-            message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(answer) || conversation.title),
+            message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(finalAnswer) || conversation.title),
             kind: paused ? 'attention' : 'info',
           });
           break;
@@ -2048,6 +2061,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
         errorItem.errorInfo = errorInfo;
+        if (partialAnswer.trim()) errorItem.partialText = partialAnswer;
         if (runChanges.size) errorItem.changes = [...runChanges.values()];
         conversation.items.push(errorItem);
         conversation.items = conversation.items.slice(-60);

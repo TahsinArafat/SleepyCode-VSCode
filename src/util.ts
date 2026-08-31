@@ -51,6 +51,7 @@ export function normalizeTranscriptItem(item: Partial<TranscriptItem>, fallbackT
     id: item.id ?? `${fallbackTimestamp}-${Math.random().toString(36).slice(2, 8)}`,
     role: item.role === 'assistant' ? 'assistant' : 'user',
     text: item.text ?? '',
+    partialText: item.partialText,
     timestamp: item.timestamp ?? fallbackTimestamp,
     kind: item.kind,
     gitTree: item.gitTree,

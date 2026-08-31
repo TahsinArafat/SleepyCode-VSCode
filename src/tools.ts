@@ -30,9 +30,9 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       description: 'Call this first for any non-trivial task. Present the main design aspects as an ordered plan: what will change, which files are involved, and how each part will be verified. The plan is shown as a floating card pinned to the top of the chat with the currently executing step spinning and completed steps checked off. IMPORTANT: the plan tool is STATEFUL and there is NO auto-advancement - the plan NEVER moves forward on its own, and previously completed steps stay checked. The result of every call returns the complete current plan back to you, so you always know its exact state. After finishing each step you MUST re-call this tool and pass doneSteps (0-based indices of every step now completed, including the one you just finished) plus activeStep (0-based index of the step you are now working on). Pass steps and title only when creating a plan or explicitly rewriting it; progress updates may omit them.',
       inputSchema: z.object({
         title: z.string().min(1).max(120).optional().describe('Short plan title, e.g. "Add multi-provider support". Omit for progress updates on an existing plan.'),
-        steps: z.array(z.string().min(1)).min(1).max(12).optional().describe('Ordered steps covering the main design aspects. Omit for progress updates on an existing plan.'),
-        activeStep: z.number().int().min(0).max(12).optional().describe('0-based index of the step you are currently working on. Pass this explicitly on EVERY plan call - the index never advances on its own.'),
-        doneSteps: z.array(z.number().int().min(0).max(12)).optional().describe('0-based indices of steps already completed. Include every step you just finished, or it stays unchecked; previously completed steps are merged in automatically.'),
+        steps: z.array(z.string().min(1)).min(1).max(20).optional().describe('Ordered steps covering the main design aspects. Omit for progress updates on an existing plan.'),
+        activeStep: z.number().int().min(0).max(20).optional().describe('0-based index of the step you are currently working on. Pass this explicitly on EVERY plan call - the index never advances on its own.'),
+        doneSteps: z.array(z.number().int().min(0).max(20)).optional().describe('0-based indices of steps already completed. Include every step you just finished, or it stays unchecked; previously completed steps are merged in automatically.'),
       }),
       execute: async () => ctx.describePlan(),
     }),
@@ -73,7 +73,7 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
                 hits.push(`${path.relative(ctx.root.fsPath, uri.fsPath)}:${index + 1}: ${line.trim().slice(0, 300)}`);
               }
             });
-          } catch {}
+          } catch { }
         }
         return hits.join('\n') || '(no matches)';
       },

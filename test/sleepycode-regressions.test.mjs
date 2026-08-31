@@ -257,3 +257,38 @@ test('webview renders the compaction divider and adapts undo/redo copy', () => {
   assert.match(runtime, /compactionUndoable=Boolean\(m\.compactionUndoable\)/);
   assert.match(styles, /\.compaction-divider\{/);
 });
+
+test('error item preserves partial streamed text for retry continuation', () => {
+  // TranscriptItem type has partialText field
+  assert.match(types, /partialText\?: string/);
+  // normalizeTranscriptItem passes through partialText
+  assert.match(util, /partialText: item\.partialText/);
+  // Agent captures the longest partial answer during streaming
+  assert.match(agent, /let partialAnswer = '';/);
+  assert.match(agent, /partialAnswer = answer/);
+  // Error item stores the partial text
+  assert.match(agent, /errorItem\.partialText = partialAnswer/);
+  // Retry handler carries partialText in the resume payload
+  assert.match(agent, /partialText: last\.partialText/);
+  // Resume context includes partial text for the model
+  assert.match(agent, /resume\?\.partialText \?/);
+  assert.match(agent, /Continue it from exactly where it stops/);
+  // Final answer prepends the preserved partial
+  assert.match(agent, /resume\?\.partialText \? resume\.partialText.+answer : answer/);
+  // Continue-iteration also carries the half-written text
+  assert.match(agent, /partialText: last\.text/);
+  assert.match(agent, /pausePlaceholder/);
+  // Webview shows the partial text on error instead of removing it
+  assert.match(runtime, /current\.classList\.remove\('streaming'\)/);
+  assert.match(runtime, /interruptedMarker/);
+  assert.match(runtime, /interrupted-note/);
+  // Webview renders partial text in conversation re-render
+  assert.match(runtime, /next\.partialText/);
+  // Webview injects partial text on resume
+  assert.match(runtime, /m\.partialText\|\|''/);
+  assert.match(runtime, /current\.dataset\.raw=m\.partialText/);
+  // CSS for the interrupted marker
+  assert.match(styles, /interrupted-note/);
+  // Resume message includes partialText
+  assert.match(agent, /type: 'resume'.*partialText: resume\.partialText/);
+});
