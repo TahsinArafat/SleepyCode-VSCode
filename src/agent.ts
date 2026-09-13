@@ -9,7 +9,7 @@ import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHe
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
-import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, FileChange, FileSnapshot, McpConnectionData, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
+import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
@@ -135,6 +135,8 @@ function isProjectMeta(entry: unknown): entry is ProjectMetaEntry & { id: string
 }
 
 export class AgentViewProvider implements vscode.WebviewViewProvider {
+  private static readonly LOG_KEY = 'sleepycode.extensionLogs';
+  private static readonly LOG_LIMIT = 400;
   private view?: vscode.WebviewView;
   private projects: Project[] = [];
   private activeProjectId = '';
@@ -315,7 +317,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
-    view.webview.onDidReceiveMessage((message: WebMessage) => this.onMessage(message));
+    view.webview.onDidReceiveMessage((message: WebMessage) => {
+      void this.onMessage(message).catch(error => {
+        const detail = errorMessage(error);
+        this.log('error', 'webview.message.failed', detail);
+        this.post({ type: 'error', text: detail });
+        this.post({ type: 'state', conversationId: this.activeProject()?.activeConversationId ?? '', running: false, label: '' });
+      });
+    });
     view.onDidDispose(() => this.disposePendingNotifies());
     this.loaded = true;
     this.loadProjects();
@@ -328,6 +337,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private apiKeysLoaded?: Promise<void>;
+
+  private log(level: ExtensionLogEntry['level'], event: string, detail?: string): void {
+    const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
+    entries.push({ timestamp: Date.now(), level, event, detail });
+    void this.context.globalState.update(AgentViewProvider.LOG_KEY, entries.slice(-AgentViewProvider.LOG_LIMIT));
+  }
+
+  private sendExtensionLogs(): void {
+    const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
+    this.post({ type: 'extensionLogs', logs: entries.map(entry => '[' + new Date(entry.timestamp).toISOString() + '] ' + entry.level.toUpperCase() + ' ' + entry.event + (entry.detail ? ': ' + entry.detail : '')) });
+  }
   private loadApiKeys(): Promise<void> {
     this.apiKeysLoaded ??= this.loadApiKeysOnce();
     return this.apiKeysLoaded;
@@ -883,7 +903,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'stop') {
       const project = this.activeProject();
-      this.runs.get(project?.activeConversationId ?? '')?.controller.abort();
+      const activeId = project?.activeConversationId ?? '';
+      const activeRun = this.runs.get(activeId);
+      if (activeRun) {
+        this.log('info', 'run.stop.requested', activeId);
+        activeRun.controller.abort();
+      } else {
+        this.log('warn', 'run.stop.missing', `active=${activeId}; runs=${[...this.runs.keys()].join(',')}`);
+        for (const run of this.runs.values()) run.controller.abort();
+        this.post({ type: 'state', conversationId: activeId, running: false, label: '' });
+      }
+      return;
+    }
+    if (message.type === 'requestExtensionLogs') {
+      this.sendExtensionLogs();
+      return;
+    }
+    if (message.type === 'clearExtensionLogs') {
+      await this.context.globalState.update(AgentViewProvider.LOG_KEY, []);
+      this.sendExtensionLogs();
       return;
     }
     if (message.type === 'copyText') {
@@ -1860,6 +1898,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'send' && message.text.trim()) {
+      this.log('info', 'message.send.received', `conversation=${message.conversationId ?? '(active)'}; chars=${message.text.length}`);
       const previousActive = this.activeProjectId;
       const project = this.ensureProjectForRoot();
       if (!project) {
@@ -1892,9 +1931,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
+        this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
         this.enqueue(sendText, conversationId, message.context, promptContext);
       } else {
-        void this.run(sendText, conversationId, undefined, undefined, message.context, promptContext);
+        this.log('info', 'message.send.starting', `conversation=${conversationId}; contextChars=${promptContext.length}`);
+        void this.run(sendText, conversationId, undefined, undefined, message.context, promptContext).catch(error => {
+          const detail = errorMessage(error);
+          this.log('error', 'run.unhandled', detail);
+          this.post({ type: 'error', conversationId, text: detail });
+          this.runs.delete(conversationId);
+          this.post({ type: 'state', conversationId, running: false, label: '' });
+        });
       }
       return;
     }
@@ -1952,6 +1999,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
+    this.log('info', 'run.enter', `conversation=${conversationId}; chars=${userText.length}`);
     const root = this.workspaceRoot();
     if (!root) {
       this.post({ type: 'error', text: 'Open a folder or workspace first.' });
@@ -1973,6 +2021,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const gitTracked = isGitTrackedWorkspace(root.fsPath);
     const run: ActiveRun = { conversationId, controller: new AbortController(), steering: false };
     this.runs.set(conversationId, run);
+    this.log('info', 'run.registered', conversationId);
     let runGitTree = gitTracked ? carryTree : undefined;
     let carriedGitTree = carryTree;
     if (resume) {
@@ -2098,6 +2147,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
     try {
+      this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
       if (gitTracked) runGitTree ??= await captureGitTree(root.fsPath, { context: this.context, lastPrune: this.lastCheckpointPrune });
       let { maxSteps } = this.config();
@@ -2170,13 +2220,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         (title, detail) => this.approve('command', title, detail),
       );
       const savedConnections = await loadMcpConnections(this.context);
+      this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
       if (savedConnections.some((c) => c.enabled)) {
+        const baseConnection = mcpConnection;
         const extra = await connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail));
         mcpConnection = {
-          tools: { ...mcpConnection.tools, ...extra.connection.tools },
-          instructions: [...mcpConnection.instructions, ...extra.connection.instructions],
-          errors: [...mcpConnection.errors, ...extra.connection.errors],
-          close: async () => { await mcpConnection!.close(); await extra.connection.close(); },
+          tools: { ...baseConnection.tools, ...extra.connection.tools },
+          instructions: [...baseConnection.instructions, ...extra.connection.instructions],
+          errors: [...baseConnection.errors, ...extra.connection.errors],
+          close: async () => {
+            await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
+          },
         };
       }
       const instructions = [
@@ -2198,6 +2252,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       };
       const repoIndex = await this.loadRepoIndex(root);
       const repoMemory = this.loadRepoMemory(root);
+      this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex.files.length}`);
 
       const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string): Promise<string> => {
         const cleanTask = task.trim();
@@ -2404,6 +2459,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               }]
               : streamPrompt;
             this.notifyHooks('onAgentStart', { text: streamPrompt });
+            this.log('info', 'run.stream.start', `conversation=${conversationId}; model=${model}`);
             const result = await agent.stream({
               prompt,
               abortSignal: run.controller.signal,
@@ -2610,9 +2666,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         systemNotify(this.context, { subtitle: 'Task failed', message: notificationSummary(message) || conversation.title, kind: 'attention' });
       }
     } finally {
+      this.log('info', 'run.finally.start', conversationId);
       await mcpConnection?.close();
       this.post({ type: 'liveUsage', conversationId, model: '', provider: '', inputTokens: 0, outputTokens: 0 });
       this.runs.delete(conversationId);
+      this.log('info', 'run.finally.done', conversationId);
       this.post({ type: 'state', conversationId, running: false, label: '' });
       this.syncConversations(false);
       this.notifyHooks('onAgentEnd', { text: userText });
