@@ -12,7 +12,7 @@ import { compareWorktrees, createWorktree, listWorktrees, mergeWorktree, removeW
 import type { RepoIndex, SourceCitedMemory } from './repo-index';
 import { hashContent } from './repo-index';
 import type { BrowserController } from './browser';
-import { summarizeConsoleErrors, summarizeNetworkErrors } from './browser';
+import { summarizeConsoleErrors, summarizeNetworkErrors, stringifyEvalResult } from './browser';
 import { addPrComment, buildPrBody, commitChanges, createBranchForIssue, createPullRequest, getIssue, getPr, getReviewComments, listIssues, monitorChecks, repoSlug } from './github';
 
 export interface ToolContext {
@@ -461,8 +461,23 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         ctx.post({ type: 'browserPreview', dataUrl, cursor });
       } catch { /* preview is optional */ }
     };
+    // Trailing-debounced capture for tools that mutate the page without a natural
+    // refresh point (type/press/scroll/wait/evaluate) so rapid sequences coalesce
+    // into a single preview update instead of one screenshot per tool call.
+    let previewTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleBrowserPreview = (): void => {
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(() => {
+        previewTimer = undefined;
+        void postBrowserPreview();
+      }, 120);
+    };
+    const cancelBrowserPreview = (): void => {
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = undefined;
+    };
     tools.browser_launch = tool({
-      description: 'Launch a headless browser and open a URL. Returns the page title plus any console errors and failed network requests. Requires the Playwright runtime.',
+      description: 'Launch a headless browser and open a URL. Returns the page title plus any console errors and failed network requests. Uses Playwright Chromium, or automatically falls back to system Chrome, Edge, Brave, or Firefox when no Playwright browser is installed.',
       inputSchema: z.object({
         url: z.string().min(1).describe('URL to open (http(s):// or a file:// path).'),
         viewport: z.enum(['mobile', 'tablet', 'laptop', 'desktop']).default('laptop'),
@@ -477,10 +492,10 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       }),
     });
     tools.browser_snapshot = tool({
-      description: 'Return the current page DOM, accessibility tree, console messages, and network requests as evidence about what rendered.',
-      inputSchema: z.object({ includeDom: z.boolean().default(false) }),
-      execute: async ({ includeDom }) => browserRun(async () => {
-        const snap = await browser.snapshot();
+      description: 'Return the current page DOM, accessibility tree, console messages, and network requests as evidence about what rendered. Pass frame to inspect an iframe instead of the main page.',
+      inputSchema: z.object({ includeDom: z.boolean().default(false), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index (0 = main page). Omit for the main page.') }),
+      execute: async ({ includeDom, frame }) => browserRun(async () => {
+        const snap = await browser.snapshot(frame);
         return JSON.stringify({ title: snap.title, url: snap.url, accessibility: snap.accessibility, console: snap.console.slice(-50), network: summarizeNetworkErrors(snap.network).slice(0, 30), dom: includeDom ? snap.dom.slice(0, 20_000) : undefined }, null, 2);
       }),
     });
@@ -490,19 +505,84 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       execute: async ({ url }) => browserRun(async () => { await browser.navigate(url); await postBrowserPreview(); return `Navigated to ${url}.`; }),
     });
     tools.browser_click = tool({
-      description: 'Click an element in the active browser session by CSS selector.',
-      inputSchema: z.object({ selector: z.string().min(1) }),
-      execute: async ({ selector }) => browserRun(async () => { await browser.click(selector); await postBrowserPreview(selector); return `Clicked ${selector}.`; }),
+      description: 'Click an element by selector. Supports Playwright engine selectors: CSS, text=Login, role=button[name="Save"], #shadowRoot >> button, .item >> nth=2.',
+      inputSchema: z.object({ selector: z.string().min(1), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index. Omit for the main page.') }),
+      execute: async ({ selector, frame }) => browserRun(async () => { await browser.click(selector, frame); await postBrowserPreview(selector); return `Clicked ${selector}.`; }),
     });
     tools.browser_type = tool({
-      description: 'Type text into an element in the active browser session by CSS selector.',
-      inputSchema: z.object({ selector: z.string().min(1), text: z.string(), clear: z.boolean().default(true) }),
-      execute: async ({ selector, text, clear }) => browserRun(async () => { await browser.type(selector, text, { clear }); return `Typed into ${selector}.`; }),
+      description: 'Type text into an element by selector (focuses, clears existing text, then types). Supports Playwright engine selectors like text= and role=.',
+      inputSchema: z.object({ selector: z.string().min(1), text: z.string(), clear: z.boolean().default(true), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index. Omit for the main page.') }),
+      execute: async ({ selector, text, clear, frame }) => browserRun(async () => { await browser.type(selector, text, { clear }, frame); scheduleBrowserPreview(); return `Typed into ${selector}.`; }),
     });
     tools.browser_press = tool({
-      description: 'Press a keyboard key, optionally focused on a selector first.',
-      inputSchema: z.object({ key: z.string().min(1), selector: z.string().optional() }),
-      execute: async ({ key, selector }) => browserRun(async () => { await browser.press(key, selector); return `Pressed ${key}.`; }),
+      description: 'Press a keyboard key (e.g. Enter, Tab, Escape), optionally focused on a selector first. Supports Playwright engine selectors.',
+      inputSchema: z.object({ key: z.string().min(1), selector: z.string().optional(), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index. Requires selector.') }),
+      execute: async ({ key, selector, frame }) => browserRun(async () => { await browser.press(key, selector, frame); scheduleBrowserPreview(); return `Pressed ${key}.`; }),
+    });
+    tools.browser_evaluate = tool({
+      description: 'Evaluate a JavaScript expression in the page and return the result as JSON. Expressions returning promises are awaited. Function bodies are NOT allowed — use an IIFE: (() => { ... })(). Use to read state, computed styles, localStorage, or run verification code the other tools cannot.',
+      inputSchema: z.object({ script: z.string().min(1).describe('JavaScript expression to evaluate (IIFE for statements).'), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index. Omit for the main page.') }),
+      execute: async ({ script, frame }) => browserRun(async () => { const result = stringifyEvalResult(await browser.evaluate(script, frame)); scheduleBrowserPreview(); return result; }),
+    });
+    tools.browser_wait = tool({
+      description: 'Wait for an element to reach a state, or pause for a fixed duration. Use before interacting with elements that load asynchronously.',
+      inputSchema: z.object({
+        selector: z.string().optional().describe('Element to wait for. Mutually exclusive with ms.'),
+        state: z.enum(['visible', 'hidden', 'attached', 'detached']).default('visible'),
+        timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
+        ms: z.number().int().min(0).max(60_000).optional().describe('Pause for this many milliseconds instead of waiting for a selector.'),
+      }),
+      execute: async ({ selector, state, timeoutMs, ms }) => browserRun(async () => {
+        if ((selector && ms !== undefined) || (!selector && ms === undefined)) throw new Error('browser_wait needs exactly one of: selector, or ms.');
+        const result = await browser.wait(selector, state, timeoutMs, ms);
+        scheduleBrowserPreview();
+        return result;
+      }),
+    });
+    tools.browser_back = tool({
+      description: 'Go back one step in history. Returns whether navigation happened.',
+      inputSchema: z.object({ waitUntil: z.enum(['load', 'domcontentloaded']).default('load') }),
+      execute: async ({ waitUntil }) => browserRun(async () => { const r = await browser.back({ waitUntil }); await postBrowserPreview(); return JSON.stringify(r); }),
+    });
+    tools.browser_forward = tool({
+      description: 'Go forward one step in history. Returns whether navigation happened.',
+      inputSchema: z.object({ waitUntil: z.enum(['load', 'domcontentloaded']).default('load') }),
+      execute: async ({ waitUntil }) => browserRun(async () => { const r = await browser.forward({ waitUntil }); await postBrowserPreview(); return JSON.stringify(r); }),
+    });
+    tools.browser_reload = tool({
+      description: 'Reload the current page.',
+      inputSchema: z.object({ waitUntil: z.enum(['load', 'domcontentloaded']).default('load') }),
+      execute: async ({ waitUntil }) => browserRun(async () => { const r = await browser.reload({ waitUntil }); await postBrowserPreview(); return JSON.stringify(r); }),
+    });
+    tools.browser_new_tab = tool({
+      description: 'Open a new tab in the active browser session and switch to it. Omit url for a blank tab (e.g. for a same-origin window).',
+      inputSchema: z.object({ url: z.string().optional().describe('URL to open in the new tab.') }),
+      execute: async ({ url }) => browserRun(async () => { cancelBrowserPreview(); const tab = await browser.newTab(url); if (url) await postBrowserPreview(); return JSON.stringify(tab); }),
+    });
+    tools.browser_list_tabs = tool({
+      description: 'List all open tabs with their index, url, title, and which is active.',
+      inputSchema: z.object({}),
+      execute: async () => browserRun(async () => JSON.stringify(await browser.listTabs(), null, 2)),
+    });
+    tools.browser_switch_tab = tool({
+      description: 'Switch the active tab. target is a numeric index, or a URL/title substring (must match exactly one tab).',
+      inputSchema: z.object({ target: z.union([z.number().int().min(0), z.string().min(1)]) }),
+      execute: async ({ target }) => browserRun(async () => { const tab = await browser.switchTab(target); await postBrowserPreview(); return JSON.stringify(tab); }),
+    });
+    tools.browser_close_tab = tool({
+      description: 'Close the ACTIVE tab and switch to the remaining tab closest to it. Errors if it is the only tab (use browser_close to end the session).',
+      inputSchema: z.object({}),
+      execute: async () => browserRun(async () => { const tabs = await browser.closeTab(); await postBrowserPreview(); return JSON.stringify(tabs, null, 2); }),
+    });
+    tools.browser_scroll = tool({
+      description: 'Scroll the page: pass a selector to bring an element into view, and/or deltaY pixels to scroll by. Supports Playwright engine selectors.',
+      inputSchema: z.object({ selector: z.string().optional(), deltaY: z.number().int().optional(), frame: z.string().optional().describe('Optional iframe target: URL substring or frame index. Omit for the main page.') }),
+      execute: async ({ selector, deltaY, frame }) => browserRun(async () => {
+        if (!selector && deltaY === undefined) throw new Error('browser_scroll needs either selector or deltaY.');
+        const result = await browser.scroll(selector, deltaY, frame);
+        scheduleBrowserPreview();
+        return result;
+      }),
     });
     tools.browser_geometry = tool({
       description: 'Measure responsive layout at a viewport: horizontal overflow and elements that spill off-screen. Use to catch broken layouts.',
@@ -515,9 +595,9 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       execute: async ({ path: target }) => browserRun(async () => `Saved ${await browser.screenshot(ctx.resolvePath(target).fsPath)}.`),
     });
     tools.browser_close = tool({
-      description: 'Close the active browser session.',
+      description: 'Close the active browser session and all its tabs.',
       inputSchema: z.object({}),
-      execute: async () => browserRun(async () => { await browser.close(); return 'Browser session closed.'; }),
+      execute: async () => browserRun(async () => { cancelBrowserPreview(); await browser.close(); ctx.post({ type: 'browserPreview', dataUrl: '' }); return 'Browser session closed.'; }),
     });
   }
   tools.github_list_issues = tool({

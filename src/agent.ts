@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
+import { executeTool } from '@ai-sdk/provider-utils';
 import { commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
@@ -13,6 +14,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
+import { createThinkSplitter, stripThinkBlocks } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
@@ -29,6 +31,7 @@ import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './r
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
+import { BrowserPreviewPanel } from './browser-preview';
 
 type PlanState = {
   title: string;
@@ -109,6 +112,47 @@ function filterAgentTools<T extends Record<string, unknown>>(tools: T, policy?: 
   return filtered;
 }
 
+/** Decode the XML entities Claude-Code style text tool calls use. */
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/** Best-effort conversion of XML parameter values into the JSON types tools expect. */
+function coerceXmlParam(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && (trimmed.endsWith('}') || trimmed.endsWith(']'))) {
+    try { return JSON.parse(trimmed); } catch { return value; }
+  }
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  return value;
+}
+
+/** Parse Claude-Code style text tool calls: <invoke name="read_file"><parameter name="path">src/a.ts</parameter></invoke>. */
+function parseInvokeBlocks(text: string): { name: string; params: [string, string][] }[] {
+  const calls: { name: string; params: [string, string][] }[] = [];
+  const invokeRe = /<invoke\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/invoke>/gi;
+  let invokeMatch: RegExpExecArray | null;
+  while ((invokeMatch = invokeRe.exec(text))) {
+    const params: [string, string][] = [];
+    const paramRe = /<parameter\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/parameter>/gi;
+    let paramMatch: RegExpExecArray | null;
+    while ((paramMatch = paramRe.exec(invokeMatch[2]!))) {
+      params.push([paramMatch[1]!.trim(), decodeXmlEntities(paramMatch[2]!)]);
+    }
+    calls.push({ name: invokeMatch[1]!.trim(), params });
+  }
+  return calls;
+}
+
 function userOsName(): string {  switch (process.platform) {
     case 'darwin': return 'macOS (darwin)';
     case 'win32': return 'Windows (win32)';
@@ -176,6 +220,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly projectIndex: ProjectIndexService;
   private repoIndexCache?: { root: string; index: RepoIndex; symboled: boolean };
   private readonly browser = new BrowserController();
+  private readonly browserPreview = new BrowserPreviewPanel();
+  private browserPreviewTimer: NodeJS.Timeout | undefined;
   private projectIndexTimer?: NodeJS.Timeout;
   private schedulerTimer?: NodeJS.Timeout;
   private lastModelGroups: ProviderModelGroup[] = [];
@@ -656,6 +702,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   dispose(): void {
     this.terminals.dispose();
+    this.browserPreview.dispose();
+    this.stopBrowserPreviewPolling();
     this.disposePendingNotifies();
     if (this.projectIndexTimer) clearTimeout(this.projectIndexTimer);
     for (const folder of this.reviewTempDirs) void rm(folder, { recursive: true, force: true });
@@ -2368,35 +2416,86 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
           }
         }
-        const subagent = new ToolLoopAgent({
-          model: subagentProvider(subagentModelId),
-          maxRetries: 3,
-          instructions: subagentInstructions,
-          tools: { ...subagentTools, ...(role === 'worker' ? (mcpConnection?.tools ?? {}) : {}) },
-          stopWhen: isStepCount(maxSteps === 0 ? 12 : Math.max(2, Math.min(12, maxSteps))),
-        });
+        const subagentToolSet = { ...subagentTools, ...(role === 'worker' ? (mcpConnection?.tools ?? {}) : {}) };
+        const subagentSystem = subagentInstructions;
+        const maxSubagentSteps = maxSteps === 0 ? 12 : Math.max(2, Math.min(12, maxSteps));
+        const subagentMessages: ModelMessage[] = [{ role: 'user', content: `${cleanTask}${context?.trim() ? `\n\nContext from the parent agent:\n${context.trim()}` : ''}` }];
+        let textToolSequence = 0;
         try {
-          const streamResult = await subagent.stream({
-            prompt: `${cleanTask}${context?.trim() ? `\n\nContext from the parent agent:\n${context.trim()}` : ''}`,
-            abortSignal: run.controller.signal,
-            onToolExecutionStart: ({ toolCall }) => {
-              this.notifyHooks('beforeTool', { tool: toolCall.toolName });
-              this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id: `${subagentId}:tool:${toolCall.toolCallId}`, name: toolTask(toolCall.toolName, toolCall.input) });
-            },
-            onToolExecutionEnd: ({ toolCall, toolOutput }) => {
-              this.notifyHooks('afterTool', { tool: toolCall.toolName });
-              const failed = toolOutput?.type === 'tool-error';
-              this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'end', failed, id: `${subagentId}:tool:${toolCall.toolCallId}`, name: toolTask(toolCall.toolName, toolCall.input) });
-            },
-          });
           let subagentText = '';
-          for await (const part of streamResult.stream) {
-            if (part.type === 'text-delta') subagentText += part.text;
-            else if (part.type === 'error') throw part.error;
+          let lastTextOnly = '';
+          let totalInput = 0;
+          let totalOutput = 0;
+          for (let step = 0; step < maxSubagentSteps; step++) {
+            const result = await streamText({
+              model: subagentProvider(subagentModelId),
+              system: subagentSystem,
+              messages: subagentMessages,
+              tools: subagentToolSet,
+              maxRetries: 3,
+              abortSignal: run.controller.signal,
+              onToolExecutionStart: ({ toolCall }) => {
+                this.notifyHooks('beforeTool', { tool: toolCall.toolName });
+                this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id: `${subagentId}:tool:${toolCall.toolCallId}`, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
+              },
+              onToolExecutionEnd: ({ toolCall, toolOutput }) => {
+                this.notifyHooks('afterTool', { tool: toolCall.toolName });
+                const failed = toolOutput?.type === 'tool-error';
+                this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'end', failed, id: `${subagentId}:tool:${toolCall.toolCallId}`, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
+              },
+            });
+            const stepText = await result.text;
+            const stepContent = stripThinkBlocks(stepText);
+            const usage = await result.usage;
+            totalInput += usage?.inputTokens ?? 0;
+            totalOutput += usage?.outputTokens ?? 0;
+            const nativeCallCount = (await result.toolCalls)?.length ?? 0;
+            if (nativeCallCount > 0) {
+              // Native tool calls (already executed by streamText): hand the resulting messages back to the model.
+              const responseMessages = (await result.responseMessages) ?? [];
+              subagentMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              continue;
+            }
+            const xmlCalls = parseInvokeBlocks(stepText);
+            if (xmlCalls.length > 0) {
+              // Claude-Code style text tool calls: execute them directly and feed the results back.
+              const xmlResults: string[] = [];
+              for (const call of xmlCalls) {
+                const tool = subagentToolSet[call.name];
+                const input = Object.fromEntries(call.params.map(([name, value]) => [name, coerceXmlParam(value)]));
+                const id = `${subagentId}:text-tool:${++textToolSequence}`;
+                if (!tool) {
+                  xmlResults.push(`## ${call.name}\nTool is not available to a ${role} subagent.`);
+                  continue;
+                }
+                this.notifyHooks('beforeTool', { tool: call.name });
+                this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id, tool: call.name, name: toolTask(call.name, input) });
+                try {
+                  const output = await executeTool({ tool, input, options: { toolCallId: id, messages: subagentMessages, abortSignal: run.controller.signal, context: undefined as never } });
+                  let finalOutput: unknown = '';
+                  for await (const part of output) if (part.type === 'final') finalOutput = part.output;
+                  xmlResults.push(`## ${call.name}\n${typeof finalOutput === 'string' ? finalOutput : JSON.stringify(finalOutput)}`);
+                  this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'end', failed: false, id, tool: call.name, name: toolTask(call.name, input) });
+                } catch (error) {
+                  xmlResults.push(`## ${call.name}\nerror: ${errorMessage(error)}`);
+                  this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'end', failed: true, id, tool: call.name, name: toolTask(call.name, input) });
+                }
+                this.notifyHooks('afterTool', { tool: call.name });
+              }
+              subagentMessages.push({ role: 'user', content: `Tool results:\n${xmlResults.join('\n\n')}\n\nContinue the task. When finished, give the final answer as plain text without XML tool tags.` });
+              continue;
+            }
+            if (stepContent.trim()) {
+              subagentText = stepContent.trim();
+              break;
+            }
+            lastTextOnly = stepContent;
           }
-          const usage = await streamResult.usage;
-          if (usage?.inputTokens || usage?.outputTokens) {
-            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 });
+          if (!subagentText && lastTextOnly) {
+            subagentText = lastTextOnly.replace(/<invoke[\s\S]*?<\/invoke>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
+          }
+          if (totalInput || totalOutput) {
+            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput });
           }
           const text = subagentText.trim() || '(Subagent completed without a text response.)';
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
@@ -2549,11 +2648,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                   }
                   return;
                 }
-                const taskEntry: WorkItem = { kind: 'task', text: toolTask(toolCall.toolName, toolCall.input), done: false };
+                const taskEntry: WorkItem = { kind: 'task', text: toolTask(toolCall.toolName, toolCall.input), done: false, tool: toolCall.toolName };
                 activeTasks.set(toolCall.toolCallId, taskEntry);
                 work.push(taskEntry);
                 workStartedAt ||= Date.now();
-                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, name: taskEntry.text });
+                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text });
                 this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
               },
               onToolExecutionEnd: ({ toolCall }) => {
@@ -2561,15 +2660,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 if (toolCall.toolName === 'plan') return;
                 const taskEntry = activeTasks.get(toolCall.toolCallId);
                 if (taskEntry) taskEntry.done = true;
-                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, name: toolTask(toolCall.toolName, toolCall.input) });
+                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
               },
             });
 
+            const thinkSplit = createThinkSplitter();
             for await (const part of result.stream) {
               if (part.type === 'text-delta') {
-                answer += part.text;
-                if (answer.length > partialAnswer.length) partialAnswer = answer;
-                this.post({ type: 'delta', conversationId, text: part.text });
+                const { content, thinking } = thinkSplit(part.text);
+                if (content) {
+                  answer += content;
+                  if (answer.length > partialAnswer.length) partialAnswer = answer;
+                  this.post({ type: 'delta', conversationId, text: content });
+                }
+                if (thinking) this.post({ type: 'reasoningDelta', conversationId, text: thinking });
               } else if (part.type === 'reasoning-delta') {
                 workStartedAt ||= Date.now();
                 const remaining = MAX_PERSISTED_REASONING - reasoningBuffer.length;
@@ -3713,6 +3817,43 @@ ${cached}`;
   }
 
   private post(message: unknown): void {
+    if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'browserPreview') {
+      const preview = message as { dataUrl?: unknown; cursor?: { x: number; y: number } };
+      if (typeof preview.dataUrl === 'string' && preview.dataUrl) {
+        this.startBrowserPreviewPolling();
+        this.browserPreview.update(preview.dataUrl, preview.cursor);
+      } else {
+        this.stopBrowserPreviewPolling();
+        this.browserPreview.update(null);
+      }
+      return;
+    }
+    // The turn is over — stop continuous preview captures until the next browser tool.
+    if (message && typeof message === 'object') {
+      const type = (message as { type?: unknown }).type;
+      if (type === 'done' || type === 'generationError' || type === 'steered') this.stopBrowserPreviewPolling();
+    }
     void this.view?.webview.postMessage(message);
+  }
+
+  /** Continuous 2s captures so the preview stays live while the agent works, not just at tool boundaries. */
+  private startBrowserPreviewPolling(): void {
+    if (this.browserPreviewTimer) return;
+    this.browserPreviewTimer = setInterval(() => {
+      if (!this.browser.active) {
+        this.stopBrowserPreviewPolling();
+        return;
+      }
+      void this.browser.previewDataUrl().then(dataUrl => {
+        if (dataUrl) this.browserPreview.update(dataUrl);
+      }).catch(() => undefined);
+    }, 2000);
+  }
+
+  private stopBrowserPreviewPolling(): void {
+    if (this.browserPreviewTimer) {
+      clearInterval(this.browserPreviewTimer);
+      this.browserPreviewTimer = undefined;
+    }
   }
 }

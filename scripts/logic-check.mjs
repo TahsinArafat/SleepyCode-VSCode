@@ -83,7 +83,7 @@ check(/sortModelsA2Z/.test(agent) && /modelA2Z/.test(webviewCode) && /Cheapest m
 check(/composer-edit-bar/.test(webviewStyles) && /startMessageEdit/.test(webviewCode) && /editUserMessage'.*context/.test(webviewCode) && /message\.context/.test(agent), 'message editing reuses the full composer context path instead of an isolated popup');
 check(/marketplaceHeading='Popular skills'/.test(webviewCode) && /Search above to discover more skills/.test(webviewCode) && !/Top skills \('/.test(webviewCode), 'marketplace defaults to Popular skills and invites search');
 check(/sleepyManageBtn/.test(webviewCode) && /sleepyWebsiteBtn/.test(webviewCode) && /openSleepyWebsite/.test(agent) && /SLEEPY_ACCOUNT_URL/.test(agent), 'SleepyAI settings expose account management and website actions');
-check(/max-width:560px/.test(webviewStyles) && /grid-column:1 \/ -1;grid-row:2/.test(webviewStyles) && /width:min\(440px/.test(webviewStyles) && /model-option-name\{[^}]*overflow-wrap:anywhere/.test(webviewStyles), 'composer stacks selectors responsively and full model names remain readable in the dropdown');
+check(/max-width:560px/.test(webviewStyles) && /grid-column:1 \/ 3;grid-row:2/.test(webviewStyles) && /grid-column:3 \/ 5;grid-row:2/.test(webviewStyles) && /width:min\(440px/.test(webviewStyles) && /model-option-name\{[^}]*overflow-wrap:anywhere/.test(webviewStyles), 'composer stacks selectors responsively and full model names remain readable in the dropdown');
 check(/safety-option-main\{[^}]*flex-direction:column;gap:3px/.test(webviewStyles) && /agent-option-main\{[^}]*flex-direction:column;gap:3px/.test(webviewStyles), 'agent and permission selectors visibly separate title and description text');
 const sleepyCodeMark = read('media/sleepycode-mark.svg');
 const sleepyCodePromptIcon = read('media/sleepycode-o.svg');
@@ -99,7 +99,7 @@ check(/max-height:min\(180px,28vh\)/.test(webviewStyles) && /@media \(max-height
 check(/const SLASH_COMMANDS=\[/.test(webviewRuntime) && /command:'\/skill'/.test(webviewRuntime) && /command:'\/skills'/.test(webviewRuntime) && /command:'\/reindex'/.test(webviewRuntime), 'composer exposes slash commands for skills and high-value extension actions');
 check(/installedSkills\.filter\(skill=>/.test(webviewRuntime) && /The user explicitly invoked the installed skill/.test(webviewRuntime), 'slash skill autocomplete is driven by installed skills and expands to an explicit skill invocation');
 check(/skillsmp_list_installed \/ skillsmp_read_installed/.test(agent) && /inspect the Installed skills inventory included in your instructions/.test(agent) && /Installed skills inventory \(metadata only/.test(read('src/skills.ts')), 'system prompt actively discovers and loads installed skills before use');
-check(/try \{\s*if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
+check(/try \{\s*this\.log\('info', 'run\.preflight\.start'[\s\S]*?if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
 check(/await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/.test(agent), 'model refresh re-reads configuration before declaring that no model is selected');
 check(/if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/.test(agent), 'missing SleepyAI sessions persist through structured agent error handling');
 

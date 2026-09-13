@@ -4,6 +4,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { isChatModel } from './model-filter';
 
 export const SLEEPY_WEBSITE_URL = process.env.SLEEPY_WEBSITE_URL || 'https://www.sleepyai.org';
 export const SLEEPY_DASHBOARD_URL = process.env.SLEEPY_DASHBOARD_URL || SLEEPY_WEBSITE_URL;
@@ -249,6 +250,11 @@ export async function fetchSleepyModelPrices(token: string): Promise<SleepyModel
   const parseModels = (arr: unknown[]): SleepyModelPrice[] => {
     return arr
       .filter((model): model is Record<string, unknown> => Boolean(model && typeof model === 'object' && (typeof (model as any).modelId === 'string' || typeof (model as any).id === 'string' || typeof (model as any).omniRouteModelId === 'string')))
+      .filter(model => {
+        const rawId = (model.omniRouteModelId || model.modelId || model.id) as string;
+        const modelId = typeof rawId === 'string' ? rawId.replace(/^models\//, '') : '';
+        return modelId ? isChatModel(model, modelId) : false;
+      })
       .map(model => {
         const rawId = (model.omniRouteModelId || model.modelId || model.id) as string;
         const modelId = typeof rawId === 'string' ? rawId.replace(/^models\//, '') : '';
@@ -460,6 +466,11 @@ export async function fetchSleepyModels(token: string): Promise<SleepyModelInfo[
   const parseList = (arr: unknown[]): SleepyModelInfo[] => {
     return arr
       .filter((model): model is Record<string, unknown> => Boolean(model && typeof model === 'object' && (typeof (model as any).modelId === 'string' || typeof (model as any).id === 'string' || typeof (model as any).omniRouteModelId === 'string')))
+      .filter(model => {
+        const rawId = (model.omniRouteModelId || model.modelId || model.id) as string;
+        const id = typeof rawId === 'string' ? rawId.replace(/^models\//, '') : '';
+        return id ? isChatModel(model, id) : false;
+      })
       .map(model => {
         const rawId = (model.omniRouteModelId || model.modelId || model.id) as string;
         const id = typeof rawId === 'string' ? rawId.replace(/^models\//, '') : '';

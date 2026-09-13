@@ -89,6 +89,8 @@ export type WebMessage =
 export type WorkItem = {
   kind: 'reasoning' | 'task' | 'plan';
   text: string;
+  /** Raw tool name (e.g. "read_file") used to pick the row icon in the chat. */
+  tool?: string;
   done?: boolean;
   title?: string;
   steps?: string[];

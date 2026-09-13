@@ -21,13 +21,14 @@
 
 ![SleepyCode reviewing a repository and working through a pinned plan inside VS Code](media/working.png)
 
-SleepyCode brings a Codex-style agent loop to the editor you already use. Open a folder, choose a model, and describe the outcome you want. The agent can inspect the repository, plan the work, edit files, run commands, and show every step as it happens.
+SleepyCode brings a Codex-style agent loop to the editor you already use. Open a folder, choose a model, and describe the outcome you want. The agent can inspect the repository, plan the work, edit files, run commands, drive a real browser, and show every step as it happens.
 
 ## Contents
 
 - [Why SleepyCode](#why-sleepycode)
 - [Quick start](#quick-start)
 - [What it can do](#what-it-can-do)
+- [Browser tooling](#browser-tooling)
 - [Model providers](#model-providers)
 - [Safety and approvals](#safety-and-approvals)
 - [MCP, subagents, terminals, and memory](#mcp-subagents-terminals-and-memory)
@@ -40,11 +41,12 @@ SleepyCode brings a Codex-style agent loop to the editor you already use. Open a
 
 - **SleepyAI first:** SleepyAI account, model access, pricing, usage, and product behavior form the default experience.
 - **Commercial account experience:** Browser/device sign-in, plan state, balance, spending limits, and server-authoritative SleepyAI usage are surfaced directly in the sidebar.
+- **Chat-completion models only:** the SleepyAI catalog can also list image, video, TTS, and STT models; SleepyCode filters by the gateway's own `modelType` classification and only loads the chat-completion models it can actually call.
 - **Advanced compatibility when needed:** Power users can manually add an OpenAI-compatible endpoint without turning third-party services into built-in defaults.
 - **Focused agent workspace:** Start from Build, Debug, Review, or Understand tasks; choose a descriptive agent mode; and keep the composer compact.
 - **Project intelligence:** SleepyCode builds a bounded local index of project files, symbols, imports, frameworks, and important entry points so relevant context can be found without re-scanning the whole repository on every request. The index is persisted per workspace and can be rebuilt from the home/context UI or with the `/reindex` command.
 - **Explicit context control:** See and toggle project intelligence, the active file, and selected code; attach files/folders; and know what will be sent with the next request. A compact session-stats row under the composer shows current context-window usage, input/output lifetime token totals, approximate cost, and live tokens/second during runs.
-- **Visible agent work:** Follow plans, reasoning, tool activity, retries, and streamed answers from the sidebar.
+- **Visible agent work:** Follow plans, reasoning, tool activity, retries, and streamed answers from the sidebar. Every tool call renders with its own icon — file reads, edits, searches, commands, subagents, terminals, and web work are distinguishable at a glance — and running work glows with a flowing shimmer instead of a spinner.
 - **Workspace-aware:** Each folder gets its own project and conversation history.
 - **Changes you can review:** Each completed response records its workspace file changes so you can diff or revert a file, stage the task, create a Git commit, jump to Source Control, or restore the task checkpoint.
 - **Actionable failure states:** Expired sessions, plan/credit limits, context overflow, unavailable models, rate limits, and service failures render with the next useful action instead of a generic error string.
@@ -60,7 +62,7 @@ SleepyCode brings a Codex-style agent loop to the editor you already use. Open a
 4. Complete the one-time setup by signing in to **SleepyAI**.
 5. Keep **Auto** selected to use the lowest-cost eligible SleepyAI model (free models win when available), with A–Z as the deterministic fallback when pricing is unavailable. You can also choose a specific model from the alphabetized selector.
 
-External OpenAI-compatible endpoints, SkillsMP, MCP servers, and SearXNG are optional advanced integrations.
+External OpenAI-compatible endpoints, SkillsMP, MCP servers, SearXNG, and the headless browser are optional advanced integrations.
 
 ## What it can do
 
@@ -77,6 +79,7 @@ External OpenAI-compatible endpoints, SkillsMP, MCP servers, and SearXNG are opt
 - Stream answers while showing collapsible tool and reasoning details
 - Schedule one follow-up prompt and steer an active run
 - Retry interrupted model streams instead of silently claiming completion
+- Drive a real headless browser: navigate, click, type, evaluate JavaScript, manage tabs and iframes, and watch a live preview — see [Browser tooling](#browser-tooling)
 
 ### Keep projects organized
 
@@ -90,9 +93,21 @@ External OpenAI-compatible endpoints, SkillsMP, MCP servers, and SearXNG are opt
 
 ![SleepyCode usage and billing view](media/usage.png)
 
+## Browser tooling
+
+SleepyCode ships a full agent browser toolset for testing web UIs, scraping, and verifying rendered output. It is headless by default and requires no browser install — the driver is bundled with the extension.
+
+- **Automatic browser discovery:** Playwright's bundled Chromium is tried first, then system **Google Chrome**, **Microsoft Edge**, **Brave**, and **Firefox** (per-OS install paths on macOS, Windows, and Linux). Whatever is installed just works.
+- **Interactions:** navigate, back/forward/reload, click, type, press keys, wait for elements (visible/hidden/attached/detached), scroll, and take screenshots. Selectors support Playwright's engine syntax — `text=Login`, `role=button[name="Save"]`, `#shadow-root >> button`, `.item >> nth=2`.
+- **JavaScript evaluation:** `browser_evaluate` runs expressions or IIFEs in the page to read state, computed styles, and localStorage, or to verify what the other tools cannot.
+- **Multiple tabs:** open, list, switch (by index, URL, or title), and close tabs; console and network evidence stay isolated per tab.
+- **Iframes:** any interaction or snapshot can target an iframe by frame index or URL substring.
+- **Evidence channel:** each snapshot returns the accessibility tree, console messages, and failed network requests, so the agent knows what actually rendered.
+- **Live preview:** every page-changing action — plus a continuous 2s poller while the agent works — streams a screenshot of the active tab into a regular editor-area **Browser Preview** tab beside the chat, with the click cursor marked.
+
 ## Model providers
 
-**SleepyAI is the only built-in provider and the default route.** The extension signs in through SleepyAI, loads the model catalog exposed to the account, and surfaces SleepyAI subscription, balance, limits, and pricing data in the product UI.
+**SleepyAI is the only built-in provider and the default route.** The extension signs in through SleepyAI, loads the chat-completion portion of the model catalog exposed to the account, and surfaces SleepyAI subscription, balance, limits, and pricing data in the product UI.
 
 For advanced compatibility, users may manually add an OpenAI-compatible endpoint from **Settings → Advanced Providers**. These endpoints are never preinstalled, never selected automatically on a fresh install, and are not a substitute for the first-party SleepyAI onboarding flow. Optional provider API keys are stored separately in VS Code SecretStorage and are never written to `settings.json`.
 
@@ -101,6 +116,10 @@ A manually added compatibility provider can define a base URL, optional API key,
 ### SleepyAI Auto
 
 The SleepyAI model menu includes **Auto**. Auto is only available on the first-party SleepyAI route. SleepyCode compares the current SleepyAI pricing table and selects the model with the lowest combined input + output price; a fully free model therefore wins when available. Equal-price ties are resolved A–Z. If no candidate has complete pricing, Auto deterministically falls back to the first eligible model A–Z. The model actually used is recorded in live task activity and local usage diagnostics. Compatibility providers never receive a first-party Auto decision. Model dropdowns are also presented A–Z for predictable browsing.
+
+### Reasoning models
+
+Reasoning models that emit their chain-of-thought as XML text blocks (tagged `think`) are handled automatically: the thinking is stripped from the answer content and shown in the activity's reasoning section instead, keeping the final response clean. Models that stream native `reasoning-delta` parts render the same way.
 
 ### Project intelligence
 
@@ -124,9 +143,11 @@ SleepyCode constrains its built-in file tools to the active workspace. Common cr
 
 In Ask mode, SleepyCode opens a VS Code diff containing the proposed content before asking you to apply or reject it. For non-destructive actions, you can trust repeated edits or an exact command for the **current workspace session**; these temporary approvals are kept only in memory and destructive actions still require explicit review. Applied edits use VS Code workspace edits and participate in editor undo. In Auto edits mode, file edits apply without prompting, but commands still require approval unless that exact command was trusted for the current workspace session. Open access is intentionally powerful; use it only in workspaces where you are comfortable allowing unattended commands.
 
+Lifecycle hooks can also allow, block, warn, or require approval for specific tool calls and edits, and scheduled tasks can run prompts on a cron-like schedule.
+
 ## MCP, subagents, terminals, and memory
 
-Configure MCP servers in Settings as a JSON object. Both local stdio servers and remote HTTP/SSE servers are supported:
+Configure MCP servers in Settings as a JSON object. Local stdio servers and remote HTTP/SSE servers are supported, including full OAuth2 flows (PKCE, token refresh, and dynamic client registration) for servers that require them:
 
 ```json
 {
@@ -143,7 +164,7 @@ Configure MCP servers in Settings as a JSON object. Both local stdio servers and
 
 Each MCP tool is namespaced by server and follows the active approval mode. Connections are opened for the agent run and closed afterward.
 
-The agent can delegate a bounded task to an **explorer**, **reviewer**, or **worker** subagent. Explorer and reviewer subagents are read-only; worker subagents can edit and verify through the same approval system as the parent.
+The agent can delegate a bounded task to an **explorer**, **reviewer**, or **worker** subagent — each with its own color-coded icon in the activity panel. Explorer and reviewer subagents are read-only; worker subagents can edit and verify through the same approval system as the parent. Subagents call tools exactly like the parent agent, including text-based tool calls (`<invoke name="…">` XML) emitted by models that prefer that convention; the extension executes them, feeds the results back, and only ever surfaces the subagent's final answer.
 
 Named persistent shell sessions remain alive across tool calls and conversations until they are explicitly stopped or the extension closes. Project memory is stored in `.sleepycode/memory.md`, loaded into future requests, and editable with **SleepyCode: Open Project Memory** from the Command Palette.
 
@@ -162,11 +183,11 @@ You can also ask directly: *“Find me a skill for web scraping”* or *“Insta
 
 ### Composer slash commands
 
-Type `/` at the start of the composer to open SleepyCode’s command menu. Installed skills are suggested dynamically after `/skill `.
+Type `/` at the start of the composer to open SleepyCode's command menu. Installed skills are suggested dynamically after `/skill `.
 
 | Slash command | Action |
 | --- | --- |
-| `/skill <name> <task>` | Load the installed skill’s local `SKILL.md`, then perform the task with that workflow |
+| `/skill <name> <task>` | Load the installed skill's local `SKILL.md`, then perform the task with that workflow |
 | `/plan <task>` | Inspect first and maintain a concrete implementation plan |
 | `/fix <issue>` | Trace and fix a bug, then run relevant regression checks |
 | `/review <scope>` | Review correctness, security, regressions, maintainability, and tests |
@@ -194,12 +215,17 @@ Open the gear button in the SleepyCode sidebar or run **SleepyCode: Open Setting
 | --- | --- |
 | Active provider | SleepyAI by default; optional compatibility endpoints are selected explicitly in the sidebar and stored in extension state |
 | `sleepycode.model` | Selected model for the active provider |
-| `sleepycode.maxSteps` | Maximum tool-loop steps per iteration; defaults to `50`. `0` allows unlimited steps. If unfinished work reaches the limit, use **Continue iteration** to resume without replaying completed work. |
+| `sleepycode.maxSteps` | Maximum tool-loop steps per iteration; defaults to `200`. `0` allows unlimited steps. If unfinished work reaches the limit, use **Continue iteration** to resume without replaying completed work. |
 | `sleepycode.approvalMode` | Ask, Auto edits, or Open access |
 | `sleepycode.searxngUrl` | Optional SearXNG instance used by the web-search tool |
 | `sleepycode.mcpServers` | JSON configuration for stdio, HTTP, or SSE MCP servers |
 | `sleepycode.extraFreeModels` | Additional comma-separated model IDs to show (legacy setting name) |
 | `sleepycode.systemNotifications` | Native task, approval, and failure notifications |
+| `sleepycode.worktrees` | Enable the Git worktrees isolation feature and its agent tools |
+| `sleepycode.repoIndex` | Enable the in-memory repository index for symbol and semantic search |
+| `sleepycode.browserTesting` | Enable headless browser testing tools |
+| `sleepycode.hooks` / `sleepycode.tasksHooks` | Enable lifecycle hooks and scheduled tasks |
+| `sleepycode.customAgents` | Enable custom agent definitions with per-agent model, prompt, and tool routing |
 
 ### Optional web search
 
@@ -220,6 +246,11 @@ See the [SearXNG installation documentation](https://docs.searxng.org/admin/inst
 | `SleepyCode: Usage & Billing` | Review SleepyAI account usage, plan/balance limits, and local model activity |
 | `SleepyCode: Open Project Memory` | Open the active folder's durable memory file |
 | `SleepyCode: Skill Marketplace` | Browse, preview, and install skills |
+| `SleepyCode: Git Worktrees Dashboard` | Create and manage isolated Git worktrees |
+| `SleepyCode: Repository Index & Search` | Inspect and rebuild the local repository index |
+| `SleepyCode: Custom Agents` | Manage custom agent definitions |
+| `SleepyCode: Scheduled Tasks & Hooks` | Review scheduled tasks and hook rules |
+| `SleepyCode: Undo History` | Browse conversation checkpoints and restore points |
 | `SleepyCode: New Chat` | Start a new conversation |
 | `SleepyCode: Test System Notification` | Verify native notifications on the current platform |
 
@@ -229,6 +260,7 @@ See the [SearXNG installation documentation](https://docs.searxng.org/admin/inst
 - An internet connection and a SleepyAI account for the first-party model experience
 - Optional: credentials for a manually added OpenAI-compatible endpoint
 - Optional: SearXNG for web search
+- Optional but zero-install: a system browser (Chrome, Edge, Brave, or Firefox) for the browser tools — otherwise Playwright's bundled Chromium is used
 
 ## Development
 
@@ -257,7 +289,8 @@ The package command validates release metadata, runs the complete check suite, b
 - Skills search and installation use SkillsMP and GitHub; unauthenticated GitHub API limits may apply.
 - Git diff/revert/stage/commit controls require a Git-tracked workspace and a response that captured a task checkpoint. To avoid combining agent output with existing user work, SleepyCode refuses one-click stage/commit when a task file already contained pre-task changes; task commit also refuses unrelated pre-existing staged files. Use VS Code Source Control for explicit partial staging in those cases.
 - Persistent terminal sessions use piped shells rather than a full PTY, so full-screen terminal applications are not supported.
-- MCP authentication is configured through server headers or environment variables; interactive OAuth is not yet included.
+- Firefox automation through Playwright requires a compatible browser build; system Chrome, Edge, and Brave are the reliable zero-install options.
+- The browser preview is a near-live screenshot stream (event-driven captures plus a 2s poller during runs), not a video stream.
 
 ## Support and contributing
 

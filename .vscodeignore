@@ -4,6 +4,8 @@ src/**
 test/**
 scripts/**
 node_modules/**
+!node_modules/playwright-core/**
+!node_modules/playwright-core/package.json
 *.ts
 *.mjs
 *.map

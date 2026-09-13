@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BROWSER_RESULT_CAP,
   BrowserError,
   VIEWPORTS,
   analyzeGeometry,
+  findFrameIndex,
+  findTabIndex,
   pickViewport,
+  stringifyEvalResult,
   summarizeConsoleErrors,
   summarizeNetworkErrors,
 } from '../src/browser.ts';
@@ -57,4 +61,55 @@ test('BrowserError carries an install hint', () => {
   const error = new BrowserError('nope', 'run npm install');
   assert.equal(error.name, 'BrowserError');
   assert.equal(error.installHint, 'run npm install');
+});
+
+test('findTabIndex resolves numeric indexes and URL/title substrings', () => {
+  const tabs = [
+    { url: 'https://example.com/login', title: 'Sign in' },
+    { url: 'https://example.com/dashboard', title: 'Dashboard' },
+    { url: 'https://other.dev/home', title: 'Home' },
+  ];
+  assert.equal(findTabIndex(tabs, 0), 0);
+  assert.equal(findTabIndex(tabs, 2), 2);
+  assert.equal(findTabIndex(tabs, 3), -1);
+  assert.equal(findTabIndex(tabs, -1), -1);
+  assert.equal(findTabIndex(tabs, 1.5), -1);
+  assert.equal(findTabIndex(tabs, 5), -1);
+  assert.equal(findTabIndex(tabs, 'dashboard'), 1);
+  assert.equal(findTabIndex(tabs, 'example.com'), -2); // matches tabs 0 and 1
+  assert.equal(findTabIndex(tabs, 'sign in'), 0);
+  assert.equal(findTabIndex(tabs, 'nope'), -1);
+  assert.equal(findTabIndex(tabs, ''), -1);
+  assert.equal(findTabIndex([], 'x'), -1);
+});
+
+test('findFrameIndex resolves numeric frame indexes and URL substrings', () => {
+  const frames = [
+    { url: 'https://app.example.com/' },
+    { url: 'https://cdn.example.com/widget' },
+    { url: 'https://app.example.com/pay' },
+  ];
+  assert.equal(findFrameIndex(frames, '0'), 0);
+  assert.equal(findFrameIndex(frames, '2'), 2);
+  assert.equal(findFrameIndex(frames, '3'), -1);
+  assert.equal(findFrameIndex(frames, 'widget'), 1);
+  assert.equal(findFrameIndex(frames, 'app.example.com'), -2); // frames 0 and 2
+  assert.equal(findFrameIndex(frames, 'missing'), -1);
+  assert.equal(findFrameIndex([], '0'), -1);
+});
+
+test('stringifyEvalResult handles scalars, undefined, cycles, and caps', () => {
+  assert.equal(stringifyEvalResult({ a: 1, b: 'x' }), JSON.stringify({ a: 1, b: 'x' }, null, 2));
+  assert.equal(stringifyEvalResult('hi'), '"hi"');
+  assert.equal(stringifyEvalResult(42), '42');
+  assert.equal(stringifyEvalResult(undefined), 'undefined');
+  assert.equal(stringifyEvalResult(null), 'null');
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.equal(stringifyEvalResult(cyclic), '<unserializable>');
+  const big = 'x'.repeat(BROWSER_RESULT_CAP + 500);
+  const capped = stringifyEvalResult(big, BROWSER_RESULT_CAP);
+  assert.equal(capped.length, BROWSER_RESULT_CAP + '\n…(truncated)'.length);
+  assert.ok(capped.endsWith('…(truncated)'));
+  assert.ok(!capped.includes('y'));
 });
