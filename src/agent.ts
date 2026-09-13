@@ -11,9 +11,9 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, FileChange, FileSnapshot, McpConnectionData, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
-import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
+import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
-import { compactionOutputBudget, compactionPromptInput, contextOccupancy, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -638,6 +638,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
     const seenIds = new Set<string>();
     this.projects = this.projects.filter(project => seenIds.has(project.id) ? false : (seenIds.add(project.id), true));
+    // Rehydrate durable compaction snapshots so undo survives an extension reload.
+    for (const project of this.projects) {
+      for (const conversation of project.conversations) {
+        const snapshots = this.context.globalState.get<{ before: TranscriptItem[]; after: TranscriptItem[] }[]>(`sleepycode.compactionSnapshots.${conversation.id}`, []);
+        if (Array.isArray(snapshots) && snapshots.length) this.compactionUndoStacks.set(conversation.id, snapshots.slice(-3));
+      }
+    }
     const root = this.workspaceRoot()?.fsPath;
     if (root) {
       let project = this.projects.find(item => item.path === root);
@@ -743,13 +750,62 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.syncConversations();
   }
 
+  /**
+   * Hard safety bound only. History is NOT routinely trimmed; this guard exists
+   * solely to keep an unbounded conversation from exhausting memory. When it does
+   * trim, the user is told, so loss is never silent.
+   */
+  private boundConversationItems(conversation: Conversation): void {
+    if (conversation.items.length <= MAX_STORED_ITEMS) return;
+    const dropped = conversation.items.length - MAX_STORED_ITEMS;
+    conversation.items = conversation.items.slice(-MAX_STORED_ITEMS);
+    this.post({ type: 'contextNotice', conversationId: conversation.id, kind: 'trimmed', text: `Older history was trimmed (${dropped} item${dropped === 1 ? '' : 's'}) to keep this conversation within memory limits.` });
+  }
+
+  /**
+   * Select the transcript items to hand the model as "previous conversation".
+   * Walks backwards accumulating a chars/4 token cost until the budget is hit,
+   * keeping a minimum of COMPACTION_HISTORY_ITEMS so short conversations always
+   * send their whole (small) history instead of a fixed 9-item slice.
+   */
+  private recentContextItems(conversation: Conversation, budgetTokens: number): TranscriptItem[] {
+    const usable = conversation.items.filter(item => item.kind !== 'divider');
+    const tail = usable.slice(0, -1); // exclude the current turn
+    const picked: TranscriptItem[] = [];
+    let cost = 0;
+    for (let index = tail.length - 1; index >= 0; index--) {
+      const item = tail[index]!;
+      const itemCost = Math.ceil((item.text?.length ?? 0) / CHARS_PER_TOKEN);
+      if (picked.length >= COMPACTION_HISTORY_ITEMS && cost + itemCost > budgetTokens) break;
+      picked.unshift(item);
+      cost += itemCost;
+    }
+    return picked;
+  }
+
+  /**
+   * Persist compaction undo snapshots so a compaction can be undone after an
+   * extension reload (the in-memory stacks alone are lost on restart).
+   */
+  private async persistCompactionSnapshots(conversationId: string): Promise<void> {
+    if (!conversationId) return;
+    const snapshot = this.compactionUndoStacks.get(conversationId);
+    if (snapshot?.length) await this.context.globalState.update(`sleepycode.compactionSnapshots.${conversationId}`, snapshot.slice(-3));
+    else await this.context.globalState.update(`sleepycode.compactionSnapshots.${conversationId}`, undefined);
+  }
+
   private persistProjects(): Promise<void> {
-    const projects = this.projects.slice(0, 60);
+    const projects = this.projects.slice(0, MAX_PERSISTED_PROJECTS);
     this.persistChain = this.persistChain.then(async () => {
       await this.context.globalState.update('sleepycode.projectIndex', projects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })));
       for (const project of projects) {
+        const conversations = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
+        if (conversations.length < project.conversations.length) {
+          const dropped = project.conversations.length - conversations.length;
+          this.post({ type: 'contextNotice', conversationId: project.activeConversationId, kind: 'trimmed', text: `${dropped} older conversation${dropped === 1 ? '' : 's'} in this project were not saved (limit ${MAX_PERSISTED_CONVERSATIONS}).` });
+        }
         await this.context.globalState.update(`sleepycode.project.${project.id}`, {
-          conversations: project.conversations.slice(0, 100),
+          conversations,
           activeConversationId: project.activeConversationId,
         });
       }
@@ -933,6 +989,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (choice !== 'ok') return;
       }
       this.queue = this.queue.filter(entry => entry.conversationId !== message.id);
+      this.compactionUndoStacks.delete(message.id);
+      this.compactionRedoStacks.delete(message.id);
+      void this.context.globalState.update(`sleepycode.compactionSnapshots.${message.id}`, undefined);
       project.conversations = project.conversations.filter(item => item.id !== message.id);
       project.updatedAt = Date.now();
       if (project.activeConversationId === message.id) {
@@ -2305,8 +2364,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ? `${resumeDirection}\n\n${resumeContext}`
           : userText;
       } else {
-        const recent = conversation.items.slice(-10, -1)
-          .filter(item => item.kind !== 'divider')
+        const budgetTokens = Math.max(2_000, Math.floor((DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_RATIO) / 2));
+        const recent = this.recentContextItems(conversation, budgetTokens)
           .map(item => `${item.role.toUpperCase()}: ${item.text}`)
           .join('\n\n');
         streamPrompt = recent
@@ -2491,7 +2550,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (runChanges.size) assistantItem.changes = [...runChanges.values()];
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           conversation.items.push(assistantItem);
-          conversation.items = conversation.items.slice(-60);
+          this.boundConversationItems(conversation);
           conversation.updatedAt = Date.now();
           project.updatedAt = Date.now();
           await this.persistProjects();
@@ -2542,7 +2601,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (partialAnswer.trim()) errorItem.partialText = partialAnswer;
         if (runChanges.size) errorItem.changes = [...runChanges.values()];
         conversation.items.push(errorItem);
-        conversation.items = conversation.items.slice(-60);
+        this.boundConversationItems(conversation);
         conversation.updatedAt = Date.now();
         project.updatedAt = Date.now();
         await this.persistProjects();
@@ -2620,6 +2679,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       undo.push({ before: before.slice(), after: summarized.items.slice() });
       this.compactionUndoStacks.set(targetId ?? '', undo.slice(-3));
       this.compactionRedoStacks.delete(targetId ?? '');
+      void this.persistCompactionSnapshots(targetId ?? '');
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
@@ -2665,8 +2725,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   /**
    * Restores the transcript that a compaction replaced. Only call this when the
-   * last item is the compaction divider marker; the snapshot stack is in-memory
-   * (like turn-undo) so it does not survive an extension reload.
+   * last item is the compaction divider marker; snapshots are persisted to
+   * globalState (see persistCompactionSnapshots) so this survives a reload too.
    */
   private undoCompaction(conversation: Conversation): boolean {
     const stack = this.compactionUndoStacks.get(conversation.id);
@@ -2677,6 +2737,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     redo.push(snapshot);
     this.compactionRedoStacks.set(conversation.id, redo.slice(-3));
     conversation.items = snapshot.before;
+    void this.persistCompactionSnapshots(conversation.id);
     return true;
   }
 
@@ -2701,6 +2762,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     undo.push(snapshot);
     this.compactionUndoStacks.set(conversation.id, undo.slice(-3));
     conversation.items = snapshot.after;
+    void this.persistCompactionSnapshots(conversation.id);
     return true;
   }
 
