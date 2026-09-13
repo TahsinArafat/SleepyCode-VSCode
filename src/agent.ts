@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
@@ -8,7 +9,7 @@ import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHe
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
-import type { AppConfig, Attachment, ComposerContext, Conversation, FileChange, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
+import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, FileChange, FileSnapshot, McpConnectionData, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_REASONING } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
@@ -17,13 +18,17 @@ import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
-import { connectMcpServers, parseMcpServers, type McpConnection } from './mcp';
+import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
 import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
 import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
 import { TerminalManager } from './terminal';
 import { MEMORY_RELATIVE_PATH, openProjectMemory, readProjectMemory, writeProjectMemory } from './memory';
 import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
+import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
+import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
+import { listWorktrees } from './worktrees';
+import { BrowserController } from './browser';
 
 type PlanState = {
   title: string;
@@ -37,6 +42,17 @@ type PlanState = {
 const MAX_CONCURRENT_RUNS = 3;
 const MAX_RUN_RETRIES = 5;
 
+/** Capture a file's pre-edit content so undo can restore it outside Git. `before` avoids a disk read when the tool already supplied it. */
+function captureFileSnapshot(rootPath: string, relative: string, before?: unknown): FileSnapshot {
+  if (typeof before === 'string') return { path: relative, existed: true, content: before };
+  try {
+    const absolute = path.join(rootPath, relative);
+    return { path: relative, existed: true, content: readFileSync(absolute, 'utf8') };
+  } catch {
+    return { path: relative, existed: false, content: '' };
+  }
+}
+
 export const AGENT_DEFINITIONS: { id: string; name: string; color: string; prompt?: string }[] = [
   { id: 'default', name: 'SleepyCode', color: '#6c7086' },
   { id: 'apex', name: 'Apex (Builder)', color: '#f43f5e', prompt: 'Act as an implementation-focused builder. Prefer complete, working vertical slices over speculative discussion. Trace dependencies before editing, keep changes cohesive, and verify the user-visible path end to end.' },
@@ -46,8 +62,36 @@ export const AGENT_DEFINITIONS: { id: string; name: string; color: string; promp
   { id: 'stack', name: 'Stack (Architect)', color: '#3b82f6', prompt: 'Act as a software architect who still ships code. Preserve clear boundaries, data ownership, and failure semantics. Prefer simple interfaces and migration-safe changes, then verify architecture decisions against real runtime paths.' },
 ];
 
-function userOsName(): string {
-  switch (process.platform) {
+/** Tools that stay available regardless of an agent's allow/deny policy so the UI can still report progress. */
+const AGENT_ALWAYS_ALLOWED_TOOLS = new Set(['plan']);
+
+/** Tool-name prefixes that may be granted or revoked as a group in an agent's policy. */
+const AGENT_TOOL_WILDCARDS = ['terminal_', 'skillsmp_', 'web_search', 'worktree_', 'repo_', 'browser_', 'github_'];
+
+/** Keeps only the tools an agent's allow/deny policy permits. Deny always wins; `plan` is never removed. */
+function filterAgentTools<T extends Record<string, unknown>>(tools: T, policy?: CustomAgentConfig['tools']): T {
+  const allow = (policy?.allow ?? []).map(name => name.trim()).filter(Boolean);
+  const deny = (policy?.deny ?? []).map(name => name.trim()).filter(Boolean);
+  if (!allow.length && !deny.length) return tools;
+  const matches = (names: string[], toolName: string): boolean => names.some(name => {
+    if (name === '*' || name === toolName) return true;
+    if (name.endsWith('*') && toolName.startsWith(name.slice(0, -1))) return true;
+    return AGENT_TOOL_WILDCARDS.includes(name) && toolName.startsWith(name);
+  });
+  const permitted = (toolName: string): boolean => {
+    if (AGENT_ALWAYS_ALLOWED_TOOLS.has(toolName)) return true;
+    if (matches(deny, toolName)) return false;
+    if (!allow.length) return true;
+    return matches(allow, toolName);
+  };
+  const filtered = { ...tools };
+  for (const toolName of Object.keys(tools)) {
+    if (!permitted(toolName)) delete filtered[toolName];
+  }
+  return filtered;
+}
+
+function userOsName(): string {  switch (process.platform) {
     case 'darwin': return 'macOS (darwin)';
     case 'win32': return 'Windows (win32)';
     case 'linux': return 'Linux (linux)';
@@ -111,7 +155,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private sessionAutoApproveEditRoots = new Set<string>();
   private lastSleepyAccountRefresh = 0;
   private readonly projectIndex: ProjectIndexService;
+  private repoIndexCache?: { root: string; index: RepoIndex; symboled: boolean };
+  private readonly browser = new BrowserController();
   private projectIndexTimer?: NodeJS.Timeout;
+  private schedulerTimer?: NodeJS.Timeout;
   private lastModelGroups: ProviderModelGroup[] = [];
   private lastSleepyModelPrices: SleepyModelPrice[] = [];
   private lastSleepyPriceRefresh = 0;
@@ -132,6 +179,91 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       vscode.window.onDidChangeActiveTextEditor(() => this.sendEditorContext()),
       vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContext()),
     );
+    this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
+    context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
+  }
+
+  /** User-defined agents persisted in global state. Invalid entries are dropped rather than trusted. */
+  private customAgents(): CustomAgentConfig[] {
+    const stored = this.context.globalState.get<unknown[]>('sleepycode.customAgents', []);
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((agent): agent is CustomAgentConfig => Boolean(agent) && typeof agent === 'object' && typeof (agent as CustomAgentConfig).id === 'string' && typeof (agent as CustomAgentConfig).name === 'string');
+  }
+
+  private async saveCustomAgents(list: CustomAgentConfig[]): Promise<void> {
+    await this.context.globalState.update('sleepycode.customAgents', list);
+  }
+
+  /** Built-in agents first, then user agents. A user agent may not shadow a built-in id. */
+  private allAgents(): CustomAgentConfig[] {
+    const builtIns = AGENT_DEFINITIONS as CustomAgentConfig[];
+    const builtInIds = new Set(builtIns.map(agent => agent.id));
+    return [...builtIns, ...this.customAgents().filter(agent => !builtInIds.has(agent.id))];
+  }
+
+  private agentConfig(agentId: string): CustomAgentConfig | undefined {
+    return this.allAgents().find(agent => agent.id === agentId);
+  }
+
+  /** Matches a leading `@agent-id` token against the agent roster and strips it from the request. */
+  private parseAgentMention(text: string): { agentId?: string; text: string } {
+    const match = text.match(/^\s*@([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/);
+    if (!match) return { text };
+    const agent = this.allAgents().find(item => item.id.toLowerCase() === match[1]!.toLowerCase());
+    if (!agent) return { text };
+    const rest = (match[2] ?? '').trim();
+    return { agentId: agent.id, text: rest || text.trim() };
+  }
+
+  /** Repairs a selection that points at a deleted custom agent. Returns true when state changed. */
+  private async ensureSelectedAgent(): Promise<boolean> {
+    const base = this.config();
+    if (this.agentConfig(base.agentId)) return false;
+    const fallback = AGENT_DEFINITIONS[0]!.id;
+    await this.context.globalState.update('sleepycode.agentId', fallback);
+    let changed = false;
+    for (const project of this.projects) {
+      for (const conversation of project.conversations) {
+        if (conversation.agentId !== base.agentId) continue;
+        conversation.agentId = fallback;
+        conversation.updatedAt = Date.now();
+        project.updatedAt = Date.now();
+        changed = true;
+      }
+    }
+    this.postConfig();
+    return changed;
+  }
+
+  private scheduledTasks(): ScheduledTask[] {
+    const stored = this.context.globalState.get<unknown[]>('sleepycode.scheduledTasks', []);
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((task): task is ScheduledTask => Boolean(task) && typeof task === 'object' && typeof (task as ScheduledTask).id === 'string' && typeof (task as ScheduledTask).prompt === 'string');
+  }
+
+  private async runDueScheduledTasks(): Promise<void> {
+    if (!vscode.workspace.getConfiguration('sleepycode').get<boolean>('tasksHooks', true)) return;
+    const tasks = this.scheduledTasks();
+    if (!tasks.length) return;
+    const due = dueTasks(tasks, Date.now());
+    if (!due.length) return;
+    const now = Date.now();
+    const updated = tasks.map(task => {
+      if (!due.some(item => item.id === task.id)) return task;
+      return { ...task, lastRunAt: now, nextRunAt: nextRunAt(task.schedule, now) };
+    });
+    await this.context.globalState.update('sleepycode.scheduledTasks', updated);
+    for (const task of due) {
+      if (!task.enabled) continue;
+      if (this.runs.size >= MAX_CONCURRENT_RUNS) {
+        this.enqueue(task.prompt, this.activeProject()?.activeConversationId ?? '');
+        continue;
+      }
+      const project = this.activeProject();
+      const conversationId = project?.activeConversationId ?? '';
+      this.notifyHooks('onAgentStart', { text: `scheduled:${task.name}` });
+      void this.run(task.prompt, conversationId, undefined, undefined, undefined, `Scheduled task "${task.name}".`);
+    }
   }
 
   private onWorkspaceFoldersChanged(): void {
@@ -220,6 +352,66 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   async openSettings(): Promise<void> { return this.showSettings(); }
 
+  openPanel(panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'): void {
+    const root = this.workspaceRoot();
+    if (!root) {
+      void vscode.window.showInformationMessage('Open a folder or workspace first.');
+      return;
+    }
+    this.view?.show?.(true);
+    this.post({ type: 'showPanel', panel });
+    void this.sendPanel(panel);
+  }
+
+  private async sendPanel(panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'): Promise<void> {
+    const root = this.workspaceRoot();
+    if (!root) return;
+    const rows: { title: string; detail?: string }[] = [];
+    let hint = '';
+    try {
+      if (panel === 'worktrees') {
+        if (!isGitTrackedWorkspace(root.fsPath)) hint = 'This workspace is not a Git repository. Worktrees require Git.';
+        else for (const tree of await listWorktrees(root.fsPath)) rows.push({ title: tree.name, detail: `${tree.branch} · ${tree.commit.slice(0, 8)}${tree.isMain ? ' · main' : ''}` });
+      } else if (panel === 'index') {
+        const index = await this.loadRepoIndex(root);
+        const symbols = index.indexSymbols();
+        rows.push({ title: `${index.files.length} files indexed`, detail: `${symbols.length} symbols` });
+        for (const edge of index.architectureMap().edges.slice(0, 60)) rows.push({ title: edge.from, detail: `imports ${edge.to}` });
+        hint = 'Ask the agent to use repo_search or repo_symbol for symbol and semantic search.';
+      } else if (panel === 'tasks') {
+        const hooks = this.hookRules();
+        if (!hooks.length) hint = 'No hook rules configured. Hook rules live in extension state and can allow, block, or require approval for tool calls.';
+        for (const rule of hooks) rows.push({ title: `${rule.name} (${rule.event})`, detail: `action: ${rule.action}${rule.matcher?.tool ? ` · tool ${rule.matcher.tool}` : ''}${rule.matcher?.pathGlob ? ` · ${rule.matcher.pathGlob}` : ''}` });
+      } else if (panel === 'agents') {
+        const builtIns = new Set(AGENT_DEFINITIONS.map(agent => agent.id));
+        for (const agent of this.allAgents()) {
+          const detail = [agent.id, agent.model || 'default model', builtIns.has(agent.id) ? 'built-in' : 'custom'].join(' · ');
+          rows.push({ title: agent.name, detail });
+        }
+        hint = 'Select an agent from the composer pill, or type @agent-id at the start of a message to route it.';
+      } else if (panel === 'checkpoints') {
+        const project = this.activeProject();
+        const conversation = project?.conversations.find(item => item.id === project.activeConversationId);
+        const withSnapshots = (conversation?.items ?? []).filter(item => item.fileSnapshot?.length || item.gitTree);
+        if (!withSnapshots.length) hint = 'No restorable snapshots yet. Each assistant turn records one so undo works outside Git.';
+        for (const item of withSnapshots.slice(-40)) rows.push({ title: item.text.slice(0, 80) || '(no text)', detail: `${item.fileSnapshot?.length ?? 0} files snapshot${item.gitTree ? ' · git checkpoint' : ''}` });
+      }
+    } catch (error) {
+      hint = errorMessage(error);
+    }
+    this.post({ type: 'panel', panel, rows, hint });
+  }
+
+  private async restoreFileSnapshots(rootPath: string, snapshots: FileSnapshot[]): Promise<void> {
+    for (const snap of snapshots) {
+      const uri = vscode.Uri.file(path.join(rootPath, snap.path));
+      try {
+        if (snap.existed) await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(snap.content));
+        else await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false });
+      } catch { }
+    }
+  }
+
   openUsage(): void {
     this.view?.show?.(true);
     this.post({ type: 'showUsage' });
@@ -271,6 +463,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private skillsRoot(): vscode.Uri {
     return vscode.Uri.joinPath(this.context.globalStorageUri, 'skills');
+  }
+
+  private async loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
+    if (this.repoIndexCache?.root === root.fsPath) {
+      if (!this.repoIndexCache.symboled) {
+        this.repoIndexCache.index.indexSymbols();
+        this.repoIndexCache.symboled = true;
+      }
+      return this.repoIndexCache.index;
+    }
+    const index = new RepoIndex(scanWorkspace(root.fsPath));
+    index.indexSymbols();
+    this.repoIndexCache = { root: root.fsPath, index, symboled: true };
+    return index;
+  }
+
+  private loadRepoMemory(root: vscode.Uri): SourceCitedMemory {
+    const memory = new SourceCitedMemory();
+    const json = loadMemoryJson(root.fsPath);
+    if (json) memory.load(json);
+    return memory;
   }
 
   private globalSkillsReady?: Promise<void>;
@@ -328,6 +541,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'marketplaceInstalled', skills });
   }
 
+  private async sendMcpConnections(): Promise<void> {
+    this.post({ type: 'mcpConnections', connections: await loadMcpConnections(this.context) });
+  }
+
+  /** Receives `vscode://<publisher>.<extension>/mcp/oauth/callback` after an MCP OAuth authorization. */
+  async handleUri(uri: vscode.Uri): Promise<void> {
+    if (uri.path.replace(/\/+$/, '').endsWith('/mcp/oauth/callback')) {
+      try {
+        const name = await finishMcpOAuth(uri, this.context);
+        this.post({ type: 'toast', id: Date.now(), title: 'MCP authorized', message: `Authorization completed for ${name}.`, kind: 'info' });
+        void vscode.window.showInformationMessage(`SleepyCode: MCP connection "${name}" is authorized.`);
+        await this.sendMcpConnections();
+      } catch (error) {
+        this.post({ type: 'toast', id: Date.now(), title: 'MCP authorization failed', message: errorMessage(error), kind: 'attention' });
+        void vscode.window.showErrorMessage(`SleepyCode: MCP authorization failed — ${errorMessage(error)}`);
+      }
+      return;
+    }
+    void vscode.window.showInformationMessage(`SleepyCode received an unrecognized URI: ${uri.toString()}`);
+  }
+
   private async showSettings(initialSetup = false): Promise<void> {
     const config = this.config();
     const providers = this.getProviders();
@@ -342,6 +576,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       extraFreeModels: config.extraFreeModels.join(', '),
       activeProvider: config.activeProvider,
       providers,
+      mcpConnections: await loadMcpConnections(this.context),
       apiKeys: Object.fromEntries(providers.map(provider => [provider.id, Boolean(this.apiKeys[provider.id])])),
       sleepy: sleepyAccount,
       onlyDefaultModels: this.config().onlyDefaultModels,
@@ -812,6 +1047,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           try {
             await restoreGitTree(root.fsPath, lastItem.gitTree);
           } catch { }
+        } else if (root && lastItem.fileSnapshot?.length) {
+          await this.restoreFileSnapshots(root.fsPath, lastItem.fileSnapshot);
         }
         popped.unshift(conversation.items.pop()!);
       }
@@ -852,6 +1089,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       project.updatedAt = Date.now();
       await this.persistProjects();
       this.syncConversations();
+      return;
+    }
+    if (message.type === 'requestPanel') {
+      void this.sendPanel(message.panel);
       return;
     }
     if (message.type === 'requestUsage') {
@@ -1115,6 +1356,92 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await vscode.env.openExternal(vscode.Uri.parse(SLEEPY_WEBSITE_URL));
       return;
     }
+    if (message.type === 'saveMcpConnection') {
+      try {
+        const name = message.connection?.name?.trim();
+        const url = message.connection?.url?.trim();
+        if (!name) throw new Error('MCP connection name is required.');
+        if (!url || !/^https?:\/\//i.test(url)) throw new Error('MCP connection URL must start with http:// or https://.');
+        const auth = message.connection.auth ?? { type: 'none' as const };
+        for (const [key, value] of Object.entries(auth.customHeaders ?? {})) {
+          if (!key.trim() || typeof value !== 'string') throw new Error('Custom headers must be a JSON object with string values.');
+        }
+        const stored = await loadMcpConnections(this.context);
+        const existing = stored.find(connection => connection.name === name);
+        await saveMcpConnection(this.context, {
+          name,
+          description: message.connection.description ?? '',
+          url,
+          transport: message.connection.transport === 'sse' ? 'sse' : 'http',
+          auth,
+          enabled: message.connection.enabled !== false,
+          order: typeof message.connection.order === 'number' ? message.connection.order : (existing?.order ?? stored.length),
+        });
+        this.post({ type: 'mcpConnectionResult', ok: true, text: 'Saved.' });
+        await this.sendMcpConnections();
+      } catch (error) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: errorMessage(error) });
+      }
+      return;
+    }
+    if (message.type === 'deleteMcpConnection') {
+      try {
+        const name = message.name?.trim();
+        if (!name) throw new Error('MCP connection name is required.');
+        await deleteMcpConnection(this.context, name);
+        this.post({ type: 'mcpConnectionResult', ok: true, text: `Removed "${name}".` });
+        await this.sendMcpConnections();
+      } catch (error) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: errorMessage(error) });
+      }
+      return;
+    }
+    if (message.type === 'testMcpConnection') {
+      const name = message.name?.trim();
+      const connection = (await loadMcpConnections(this.context)).find(item => item.name === name);
+      if (!connection) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: `MCP connection "${name ?? ''}" was not found.` });
+        await this.sendMcpConnections();
+        return;
+      }
+      let testable: McpConnectionData = connection;
+      try {
+        if (!connection.enabled) {
+          testable = { ...connection, enabled: true };
+          this.post({ type: 'mcpConnectionResult', ok: true, text: 'Testing a disabled connection…' });
+        }
+        const result = await connectToMcpConnections([testable], this.context, (title, detail) => this.approve('command', title, detail));
+        await result.connection.close();
+        const status = result.statuses.find(item => item.name === connection.name) ?? result.statuses[0];
+        const ok = status?.state === 'ok';
+        const text = ok
+          ? `Connected. ${status?.toolCount ?? 0} tool${status?.toolCount === 1 ? '' : 's'} available.`
+          : (status?.state === 'auth_required'
+            ? `${connection.name} requires authorization. Edit this connection and choose Connect OAuth.`
+            : (status?.error ? `${connection.name}: ${status.error}` : `${connection.name} could not be reached.`));
+        this.post({ type: 'mcpConnectionResult', ok, text, status });
+        await this.sendMcpConnections();
+      } catch (error) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: errorMessage(error) });
+        await this.sendMcpConnections();
+      }
+      return;
+    }
+    if (message.type === 'connectMcpOAuth') {
+      const name = message.name?.trim();
+      const connection = (await loadMcpConnections(this.context)).find(item => item.name === name);
+      if (!connection) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: `MCP connection "${name ?? ''}" was not found.` });
+        return;
+      }
+      try {
+        await beginMcpOAuth({ name: connection.name, auth: connection.auth }, this.context);
+        this.post({ type: 'mcpConnectionResult', ok: true, text: 'Waiting for OAuth authorization in your browser…' });
+      } catch (error) {
+        this.post({ type: 'mcpConnectionResult', ok: false, text: errorMessage(error) });
+      }
+      return;
+    }
     if (message.type === 'resetSettings') {
       const previousProviders = this.getProviders();
       const config = vscode.workspace.getConfiguration('sleepycode');
@@ -1172,6 +1499,63 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.persistProjects();
       }
       this.postConfig();
+      return;
+    }
+    if (message.type === 'saveAgent') {
+      const incoming = message.agent;
+      const id = (incoming?.id ?? '').trim();
+      const name = (incoming?.name ?? '').trim();
+      if (!id || !name || !/^[A-Za-z0-9_-]+$/.test(id)) {
+        void vscode.window.showWarningMessage('Agent id may only contain letters, numbers, hyphens, and underscores.');
+        return;
+      }
+      const sanitizeList = (values?: string[]): string[] | undefined => {
+        const cleaned = (Array.isArray(values) ? values : []).map(value => String(value).trim()).filter(Boolean);
+        return cleaned.length ? cleaned : undefined;
+      };
+      const tools = { allow: sanitizeList(incoming.tools?.allow), deny: sanitizeList(incoming.tools?.deny) };
+      const entry: CustomAgentConfig = {
+        id,
+        name,
+        ...(incoming.color?.trim() ? { color: incoming.color.trim() } : {}),
+        ...(incoming.prompt?.trim() ? { prompt: incoming.prompt.trim() } : {}),
+        ...(incoming.model?.trim() ? { model: incoming.model.trim() } : {}),
+        ...(tools.allow || tools.deny ? { tools } : {}),
+        ...(sanitizeList(incoming.skills) ? { skills: sanitizeList(incoming.skills) } : {}),
+      };
+      // Upsert in place so saving an existing agent keeps its position (and therefore its pill order).
+      const list = this.customAgents();
+      const index = list.findIndex(agent => agent.id === id);
+      if (index >= 0) list[index] = entry;
+      else list.push(entry);
+      await this.saveCustomAgents(list);
+      this.agentPromptCache.delete(id);
+      this.post({ type: 'agents', agents: this.customAgents() });
+      void this.sendPanel('agents');
+      return;
+    }
+    if (message.type === 'deleteAgent') {
+      const list = this.customAgents().filter(agent => agent.id !== message.id);
+      await this.saveCustomAgents(list);
+      this.agentPromptCache.delete(message.id);
+      const fallback = AGENT_DEFINITIONS[0]!.id;
+      let dirty = false;
+      for (const project of this.projects) {
+        for (const conversation of project.conversations) {
+          if (conversation.agentId !== message.id) continue;
+          conversation.agentId = fallback;
+          conversation.updatedAt = Date.now();
+          project.updatedAt = Date.now();
+          dirty = true;
+        }
+      }
+      if (this.context.globalState.get<string>('sleepycode.agentId', '') === message.id) {
+        await this.context.globalState.update('sleepycode.agentId', fallback);
+      }
+      if (dirty) await this.persistProjects();
+      this.post({ type: 'agents', agents: this.customAgents() });
+      this.postConfig();
+      void this.sendPanel('agents');
       return;
     }
     if (message.type === 'reviewChanges') {
@@ -1388,13 +1772,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         conversationId = active.id;
       }
       const root = this.workspaceRoot();
+      const mention = this.parseAgentMention(message.text);
+      const sendText = mention.text.trim() || message.text.trim();
+      if (mention.agentId) {
+        await this.context.globalState.update('sleepycode.agentId', mention.agentId);
+        this.agentPromptCache.clear();
+        const target = project.conversations.find(conversation => conversation.id === conversationId);
+        if (target && target.agentId !== mention.agentId) {
+          target.agentId = mention.agentId;
+          target.updatedAt = Date.now();
+          project.updatedAt = Date.now();
+          await this.persistProjects();
+        }
+        this.postConfig();
+      }
       const editorContext = root ? await this.composerContextBlock(root, message.context) : '';
-      const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, message.text.trim()) : '';
+      const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
-        this.enqueue(message.text.trim(), conversationId, message.context, promptContext);
+        this.enqueue(sendText, conversationId, message.context, promptContext);
       } else {
-        void this.run(message.text.trim(), conversationId, undefined, undefined, message.context, promptContext);
+        void this.run(sendText, conversationId, undefined, undefined, message.context, promptContext);
       }
       return;
     }
@@ -1426,6 +1824,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const resume = {
         work: last.work,
         changes: last.changes,
+        fileSnapshot: last.fileSnapshot,
         errorText: `The previous iteration paused after reaching its ${last.pauseLimit ?? this.config().maxSteps}-step limit. Continue only the unfinished work.`,
         partialText: last.text.trim() && last.text !== pausePlaceholder ? last.text : undefined,
       };
@@ -1450,7 +1849,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'queuedPrompt', conversationId, prompt: entry?.text ?? null });
   }
 
-  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; partialText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
+  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
     const root = this.workspaceRoot();
     if (!root) {
       this.post({ type: 'error', text: 'Open a folder or workspace first.' });
@@ -1482,6 +1881,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.items.push(userItem);
       if (conversation.items.length === 1) conversation.title = conversationTitle(userText);
       this.post({ type: 'user', conversationId, item: userItem });
+      this.notifyHooks('onMessage', { text: userText });
     }
     conversation.updatedAt = Date.now();
     project.updatedAt = Date.now();
@@ -1491,6 +1891,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
     const work: WorkItem[] = resume ? [...(resume.work ?? [])] : [];
     const runChanges = new Map<string, FileChange>((resume?.changes ?? []).map(change => [change.path, change]));
+    const snapshotByPath = new Map<string, FileSnapshot>((resume?.fileSnapshot ?? []).map(snap => [snap.path, snap]));
     const postToolEvent = (message: unknown): void => {
       if (!message || typeof message !== 'object') {
         this.post(message);
@@ -1507,7 +1908,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           const previous = runChanges.get(relative);
           if (previous?.action === 'Created' && action === 'Deleted') {
             runChanges.delete(relative);
+            snapshotByPath.delete(relative);
           } else {
+            if (!snapshotByPath.has(relative)) {
+              snapshotByPath.set(relative, captureFileSnapshot(root.fsPath, relative, record.before));
+            }
             const mergedAction: FileChange['action'] = previous?.action === 'Created' ? 'Created' : action;
             runChanges.set(relative, { path: relative, action: mergedAction });
           }
@@ -1579,7 +1984,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         postPlan();
       }
     }
+    if (await this.ensureSelectedAgent()) {
+      await this.persistProjects();
+    }
+    const conversationAgent = this.agentConfig(conversation.agentId ?? this.config().agentId);
     const selection = this.selectionFor(conversation);
+    if (!conversation.model && conversationAgent?.model && !resume) {
+      selection.model = conversationAgent.model;
+      this.post({ type: 'modelRoute', conversationId, requested: conversationAgent.model, model: conversationAgent.model, reason: `${conversationAgent.name} agent model` });
+    }
     const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
     try {
@@ -1654,6 +2067,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         root.fsPath,
         (title, detail) => this.approve('command', title, detail),
       );
+      const savedConnections = await loadMcpConnections(this.context);
+      if (savedConnections.some((c) => c.enabled)) {
+        const extra = await connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail));
+        mcpConnection = {
+          tools: { ...mcpConnection.tools, ...extra.connection.tools },
+          instructions: [...mcpConnection.instructions, ...extra.connection.instructions],
+          errors: [...mcpConnection.errors, ...extra.connection.errors],
+          close: async () => { await mcpConnection!.close(); await extra.connection.close(); },
+        };
+      }
       const instructions = [
         await this.systemPrompt(root, selection.agentId),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
@@ -1671,6 +2094,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           await writeProjectMemory(root, content);
         },
       };
+      const repoIndex = await this.loadRepoIndex(root);
+      const repoMemory = this.loadRepoMemory(root);
 
       const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string): Promise<string> => {
         const cleanTask = task.trim();
@@ -1700,6 +2125,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           for (const name of ['write_file', 'replace_text', 'delete_file', 'run_command', 'terminal_start', 'terminal_write', 'terminal_stop', 'memory_update', 'skillsmp_install_skill']) delete subagentTools[name];
         }
         delete subagentTools.delegate_task;
+        filterAgentTools(subagentTools, conversationAgent?.tools);
         const roleInstruction = role === 'explorer'
           ? 'Research the repository read-only. Return findings with precise workspace-relative file paths and line references.'
           : role === 'reviewer'
@@ -1752,9 +2178,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             prompt: `${cleanTask}${context?.trim() ? `\n\nContext from the parent agent:\n${context.trim()}` : ''}`,
             abortSignal: run.controller.signal,
             onToolExecutionStart: ({ toolCall }) => {
+              this.notifyHooks('beforeTool', { tool: toolCall.toolName });
               this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id: `${subagentId}:tool:${toolCall.toolCallId}`, name: toolTask(toolCall.toolName, toolCall.input) });
             },
             onToolExecutionEnd: ({ toolCall, toolOutput }) => {
+              this.notifyHooks('afterTool', { tool: toolCall.toolName });
               const failed = toolOutput?.type === 'tool-error';
               this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'end', failed, id: `${subagentId}:tool:${toolCall.toolCallId}`, name: toolTask(toolCall.toolName, toolCall.input) });
             },
@@ -1778,7 +2206,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       };
 
-      const agentTools = {
+      const agentTools = filterAgentTools({
         ...buildTools({
           root,
           skillsDir: this.skillsRoot(),
@@ -1792,9 +2220,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           terminals: this.terminals,
           delegate,
           memory: memoryAccess,
+          repoIndex,
+          repoMemory,
+          browser: this.browser,
         }),
         ...mcpConnection.tools,
-      };
+      }, conversationAgent?.tools);
 
       const agent = new ToolLoopAgent({
         model: provider(model),
@@ -1870,10 +2301,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 ]
               }]
               : streamPrompt;
+            this.notifyHooks('onAgentStart', { text: streamPrompt });
             const result = await agent.stream({
               prompt,
               abortSignal: run.controller.signal,
               onToolExecutionStart: ({ toolCall }) => {
+                this.enforceHooks('beforeTool', { tool: toolCall.toolName, text: JSON.stringify(toolCall.input ?? {}) });
                 if (toolCall.toolName === 'plan') {
                   const input = toolCall.input as { title?: string; steps?: string[]; activeStep?: number; doneSteps?: number[] };
                   const parsedSteps = Array.isArray(input?.steps)
@@ -1921,6 +2354,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
               },
               onToolExecutionEnd: ({ toolCall }) => {
+                this.notifyHooks('afterTool', { tool: toolCall.toolName });
                 if (toolCall.toolName === 'plan') return;
                 const taskEntry = activeTasks.get(toolCall.toolCallId);
                 if (taskEntry) taskEntry.done = true;
@@ -2012,6 +2446,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             assistantItem.pauseLimit = maxSteps;
           }
           if (runChanges.size) assistantItem.changes = [...runChanges.values()];
+          if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           conversation.items.push(assistantItem);
           conversation.items = conversation.items.slice(-60);
           conversation.updatedAt = Date.now();
@@ -2078,6 +2513,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.runs.delete(conversationId);
       this.post({ type: 'state', conversationId, running: false, label: '' });
       this.syncConversations(false);
+      this.notifyHooks('onAgentEnd', { text: userText });
       // Auto-compaction must run after this.runs.delete above: compactConversation
       // refuses to compact while a run is active for the conversation.
       if (providerConfig) this.maybeAutoCompact(conversation, providerConfig.id, this.selectionFor(conversation).model);
@@ -2540,7 +2976,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void vscode.window.showInformationMessage(`Committed SleepyCode task${hash ? ` (${hash})` : ''}.`);
   }
 
+  private hookRules(): HookRule[] {
+    const stored = this.context.globalState.get<unknown[]>('sleepycode.hooks', []);
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((rule): rule is HookRule => Boolean(rule) && typeof rule === 'object' && typeof (rule as HookRule).event === 'string' && (rule as HookRule).enabled !== false);
+  }
+
+  private enforceHooks(event: HookContext['event'], context: Omit<HookContext, 'event'>, options: { blocking?: boolean } = {}): void {
+    const rules = this.hookRules();
+    if (!rules.length) return;
+    const decision = evaluateHooks(rules, { event, ...context });
+    if (!decision.triggered) return;
+    if (decision.action === 'block') throw new Error(`Blocked by hook rule: ${decision.message}`);
+    if (decision.action === 'requireApproval' && options.blocking) throw new Error(`Approval required by hook rule: ${decision.message}`);
+    if (decision.action === 'warn' || decision.action === 'requireApproval') this.post({ type: 'toast', id: Date.now(), title: 'Hook warning', message: decision.message, kind: 'attention' });
+    else if (decision.action === 'log') this.post({ type: 'toast', id: Date.now(), title: 'Hook log', message: decision.message, kind: 'info' });
+  }
+
+  /** Fire a non-blocking lifecycle hook (onAgentStart/onAgentEnd/onMessage/afterTool). Never throws. */
+  private notifyHooks(event: HookContext['event'], context: Omit<HookContext, 'event'>): void {
+    try {
+      this.enforceHooks(event, context);
+    } catch {
+      // Lifecycle notifications must not abort a run.
+    }
+  }
+
   private async approve(kind: 'edit' | 'command', title: string, detail: string, destructive = false, approvalKey?: string): Promise<void> {
+    this.enforceHooks(kind === 'command' ? 'onCommand' : 'onEdit', { tool: kind, path: approvalKey, text: detail });
     const mode = this.config().approvalMode;
     if (!requiresApproval(kind, mode, destructive)) return;
 
@@ -2582,6 +3045,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async reviewEdit(filePath: string, before: string, after: string, reason: string, destructive = false): Promise<void> {
+    this.enforceHooks('onEdit', { tool: 'edit', path: filePath, text: reason });
     const mode = this.config().approvalMode;
     const editRoot = this.workspaceRoot()?.fsPath ?? '';
     if (mode === 'autonomous' || (mode === 'edits' && !destructive) || (!destructive && editRoot && this.sessionAutoApproveEditRoots.has(editRoot))) return;
@@ -3023,10 +3487,14 @@ Rules:
 - Do not claim success until verification finishes.
 - End with a concise result summary.`;
 
-    const agentDef = AGENT_DEFINITIONS.find(a => a.id === agentId);
-    if (!agentDef?.prompt) return ideContext;
-    const cached = this.agentPromptCache.get(agentId) ?? agentDef.prompt;
-    this.agentPromptCache.set(agentId, cached);
+    const agentDef = this.allAgents().find(a => a.id === agentId);
+    if (!agentDef) return ideContext;
+    // User agents are always injected live so edits in the settings editor take effect immediately;
+    // built-in prompts stay cached because they are static.
+    const cacheable = AGENT_DEFINITIONS.some(a => a.id === agentId);
+    const cached = cacheable ? this.agentPromptCache.get(agentId) ?? agentDef.prompt : agentDef.prompt;
+    if (!cached) return ideContext;
+    if (cacheable) this.agentPromptCache.set(agentId, cached);
     return `${ideContext}
 
 ---

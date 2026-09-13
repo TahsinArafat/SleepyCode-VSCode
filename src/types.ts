@@ -26,6 +26,12 @@ export type WebMessage =
   | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }
   | { type: 'removeApiKey'; providerId: string }
+  | { type: 'saveMcpConnection'; connection: import('./types').McpConnectionData }
+  | { type: 'deleteMcpConnection'; name: string }
+  | { type: 'testMcpConnection'; name: string }
+  | { type: 'connectMcpOAuth'; name: string }
+  | { type: 'mcpConnections'; connections: import('./types').McpConnectionData[]; statuses?: import('./types').McpConnectionStatus[] }
+  | { type: 'mcpConnectionResult'; ok: boolean; text: string; status?: import('./types').McpConnectionStatus }
   | { type: 'sleepyLogin' }
   | { type: 'sleepyDeviceLogin' }
   | { type: 'sleepyLogout' }
@@ -53,6 +59,9 @@ export type WebMessage =
   | { type: 'undoLastTurn'; conversationId: string }
   | { type: 'redoLastTurn'; conversationId: string }
   | { type: 'selectAgent'; agentId: string }
+  | { type: 'saveAgent'; agent: CustomAgentConfig }
+  | { type: 'deleteAgent'; id: string }
+  | { type: 'agents'; agents: CustomAgentConfig[] }
   | { type: 'requestUsage' }
   | { type: 'requestMarketplace' }
   | { type: 'requestMarketplaceInstalled' }
@@ -64,7 +73,12 @@ export type WebMessage =
   | { type: 'marketplaceInstallProgress'; key: string; done: number; total: number }
   | { type: 'marketplaceUninstall'; folder: string }
   | { type: 'notifyResponse'; id: number; choice: 'ok' | 'secondary' | 'cancel' }
-  | { type: 'toast'; id: number; title: string; message: string; kind: 'info' | 'attention' };
+  | { type: 'toast'; id: number; title: string; message: string; kind: 'info' | 'attention' }
+  | { type: 'openPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
+  | { type: 'requestPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
+  | { type: 'showPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
+  | { type: 'panel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'; rows: { title: string; detail?: string }[]; hint?: string }
+  | { type: 'browserPreview'; conversationId?: string; dataUrl: string; cursor?: { x: number; y: number } };
 
 export type WorkItem = {
   kind: 'reasoning' | 'task' | 'plan';
@@ -83,6 +97,13 @@ export type FileChange = {
   action: 'Created' | 'Modified' | 'Deleted';
   staged?: boolean;
   reverted?: boolean;
+};
+
+/** Content captured before the first time a turn touched a file, so undo works outside Git. */
+export type FileSnapshot = {
+  path: string;
+  existed: boolean;
+  content: string;
 };
 
 
@@ -128,6 +149,7 @@ export type TranscriptItem = {
   contextTokens?: number;
   attachments?: Attachment[];
   changes?: FileChange[];
+  fileSnapshot?: FileSnapshot[];
   errorInfo?: AgentErrorPresentation;
   commitHash?: string;
   commitMessage?: string;
@@ -147,6 +169,17 @@ export type Conversation = {
   model?: string;
   provider?: string;
   agentId?: string;
+};
+
+/** User-defined agent that extends the built-in roster with its own model, tool policy, and skills. */
+export type CustomAgentConfig = {
+  id: string;
+  name: string;
+  color?: string;
+  prompt?: string;
+  model?: string;
+  tools?: { allow?: string[]; deny?: string[] };
+  skills?: string[];
 };
 
 export type SubagentModelMap = {
@@ -176,6 +209,56 @@ export type ProviderModelGroup = {
 };
 
 export type ApprovalMode = 'ask' | 'edits' | 'autonomous';
+
+export type McpAuthType = 'none' | 'bearer' | 'basic' | 'api-key' | 'custom' | 'oauth2';
+
+export type McpOAuthConfig = {
+  clientId?: string;
+  clientSecret?: string;
+  tokenAuthMethod?: 'client_secret_basic' | 'client_secret_post';
+  tokenUrl: string;
+  authUrl: string;
+  scope?: string;
+  resource?: string;
+  redirectUri?: string;
+};
+
+export type McpAuthConfig = {
+  type: McpAuthType;
+  token?: string;
+  username?: string;
+  password?: string;
+  apiKey?: string;
+  customHeaders?: Record<string, string>;
+  oauth2Config?: McpOAuthConfig;
+};
+
+export type McpOAuthTokens = {
+  access_token: string;
+  token_type: string;
+  refresh_token?: string;
+  expires_at?: number;
+  scope?: string;
+};
+
+export type McpTransportType = 'http' | 'sse';
+
+export type McpConnectionData = {
+  name: string;
+  description: string;
+  url: string;
+  transport: McpTransportType;
+  auth: McpAuthConfig;
+  enabled: boolean;
+  order: number;
+};
+
+export type McpConnectionStatus = {
+  name: string;
+  state: 'ok' | 'auth_required' | 'error' | 'disabled';
+  error?: string;
+  toolCount?: number;
+};
 
 export type ContextAttachment = {
   kind: 'file' | 'folder';

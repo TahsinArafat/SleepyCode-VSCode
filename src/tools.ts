@@ -8,6 +8,12 @@ import { MAX_FILE_BYTES } from './types';
 import type { AppConfig } from './types';
 import { assertNotSecret, isDestructiveCommand, isSecret, pathInside, truncate } from './util';
 import type { TerminalManager } from './terminal';
+import { compareWorktrees, createWorktree, listWorktrees, mergeWorktree, removeWorktree, runInWorktree, statusOfWorktree } from './worktrees';
+import type { RepoIndex, SourceCitedMemory } from './repo-index';
+import { hashContent } from './repo-index';
+import type { BrowserController } from './browser';
+import { summarizeConsoleErrors, summarizeNetworkErrors } from './browser';
+import { addPrComment, buildPrBody, commitChanges, createBranchForIssue, createPullRequest, getIssue, getPr, getReviewComments, listIssues, monitorChecks, repoSlug } from './github';
 
 export interface ToolContext {
   root: vscode.Uri;
@@ -22,6 +28,9 @@ export interface ToolContext {
   terminals?: TerminalManager;
   delegate?: (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string) => Promise<string>;
   memory?: { path: string; read(): Promise<string>; write(content: string, reason?: string): Promise<void> };
+  repoIndex?: RepoIndex;
+  repoMemory?: SourceCitedMemory;
+  browser?: BrowserController;
 }
 
 export function buildTools(ctx: ToolContext): Record<string, any> {
@@ -328,6 +337,261 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
     execute: async ({ name }) => {
       const { skill, content } = await readInstalledSkill(ctx.skillsDir, name);
       return `# Installed skill: ${skill.name}\n\n${truncate(content)}`;
+    },
+  });
+  tools.worktree_create = tool({
+    description: 'Create an isolated Git worktree with its own branch for parallel work. Returns the worktree name and path. Requires a Git repository.',
+    inputSchema: z.object({
+      name: z.string().min(1).max(60).describe('Short worktree name, e.g. "feature-auth".'),
+      branch: z.string().optional().describe('Branch name to create; defaults to a sleepycode-derived name.'),
+      base: z.string().optional().describe('Git ref to branch from; defaults to HEAD.'),
+    }),
+    execute: async ({ name, branch, base }) => {
+      await ctx.approve('command', `Create worktree "${name}"?`, `Creates a new Git worktree under ${'.sleepycode/worktrees'}.`);
+      const tree = await createWorktree(ctx.root.fsPath, { name, branch, base });
+      return JSON.stringify(tree, null, 2);
+    },
+  });
+  tools.worktree_list = tool({
+    description: 'List all Git worktrees for the workspace with their branch and commit.',
+    inputSchema: z.object({}),
+    execute: async () => JSON.stringify(await listWorktrees(ctx.root.fsPath), null, 2),
+  });
+  tools.worktree_status = tool({
+    description: 'Show status of one Git worktree: dirty state, untracked files, and ahead/behind counts.',
+    inputSchema: z.object({ name: z.string().min(1) }),
+    execute: async ({ name }) => JSON.stringify(await statusOfWorktree(ctx.root.fsPath, name), null, 2),
+  });
+  tools.worktree_compare = tool({
+    description: 'Compare two worktrees and return the diff stat between their commits.',
+    inputSchema: z.object({ from: z.string().min(1), to: z.string().min(1) }),
+    execute: async ({ from, to }) => JSON.stringify(await compareWorktrees(ctx.root.fsPath, from, to), null, 2),
+  });
+  tools.worktree_merge = tool({
+    description: 'Merge a worktree branch into another worktree (default: main). Returns conflicts if the merge did not complete cleanly. Requires user approval.',
+    inputSchema: z.object({
+      name: z.string().min(1).describe('Source worktree to merge from.'),
+      into: z.string().default('(main)').describe('Target worktree to merge into.'),
+      strategy: z.enum(['merge', 'squash', 'rebase']).default('merge'),
+    }),
+    execute: async ({ name, into, strategy }) => {
+      await ctx.approve('command', `Merge worktree "${name}" into "${into}"?`, `Strategy: ${strategy}`, true);
+      return JSON.stringify(await mergeWorktree(ctx.root.fsPath, name, into, strategy), null, 2);
+    },
+  });
+  tools.worktree_remove = tool({
+    description: 'Remove a Git worktree and delete its branch. Requires user approval.',
+    inputSchema: z.object({ name: z.string().min(1), force: z.boolean().default(false) }),
+    execute: async ({ name, force }) => {
+      await ctx.approve('command', `Remove worktree "${name}"?`, 'Deletes the worktree directory and its branch.', true);
+      await removeWorktree(ctx.root.fsPath, name, force);
+      return `Removed worktree ${name}.`;
+    },
+  });
+  tools.worktree_run = tool({
+    description: 'Run a shell command inside a specific worktree directory and return its output.',
+    inputSchema: z.object({ name: z.string().min(1), command: z.string().min(1), timeoutSeconds: z.number().min(1).max(600).default(120) }),
+    execute: async ({ name, command, timeoutSeconds }) => {
+      await ctx.approve('command', `Run in worktree "${name}"?`, command, isDestructiveCommand(command), command);
+      const result = await runInWorktree(ctx.root.fsPath, name, command, timeoutSeconds * 1000);
+      return `${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ''}`.trim() || `(command exited ${result.code})`;
+    },
+  });
+  if (ctx.repoIndex) {
+    const index = ctx.repoIndex;
+    tools.repo_search = tool({
+      description: 'Rank workspace files by semantic relevance (TF-IDF) to a natural-language query and return each file with a matching snippet. Use for "where is X implemented" style questions.',
+      inputSchema: z.object({ query: z.string().min(1), limit: z.number().int().min(1).max(30).default(10) }),
+      execute: async ({ query, limit }) => {
+        const results = index.semanticSearch(query, limit);
+        if (!results.length) return '(no relevant files found)';
+        return results.map((r, i) => `${i + 1}. ${r.path} (score ${r.score})\n   ${r.snippet}`).join('\n');
+      },
+    });
+    tools.repo_symbol = tool({
+      description: 'Search indexed workspace symbols (functions, classes, interfaces, types) by name. Returns file, line, and kind.',
+      inputSchema: z.object({ query: z.string().min(1), limit: z.number().int().min(1).max(50).default(25) }),
+      execute: async ({ query, limit }) => {
+        const symbols = index.indexSymbols().length ? index.symbolSearch(query, limit) : [];
+        if (!symbols.length) return `(no symbols matching '${query}')`;
+        return symbols.map((s) => `${s.path}:${s.line}  ${s.kind} ${s.name}`).join('\n');
+      },
+    });
+    tools.repo_architecture = tool({
+      description: 'Return the workspace import graph: files and packages as nodes, imports as edges. Use to understand module structure and dependencies.',
+      inputSchema: z.object({ limit: z.number().int().min(1).max(500).default(200) }),
+      execute: async ({ limit }) => {
+        const map = index.architectureMap();
+        const edges = map.edges.slice(0, limit).map((e) => `${e.from} -> ${e.to}`);
+        return `files indexed: ${index.files.length}\nnodes: ${map.nodes.length}, edges: ${map.edges.length}\n\n${edges.join('\n')}`;
+      },
+    });
+  }
+  if (ctx.repoMemory) {
+    const repoMemory = ctx.repoMemory;
+    tools.repo_memory_record = tool({
+      description: 'Record a durable fact about the codebase with its source file (and optional line) so it can be invalidated automatically if that file changes.',
+      inputSchema: z.object({ text: z.string().min(1).max(2000), source: z.string().min(1), line: z.number().int().min(1).optional() }),
+      execute: async ({ text, source, line }) => {
+        const content = ctx.repoIndex?.files.find((f) => f.path === source)?.content;
+        const hash = typeof content === 'string' ? hashContent(content) : undefined;
+        const fact = repoMemory.record({ text, source, line, sourceHash: hash });
+        return `Recorded fact ${fact.id} from ${source}${line ? `:${line}` : ''}.`;
+      },
+    });
+    tools.repo_memory_list = tool({
+      description: 'List recorded codebase facts and whether each is still valid against its source file.',
+      inputSchema: z.object({}),
+      execute: async () => repoMemory.all.length ? repoMemory.all.map((f) => `${f.valid ? '✓' : '✗'} ${f.source}${f.line ? `:${f.line}` : ''} — ${f.text}`).join('\n') : '(no facts recorded)',
+    });
+  }
+  if (ctx.browser) {
+    const browser = ctx.browser;
+    const browserRun = (fn: () => Promise<string>): Promise<string> => fn().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      const hint = error && typeof error === 'object' && typeof (error as { installHint?: unknown }).installHint === 'string' ? (error as { installHint: string }).installHint : '';
+      return hint ? `${message}\n\n${hint}` : message;
+    });
+    // Best-effort live preview: a capture failure must never fail the browser tool it follows.
+    const postBrowserPreview = async (cursorSelector?: string): Promise<void> => {
+      try {
+        const dataUrl = await browser.previewDataUrl();
+        if (!dataUrl) return;
+        const cursor = cursorSelector ? await browser.cursorPoint(cursorSelector).catch(() => undefined) : undefined;
+        ctx.post({ type: 'browserPreview', dataUrl, cursor });
+      } catch { /* preview is optional */ }
+    };
+    tools.browser_launch = tool({
+      description: 'Launch a headless browser and open a URL. Returns the page title plus any console errors and failed network requests. Requires the Playwright runtime.',
+      inputSchema: z.object({
+        url: z.string().min(1).describe('URL to open (http(s):// or a file:// path).'),
+        viewport: z.enum(['mobile', 'tablet', 'laptop', 'desktop']).default('laptop'),
+        waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).default('load'),
+      }),
+      execute: async ({ url, viewport, waitUntil }) => browserRun(async () => {
+        await browser.launch({ url, viewport, waitUntil });
+        await postBrowserPreview();
+        const snap = await browser.snapshot();
+        const { errors } = summarizeConsoleErrors(snap.console);
+        return JSON.stringify({ title: snap.title, url: snap.url, consoleErrors: errors.slice(0, 20), failedRequests: summarizeNetworkErrors(snap.network).slice(0, 20) }, null, 2);
+      }),
+    });
+    tools.browser_snapshot = tool({
+      description: 'Return the current page DOM, accessibility tree, console messages, and network requests as evidence about what rendered.',
+      inputSchema: z.object({ includeDom: z.boolean().default(false) }),
+      execute: async ({ includeDom }) => browserRun(async () => {
+        const snap = await browser.snapshot();
+        return JSON.stringify({ title: snap.title, url: snap.url, accessibility: snap.accessibility, console: snap.console.slice(-50), network: summarizeNetworkErrors(snap.network).slice(0, 30), dom: includeDom ? snap.dom.slice(0, 20_000) : undefined }, null, 2);
+      }),
+    });
+    tools.browser_navigate = tool({
+      description: 'Navigate the active browser session to a new URL.',
+      inputSchema: z.object({ url: z.string().min(1) }),
+      execute: async ({ url }) => browserRun(async () => { await browser.navigate(url); await postBrowserPreview(); return `Navigated to ${url}.`; }),
+    });
+    tools.browser_click = tool({
+      description: 'Click an element in the active browser session by CSS selector.',
+      inputSchema: z.object({ selector: z.string().min(1) }),
+      execute: async ({ selector }) => browserRun(async () => { await browser.click(selector); await postBrowserPreview(selector); return `Clicked ${selector}.`; }),
+    });
+    tools.browser_type = tool({
+      description: 'Type text into an element in the active browser session by CSS selector.',
+      inputSchema: z.object({ selector: z.string().min(1), text: z.string(), clear: z.boolean().default(true) }),
+      execute: async ({ selector, text, clear }) => browserRun(async () => { await browser.type(selector, text, { clear }); return `Typed into ${selector}.`; }),
+    });
+    tools.browser_press = tool({
+      description: 'Press a keyboard key, optionally focused on a selector first.',
+      inputSchema: z.object({ key: z.string().min(1), selector: z.string().optional() }),
+      execute: async ({ key, selector }) => browserRun(async () => { await browser.press(key, selector); return `Pressed ${key}.`; }),
+    });
+    tools.browser_geometry = tool({
+      description: 'Measure responsive layout at a viewport: horizontal overflow and elements that spill off-screen. Use to catch broken layouts.',
+      inputSchema: z.object({ viewport: z.enum(['mobile', 'tablet', 'laptop', 'desktop']).default('mobile') }),
+      execute: async ({ viewport }) => browserRun(async () => JSON.stringify(await browser.collectGeometry(viewport), null, 2)),
+    });
+    tools.browser_screenshot = tool({
+      description: 'Capture a full-page screenshot of the active session to a workspace-relative path.',
+      inputSchema: z.object({ path: z.string().min(1) }),
+      execute: async ({ path: target }) => browserRun(async () => `Saved ${await browser.screenshot(ctx.resolvePath(target).fsPath)}.`),
+    });
+    tools.browser_close = tool({
+      description: 'Close the active browser session.',
+      inputSchema: z.object({}),
+      execute: async () => browserRun(async () => { await browser.close(); return 'Browser session closed.'; }),
+    });
+  }
+  tools.github_list_issues = tool({
+    description: 'List GitHub issues for the workspace origin repository via the GitHub CLI. Requires `gh` installed and authenticated.',
+    inputSchema: z.object({ state: z.enum(['open', 'closed', 'all']).default('open'), limit: z.number().int().min(1).max(100).default(30) }),
+    execute: async ({ state, limit }) => {
+      const issues = (await listIssues(ctx.root.fsPath, state)).slice(0, limit);
+      if (!issues.length) return `(no ${state} issues)`;
+      return issues.map((i) => `#${i.number} ${i.title} [${i.state}]${i.labels.length ? ` (${i.labels.join(', ')})` : ''}\n${i.url}`).join('\n\n');
+    },
+  });
+  tools.github_get_issue = tool({
+    description: 'Fetch one GitHub issue (title, body, labels, assignees) by number.',
+    inputSchema: z.object({ number: z.number().int().min(1) }),
+    execute: async ({ number }) => {
+      const issue = await getIssue(ctx.root.fsPath, number);
+      return `#${issue.number} ${issue.title}\nState: ${issue.state}\nLabels: ${issue.labels.join(', ') || '(none)'}\nAssignees: ${issue.assignees.join(', ') || '(none)'}\n${issue.url}\n\n${issue.body}`;
+    },
+  });
+  tools.github_start_from_issue = tool({
+    description: 'Create and check out a branch for a GitHub issue (fix/<number>-<slug>). Requires user approval.',
+    inputSchema: z.object({ number: z.number().int().min(1), base: z.string().default('main') }),
+    execute: async ({ number, base }) => {
+      const issue = await getIssue(ctx.root.fsPath, number);
+      await ctx.approve('command', `Create branch for issue #${number}?`, `Branch: fix/${number}-<slug> from ${base}`, false);
+      return `Created branch ${await createBranchForIssue(ctx.root.fsPath, number, issue.title, base)}.`;
+    },
+  });
+  tools.github_commit = tool({
+    description: 'Stage and commit workspace changes with a message (used before opening a PR). Requires user approval.',
+    inputSchema: z.object({ message: z.string().min(1), files: z.array(z.string()).default([]) }),
+    execute: async ({ message, files }) => {
+      await ctx.approve('command', 'Commit changes?', `${message}\n\nFiles: ${files.length ? files.join(', ') : 'all changes'}`, false);
+      await commitChanges(ctx.root.fsPath, message, files);
+      return `Committed: ${message}`;
+    },
+  });
+  tools.github_open_pr = tool({
+    description: 'Push the current branch and open a GitHub pull request. Builds a body with a summary and Closes #issue. Requires user approval.',
+    inputSchema: z.object({ branch: z.string().min(1), title: z.string().min(1), summary: z.string().default(''), issueNumber: z.number().int().min(1).optional(), base: z.string().default('main'), draft: z.boolean().default(false), checklist: z.array(z.string()).default([]) }),
+    execute: async ({ branch, title, summary, issueNumber, base, draft, checklist }) => {
+      await ctx.approve('command', `Open pull request "${title}"?`, `Push ${branch} and open a PR into ${base}.`, false);
+      const body = issueNumber ? buildPrBody(issueNumber, summary || title, checklist) : summary || title;
+      const pr = await createPullRequest(ctx.root.fsPath, { branch, base, title, body, draft });
+      return `Opened PR #${pr.number} (${pr.state}): ${pr.url}`;
+    },
+  });
+  tools.github_pr_status = tool({
+    description: 'Show a pull request and its CI check results. Reports failing checks to guide fixes.',
+    inputSchema: z.object({ number: z.number().int().min(1).optional() }),
+    execute: async ({ number }) => {
+      const pr = await getPr(ctx.root.fsPath, number);
+      const checks = await monitorChecks(ctx.root.fsPath, number);
+      const failed = checks.filter((c) => c.status === 'failure' || c.conclusion === 'failure');
+      return `PR #${pr.number}: ${pr.title} [${pr.state}] ${pr.headRefName} -> ${pr.baseRefName}\n${pr.url}\nChecks: ${checks.length} total, ${failed.length} failing\n${checks.map((c) => `- ${c.name}: ${c.status}${c.conclusion ? ` (${c.conclusion})` : ''}`).join('\n')}`;
+    },
+  });
+  tools.github_review_comments = tool({
+    description: 'Fetch review comments on a pull request, with file path and line when available.',
+    inputSchema: z.object({ number: z.number().int().min(1) }),
+    execute: async ({ number }) => {
+      const comments = await getReviewComments(ctx.root.fsPath, number);
+      if (!comments.length) return `(no review comments on PR #${number})`;
+      return comments.map((c) => `${c.author}${c.path ? ` on ${c.path}${c.line ? `:${c.line}` : ''}` : ''}:\n${c.body}`).join('\n\n');
+    },
+  });
+  tools.github_pr_comment = tool({
+    description: 'Post a comment on a pull request. Requires user approval.',
+    inputSchema: z.object({ number: z.number().int().min(1), body: z.string().min(1) }),
+    execute: async ({ number, body }) => {
+      const slug = await repoSlug(ctx.root.fsPath);
+      await ctx.approve('command', `Comment on PR #${number}?`, `${'in ' + slug}\n\n${body}`, false);
+      await addPrComment(ctx.root.fsPath, number, body);
+      return `Commented on PR #${number}.`;
     },
   });
   const endpoint = ctx.config().searxngUrl;

@@ -161,7 +161,11 @@ export function requiresApproval(kind: 'edit' | 'command', mode: ApprovalMode, _
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  const hint = error && typeof error === 'object' && typeof (error as { installHint?: unknown }).installHint === 'string'
+    ? (error as { installHint: string }).installHint
+    : '';
+  return hint ? `${message}\n\n${hint}` : message;
 }
 
 export function providerErrorMessage(error: unknown): string {

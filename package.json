@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -35,6 +35,7 @@
   ],
   "activationEvents": [
     "onView:sleepycode.chat",
+    "onUri",
     "onCommand:sleepycode.openChat",
     "onCommand:sleepycode.testSystemNotification"
   ],
@@ -93,6 +94,26 @@
       {
         "command": "sleepycode.testSystemNotification",
         "title": "SleepyCode: Test System Notification"
+      },
+      {
+        "command": "sleepycode.worktrees",
+        "title": "SleepyCode: Git Worktrees Dashboard"
+      },
+      {
+        "command": "sleepycode.index",
+        "title": "SleepyCode: Repository Index & Search"
+      },
+      {
+        "command": "sleepycode.agents",
+        "title": "SleepyCode: Custom Agents"
+      },
+      {
+        "command": "sleepycode.tasks",
+        "title": "SleepyCode: Scheduled Tasks & Hooks"
+      },
+      {
+        "command": "sleepycode.checkpoints",
+        "title": "SleepyCode: Undo History"
       }
     ],
     "menus": {
@@ -147,6 +168,36 @@
           "type": "boolean",
           "default": true,
           "description": "Show native SleepyCode system notifications (task completed, approval needed, task failed) when VS Code is not focused."
+        },
+        "sleepycode.worktrees": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Git worktrees isolation feature and its agent tools."
+        },
+        "sleepycode.repoIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the in-memory repository index for symbol and semantic search."
+        },
+        "sleepycode.hooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable lifecycle hook rules that can allow, block, warn, or require approval for tool calls and edits."
+        },
+        "sleepycode.tasksHooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable scheduled tasks and the lifecycle hooks engine."
+        },
+        "sleepycode.browserTesting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable headless browser testing tools (requires the Playwright runtime)."
+        },
+        "sleepycode.customAgents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable custom agent definitions with per-agent model, prompt, and tool routing."
         }
       }
     }
@@ -165,6 +216,9 @@
     "@ai-sdk/openai-compatible": "^3.0.26",
     "ai": "^7.0.57",
     "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.62.1"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

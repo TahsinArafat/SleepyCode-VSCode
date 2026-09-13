@@ -18,6 +18,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider('sleepycode.chat', provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+    vscode.window.registerUriHandler({ handleUri: uri => provider.handleUri(uri) }),
     vscode.commands.registerCommand('sleepycode.openChat', () => revealChat()),
     vscode.commands.registerCommand('sleepycode.focus', () => revealChat()),
     vscode.commands.registerCommand('sleepycode.settings', () => provider.openSettings()),
@@ -25,6 +26,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sleepycode.memory', () => provider.openMemory()),
     vscode.commands.registerCommand('sleepycode.marketplace', () => provider.openMarketplace()),
     vscode.commands.registerCommand('sleepycode.clear', () => provider.clear()),
+    vscode.commands.registerCommand('sleepycode.worktrees', () => provider.openPanel('worktrees')),
+    vscode.commands.registerCommand('sleepycode.index', () => provider.openPanel('index')),
+    vscode.commands.registerCommand('sleepycode.agents', () => provider.openPanel('agents')),
+    vscode.commands.registerCommand('sleepycode.tasks', () => provider.openPanel('tasks')),
+    vscode.commands.registerCommand('sleepycode.checkpoints', () => provider.openPanel('checkpoints')),
     vscode.commands.registerCommand('sleepycode.testSystemNotification', () => {
       systemNotify(context, { subtitle: 'SleepyCode', message: 'This is a test system notification from SleepyCode. If you can read this, native notifications are working.', kind: 'info' });
       void vscode.window.showInformationMessage('Test system notification sent. (Notifications only appear when VS Code is not focused.)');
