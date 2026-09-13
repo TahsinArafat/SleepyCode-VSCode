@@ -8,3 +8,5 @@ artifacts/
 .env
 .env.*
 !.env.example
+.omo/
+.sleepycode/
