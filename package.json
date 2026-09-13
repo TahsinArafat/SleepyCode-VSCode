@@ -134,10 +134,10 @@
         },
         "sleepycode.maxSteps": {
           "type": "number",
-          "default": 50,
+          "default": 200,
           "minimum": 0,
-          "maximum": 50,
-          "description": "Maximum tool-loop steps per iteration. Defaults to 50. Set to 0 for unlimited tasks. When the limit pauses unfinished work, SleepyCode offers Continue iteration."
+          "maximum": 200,
+          "description": "Maximum tool-loop steps per iteration. Defaults to 200. Set to 0 for unlimited tasks. When the limit pauses unfinished work, SleepyCode offers Continue iteration."
         },
         "sleepycode.approvalMode": {
           "type": "string",

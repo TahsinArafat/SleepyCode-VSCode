@@ -24,6 +24,8 @@ export type WebMessage =
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'requestSettings' }
   | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap }
+  | { type: 'fetchProviderModels'; id?: string; name?: string; baseURL: string; apiKey?: string; customHeaders?: Record<string, string> }
+  | { type: 'providerModels'; id?: string; ok: boolean; text: string; models?: string[] }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }
   | { type: 'removeApiKey'; providerId: string }
   | { type: 'saveMcpConnection'; connection: import('./types').McpConnectionData }
@@ -78,7 +80,8 @@ export type WebMessage =
   | { type: 'requestPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
   | { type: 'showPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
   | { type: 'panel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'; rows: { title: string; detail?: string }[]; hint?: string }
-  | { type: 'browserPreview'; conversationId?: string; dataUrl: string; cursor?: { x: number; y: number } };
+  | { type: 'browserPreview'; conversationId?: string; dataUrl: string; cursor?: { x: number; y: number } }
+  | { type: 'contextNotice'; conversationId: string; kind: 'trimmed' | 'compacted'; text: string };
 
 export type WorkItem = {
   kind: 'reasoning' | 'task' | 'plan';
@@ -316,3 +319,7 @@ export type { ProjectIntelligence };
 export const MAX_FILE_BYTES = 250_000;
 export const MAX_TOOL_OUTPUT = 40_000;
 export const MAX_PERSISTED_REASONING = 3_000;
+/** Hard memory guard only — history is not routinely trimmed at this size. */
+export const MAX_STORED_ITEMS = 2_000;
+export const MAX_PERSISTED_PROJECTS = 500;
+export const MAX_PERSISTED_CONVERSATIONS = 500;
