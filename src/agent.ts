@@ -526,8 +526,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private globalSkillsReady?: Promise<void>;
   private ensureGlobalSkills(): Promise<void> {
-    this.globalSkillsReady ??= this.ensureGlobalSkillsOnce();
-    return this.globalSkillsReady;
+    // Run in the background — never block a chat run waiting for skill migration.
+    if (!this.globalSkillsReady) {
+      this.globalSkillsReady = this.ensureGlobalSkillsOnce();
+      this.globalSkillsReady.catch(() => { /* already swallowed inside */ });
+    }
+    // Return an immediately-resolved promise so the caller doesn't await migration.
+    return Promise.resolve();
   }
 
   private async ensureGlobalSkillsOnce(): Promise<void> {
@@ -545,6 +550,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       const skillFolders = entries.filter(([, type]) => (type & vscode.FileType.Directory) !== 0);
       if (!skillFolders.length) { this.markSkillsMigrated(); return; }
+      // Mark migrated before copying so a slow/interrupted copy never re-runs.
+      this.markSkillsMigrated();
       const target = this.skillsRoot();
       let existing: [string, vscode.FileType][] = [];
       try { existing = await vscode.workspace.fs.readDirectory(target); } catch { }
