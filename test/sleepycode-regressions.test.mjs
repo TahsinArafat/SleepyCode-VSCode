@@ -54,8 +54,9 @@ test('message history scrolls independently from a bounded composer', () => {
 
 test('run preflight failures still reach structured error handling and cleanup', () => {
   assert.match(agent, /try \{[\s\S]*?if \(!providerConfig\) throw new Error/);
-  assert.match(agent, /run\.checkpoint\.start/);
-  assert.match(agent, /captureGitTree\(root\.fsPath, \{[^}]*signal: run\.controller\.signal[^}]*timeoutMs: 15_000/);
+  // Checkpoint is now captured lazily in the background, never blocking preflight.
+  assert.match(agent, /run\.checkpoint\.done/);
+  assert.match(agent, /captureGitTree\(root\.fsPath, \{[^}]*signal[^}]*timeoutMs: 30_000/);
   assert.match(agent, /await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/);
   assert.match(agent, /if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/);
   assert.match(agent, /finally\s*\{[\s\S]*this\.runs\.delete\(conversationId\)/);
