@@ -9,7 +9,7 @@ import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHe
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
-import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
+import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
@@ -2250,22 +2250,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       });
 
       this.log('info', 'run.skills.start');
-      await abortableTimeout(this.ensureGlobalSkills(), 10_000, run.controller.signal, 'Skills initialization');
-      const skillBlock = await abortableTimeout(skillsPromptBlock(this.skillsRoot()), 10_000, run.controller.signal, 'Skills inventory');
+      void this.ensureGlobalSkills();
+      // Race the skills inventory against a short timeout — proceed with '' if slow.
+      const skillBlock = await Promise.race([
+        skillsPromptBlock(this.skillsRoot()).catch(() => ''),
+        new Promise<string>(resolve => setTimeout(() => resolve(''), 3_000)),
+      ]);
       this.log('info', 'run.skills.done');
-      const projectMemory = await abortableTimeout(readProjectMemory(root), 5_000, run.controller.signal, 'Project memory');
+      const projectMemory = await Promise.race([
+        readProjectMemory(root).catch(() => ''),
+        new Promise<string>(resolve => setTimeout(() => resolve(''), 3_000)),
+      ]);
       const rawMcpServers = this.config().mcpServers;
       this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
       mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
-        ? await abortableTimeout(connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)), 15_000, run.controller.signal, 'Legacy MCP connections')
+        ? await Promise.race([
+            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(() => ({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => {} })),
+            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => {} }), 10_000)),
+          ])
         : { tools: {}, instructions: [], errors: [], close: async () => {} };
       this.log('info', 'run.mcp.legacy.done');
-      const savedConnections = await abortableTimeout(loadMcpConnections(this.context), 5_000, run.controller.signal, 'Saved MCP settings');
+      const savedConnections = await Promise.race([
+        loadMcpConnections(this.context).catch(() => [] as McpConnectionData[]),
+        new Promise<McpConnectionData[]>(resolve => setTimeout(() => resolve([]), 3_000)),
+      ]);
       this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
       if (savedConnections.some((c) => c.enabled)) {
         const baseConnection = mcpConnection;
         this.log('info', 'run.mcp.saved.start');
-        const extra = await abortableTimeout(connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)), 15_000, run.controller.signal, 'Saved MCP connections');
+        const extra = await Promise.race([
+          connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
+          new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => {} }, statuses: [] }), 10_000)),
+        ]);
         this.log('info', 'run.mcp.saved.done');
         mcpConnection = {
           tools: { ...baseConnection.tools, ...extra.connection.tools },
@@ -2294,7 +2310,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         },
       };
       this.log('info', 'run.index.start');
-      const repoIndex = await abortableTimeout(this.loadRepoIndex(root), 15_000, run.controller.signal, 'Repository index');
+      const repoIndex = await Promise.race([
+        this.loadRepoIndex(root).catch(() => new RepoIndex([])),
+        new Promise<RepoIndex>(resolve => setTimeout(() => { this.log('warn', 'run.index.timeout'); resolve(new RepoIndex([])); }, 5_000)),
+      ]);
       const repoMemory = this.loadRepoMemory(root);
       this.log('info', 'run.index.done', `files=${repoIndex.files.length}`);
       this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex.files.length}`);
