@@ -2149,7 +2149,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     try {
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
-      if (gitTracked) runGitTree ??= await captureGitTree(root.fsPath, { context: this.context, lastPrune: this.lastCheckpointPrune });
+      if (gitTracked && !runGitTree) {
+        this.log('info', 'run.checkpoint.start', root.fsPath);
+        try {
+          runGitTree = await captureGitTree(root.fsPath, { context: this.context, lastPrune: this.lastCheckpointPrune, signal: run.controller.signal, timeoutMs: 15_000 });
+          this.log('info', 'run.checkpoint.done', runGitTree.slice(0, 12));
+        } catch (error) {
+          if (run.controller.signal.aborted) throw error;
+          this.log('warn', 'run.checkpoint.skipped', errorMessage(error));
+          this.post({ type: 'toast', id: Date.now(), title: 'Checkpoint skipped', message: 'SleepyCode could not capture the Git checkpoint, so this run will continue without workspace restore.', kind: 'attention' });
+        }
+      }
       let { maxSteps } = this.config();
       let configuredModel = selection.model;
       if (!configuredModel) {

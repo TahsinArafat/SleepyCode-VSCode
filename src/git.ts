@@ -14,33 +14,54 @@ export function isGitTrackedWorkspace(rootPath?: string): boolean {
   return result.status === 0 && result.stdout.trim() === 'true';
 }
 
-function runGit(args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}, input?: string): Promise<string> {
+function runGit(args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}, input?: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, { cwd, env: { ...process.env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
+      callback();
+    };
+    const terminate = (): void => {
+      try { child.kill('SIGTERM'); } catch { }
+    };
+    const abort = (): void => finish(() => { terminate(); reject(new Error('Git checkpoint cancelled.')); });
+    const timer = options.timeoutMs ? setTimeout(() => finish(() => { terminate(); reject(new Error(`git ${args[0]} timed out after ${Math.ceil(options.timeoutMs! / 1000)}s`)); }), options.timeoutMs) : undefined;
+    if (options.signal?.aborted) { abort(); return; }
+    options.signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
     child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
-    child.on('error', reject);
+    child.on('error', error => finish(() => reject(error)));
     child.on('close', code => {
-      const output = Buffer.concat(stdout).toString();
-      if (code === 0) resolve(output);
-      else reject(new Error(Buffer.concat(stderr).toString().trim() || `git ${args[0]} exited with code ${code}`));
+      finish(() => {
+        const output = Buffer.concat(stdout).toString();
+        if (code === 0) resolve(output);
+        else reject(new Error(Buffer.concat(stderr).toString().trim() || `git ${args[0]} exited with code ${code}`));
+      });
     });
     child.stdin.end(input);
   });
 }
 
-export async function captureGitTree(rootPath: string, pruneContext?: { context?: any; lastPrune?: number }): Promise<string> {
+export async function captureGitTree(rootPath: string, pruneContext?: { context?: any; lastPrune?: number; signal?: AbortSignal; timeoutMs?: number }): Promise<string> {
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'sleepycode-git-'));
   const env = { GIT_INDEX_FILE: path.join(temporaryDirectory, 'index') };
+  const options = { timeoutMs: pruneContext?.timeoutMs ?? 15_000, signal: pruneContext?.signal };
   try {
-    try { await runGit(['read-tree', 'HEAD'], rootPath, env); }
-    catch { await runGit(['read-tree', '--empty'], rootPath, env); }
-    await runGit(['add', '-A', '--', '.'], rootPath, env);
-    const tree = (await runGit(['write-tree'], rootPath, env)).trim();
+    try { await runGit(['read-tree', 'HEAD'], rootPath, env, undefined, options); }
+    catch (error) {
+      if (pruneContext?.signal?.aborted) throw error;
+      await runGit(['read-tree', '--empty'], rootPath, env, undefined, options);
+    }
+    await runGit(['add', '-A', '--', '.'], rootPath, env, undefined, options);
+    const tree = (await runGit(['write-tree'], rootPath, env, undefined, options)).trim();
     if (!/^[0-9a-f]{40,64}$/i.test(tree)) throw new Error('Git did not produce a valid restore tree.');
-    await runGit(['update-ref', `refs/sleepycode/checkpoints/${tree}`, tree], rootPath);
+    await runGit(['update-ref', `refs/sleepycode/checkpoints/${tree}`, tree], rootPath, {}, undefined, options);
     await maybePruneCheckpoints(rootPath, pruneContext);
     return tree;
   } finally {

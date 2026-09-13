@@ -53,7 +53,9 @@ test('message history scrolls independently from a bounded composer', () => {
 });
 
 test('run preflight failures still reach structured error handling and cleanup', () => {
-  assert.match(agent, /try \{\s*if \(!providerConfig\) throw new Error/);
+  assert.match(agent, /try \{[\s\S]*?if \(!providerConfig\) throw new Error/);
+  assert.match(agent, /run\.checkpoint\.start/);
+  assert.match(agent, /captureGitTree\(root\.fsPath, \{[^}]*signal: run\.controller\.signal[^}]*timeoutMs: 15_000/);
   assert.match(agent, /await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/);
   assert.match(agent, /if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/);
   assert.match(agent, /finally\s*\{[\s\S]*this\.runs\.delete\(conversationId\)/);
@@ -126,7 +128,7 @@ test('context occupancy is measured from provider prompt_tokens, never from cumu
 });
 
 test('auto-compaction runs after the run leaves this.runs, with a cooldown', () => {
-  const finallyBlock = agent.match(/\} finally \{\s*await mcpConnection\?\.close\(\);[\s\S]*?this\.postQueued/)?.[0] ?? '';
+  const finallyBlock = agent.match(/\} finally \{[\s\S]*?await mcpConnection\?\.close\(\);[\s\S]*?this\.postQueued/)?.[0] ?? '';
   assert.ok(finallyBlock, 'run() finally block found');
   assert.match(finallyBlock, /this\.runs\.delete\(conversationId\);[\s\S]*?maybeAutoCompact\(conversation/);
   assert.match(agent, /lastAutoCompactAt\.get\(conversation\.id\) \?\? 0\) < 120_000/);
