@@ -54,9 +54,10 @@ test('message history scrolls independently from a bounded composer', () => {
 
 test('run preflight failures still reach structured error handling and cleanup', () => {
   assert.match(agent, /try \{[\s\S]*?if \(!providerConfig\) throw new Error/);
-  // Checkpoint is now captured lazily in the background, never blocking preflight.
-  assert.match(agent, /run\.checkpoint\.done/);
-  assert.match(agent, /captureGitTree\(root\.fsPath, \{[^}]*signal[^}]*timeoutMs: 30_000/);
+  // Chat preflight must not scan the workspace or enumerate skills before the request.
+  assert.match(agent, /run\.fastlane\.ready/);
+  assert.doesNotMatch(agent, /run\.skills\.start/);
+  assert.doesNotMatch(agent, /captureGitTree\(root\.fsPath/);
   assert.match(agent, /await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/);
   assert.match(agent, /if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/);
   assert.match(agent, /finally\s*\{[\s\S]*this\.runs\.delete\(conversationId\)/);

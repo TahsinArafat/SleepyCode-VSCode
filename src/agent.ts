@@ -5,9 +5,9 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
-import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
+import { commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
-import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, skillsPromptBlock, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
+import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
@@ -166,7 +166,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private notifySeq = 0;
   private pendingNotifies = new Map<number, (choice: 'ok' | 'secondary' | 'cancel') => void>();
   private readonly terminals = new TerminalManager();
-  private lastCheckpointPrune = 0;
   private undoStacks = new Map<string, TranscriptItem[][]>(); // conversationId -> stack of popped turn pairs
   private compactionUndoStacks = new Map<string, { before: TranscriptItem[]; after: TranscriptItem[] }[]>(); // conversationId -> undoable compactions
   private compactionRedoStacks = new Map<string, { before: TranscriptItem[]; after: TranscriptItem[] }[]>(); // conversationId -> redone compactions
@@ -2174,18 +2173,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     try {
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
-      // Checkpoint is captured lazily after the run starts, not before, so it never blocks sending.
-      if (gitTracked && !runGitTree) {
-        const signal = run.controller.signal;
-        const ctx = this.context;
-        const lastPrune = this.lastCheckpointPrune;
-        void captureGitTree(root.fsPath, { context: ctx, lastPrune, signal, timeoutMs: 30_000 }).then(tree => {
-          runGitTree = tree;
-          this.log('info', 'run.checkpoint.done', tree.slice(0, 12));
-        }).catch(error => {
-          this.log('warn', 'run.checkpoint.skipped', errorMessage(error));
-        });
-      }
+      // Automatic Git snapshots used to run here. Even fire-and-forget filesystem
+      // calls can synchronously block a VS Code filesystem provider before yielding
+      // a Promise, which prevents both chat requests and Stop. Keep send preflight
+      // free of workspace scans; file snapshots still protect individual edits.
       let { maxSteps } = this.config();
       let configuredModel = selection.model;
       if (!configuredModel) {
@@ -2249,18 +2240,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         },
       });
 
-      this.log('info', 'run.skills.start');
-      void this.ensureGlobalSkills();
-      // Race the skills inventory against a short timeout — proceed with '' if slow.
-      const skillBlock = await Promise.race([
-        skillsPromptBlock(this.skillsRoot()).catch(() => ''),
-        new Promise<string>(resolve => setTimeout(() => resolve(''), 3_000)),
-      ]);
-      this.log('info', 'run.skills.done');
-      const projectMemory = await Promise.race([
-        readProjectMemory(root).catch(() => ''),
-        new Promise<string>(resolve => setTimeout(() => resolve(''), 3_000)),
-      ]);
+      // Skills and project memory are loaded on demand by tools. Do not touch a
+      // filesystem provider before the first /chat/completions request.
+      const skillBlock = '';
+      const projectMemory = '';
+      this.log('info', 'run.fastlane.ready', 'automatic scans disabled');
       const rawMcpServers = this.config().mcpServers;
       this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
       mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
@@ -2309,14 +2293,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           await writeProjectMemory(root, content);
         },
       };
-      this.log('info', 'run.index.start');
-      const repoIndex = await Promise.race([
-        this.loadRepoIndex(root).catch(() => new RepoIndex([])),
-        new Promise<RepoIndex>(resolve => setTimeout(() => { this.log('warn', 'run.index.timeout'); resolve(new RepoIndex([])); }, 5_000)),
-      ]);
-      const repoMemory = this.loadRepoMemory(root);
-      this.log('info', 'run.index.done', `files=${repoIndex.files.length}`);
-      this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex.files.length}`);
+      // Never scan the repository synchronously during send. Reuse a cache if one
+      // already exists (e.g. from the explicit Index panel), otherwise omit tools.
+      const repoIndex = this.repoIndexCache?.root === root.fsPath ? this.repoIndexCache.index : undefined;
+      const repoMemory = repoIndex ? this.loadRepoMemory(root) : undefined;
+      this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex?.files.length ?? 0}`);
 
       const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string): Promise<string> => {
         const cleanTask = task.trim();
