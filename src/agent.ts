@@ -42,6 +42,24 @@ type PlanState = {
 const MAX_CONCURRENT_RUNS = 3;
 const MAX_RUN_RETRIES = 5;
 
+function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(new Error(`${label} cancelled.`)));
+    const timer = setTimeout(() => finish(() => reject(new Error(`${label} timed out after ${Math.ceil(timeoutMs / 1000)}s.`))), timeoutMs);
+    if (signal.aborted) { onAbort(); return; }
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(value => finish(() => resolve(value)), error => finish(() => reject(error)));
+  });
+}
+
 /** Capture a file's pre-edit content so undo can restore it outside Git. `before` avoids a disk read when the tool already supplied it. */
 function captureFileSnapshot(rootPath: string, relative: string, before?: unknown): FileSnapshot {
   if (typeof before === 'string') return { path: relative, existed: true, content: before };
@@ -2178,7 +2196,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       let sleepyToken: string | undefined;
       if (providerConfig.isSleepy) {
-        sleepyToken = (await getSleepyToken()) ?? undefined;
+        this.log('info', 'run.auth.start', providerConfig.id);
+        sleepyToken = (await abortableTimeout(getSleepyToken(), 15_000, run.controller.signal, 'SleepyAI authentication')) ?? undefined;
+        this.log('info', 'run.auth.done', providerConfig.id);
         if (!sleepyToken) throw new Error('SleepyAI session is missing or expired. Sign in again from Settings.');
       }
       const provider = createOpenAICompatible({
@@ -2221,19 +2241,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         },
       });
 
-      await this.ensureGlobalSkills();
-      const skillBlock = await skillsPromptBlock(this.skillsRoot());
-      const projectMemory = await readProjectMemory(root);
-      mcpConnection = await connectMcpServers(
-        this.config().mcpServers,
-        root.fsPath,
-        (title, detail) => this.approve('command', title, detail),
-      );
-      const savedConnections = await loadMcpConnections(this.context);
+      this.log('info', 'run.skills.start');
+      await abortableTimeout(this.ensureGlobalSkills(), 10_000, run.controller.signal, 'Skills initialization');
+      const skillBlock = await abortableTimeout(skillsPromptBlock(this.skillsRoot()), 10_000, run.controller.signal, 'Skills inventory');
+      this.log('info', 'run.skills.done');
+      const projectMemory = await abortableTimeout(readProjectMemory(root), 5_000, run.controller.signal, 'Project memory');
+      const rawMcpServers = this.config().mcpServers;
+      this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
+      mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
+        ? await abortableTimeout(connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)), 15_000, run.controller.signal, 'Legacy MCP connections')
+        : { tools: {}, instructions: [], errors: [], close: async () => {} };
+      this.log('info', 'run.mcp.legacy.done');
+      const savedConnections = await abortableTimeout(loadMcpConnections(this.context), 5_000, run.controller.signal, 'Saved MCP settings');
       this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
       if (savedConnections.some((c) => c.enabled)) {
         const baseConnection = mcpConnection;
-        const extra = await connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail));
+        this.log('info', 'run.mcp.saved.start');
+        const extra = await abortableTimeout(connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)), 15_000, run.controller.signal, 'Saved MCP connections');
+        this.log('info', 'run.mcp.saved.done');
         mcpConnection = {
           tools: { ...baseConnection.tools, ...extra.connection.tools },
           instructions: [...baseConnection.instructions, ...extra.connection.instructions],
@@ -2260,8 +2285,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           await writeProjectMemory(root, content);
         },
       };
-      const repoIndex = await this.loadRepoIndex(root);
+      this.log('info', 'run.index.start');
+      const repoIndex = await abortableTimeout(this.loadRepoIndex(root), 15_000, run.controller.signal, 'Repository index');
       const repoMemory = this.loadRepoMemory(root);
+      this.log('info', 'run.index.done', `files=${repoIndex.files.length}`);
       this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex.files.length}`);
 
       const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string): Promise<string> => {
