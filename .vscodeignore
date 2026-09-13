@@ -15,3 +15,7 @@ plan.md
 .gitignore
 .vscodeignore
 artifacts/**
+.omo/**
+.sleepycode/**
+.codegraph
+**/*.vsix

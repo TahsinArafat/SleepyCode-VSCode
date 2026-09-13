@@ -65,10 +65,10 @@ test('chat text breaks pathological long words without wrapping code blocks', ()
   assert.match(styles, /\.assistant pre,\.assistant pre code\{[^}]*overflow-wrap:normal[^}]*word-break:normal/);
 });
 
-test('agent iterations default to 50 steps and expose a resumable max-step pause', () => {
-  assert.equal(pkg.contributes.configuration.properties['sleepycode.maxSteps'].default, 50);
-  assert.match(agent, /config\.get<number>\('maxSteps', 50\)/);
-  assert.match(agent, /config\.update\('maxSteps', 50/);
+test('agent iterations default to 200 steps and expose a resumable max-step pause', () => {
+  assert.equal(pkg.contributes.configuration.properties['sleepycode.maxSteps'].default, 200);
+  assert.match(agent, /config\.get<number>\('maxSteps', 200\)/);
+  assert.match(agent, /config\.update\('maxSteps', 200/);
   assert.match(agent, /pausedByStepLimit\(maxSteps, lastIterationStepCount, finishReason\)/);
   assert.match(agent, /message\.type === 'continueIteration'/);
   assert.match(types, /paused\?: boolean/);

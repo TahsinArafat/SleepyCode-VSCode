@@ -1004,12 +1004,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (targetIndex < 0) return;
       const root = this.workspaceRoot();
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
-      if (gitTracked) {
-        const assistantCheckpoint = conversation.items.slice(targetIndex).find(item => item.role === 'assistant' && item.gitTree);
-        if (assistantCheckpoint?.gitTree) {
-          try {
-            await restoreGitTree(root.fsPath, assistantCheckpoint.gitTree);
-          } catch { }
+      // Ask before reverting workspace files: editing a past message can either
+      // rewind the code to the checkpoint or keep the current workspace as-is.
+      const hasRestorableState = Boolean(root) && (gitTracked || conversation.items.slice(targetIndex).some(item => item.fileSnapshot?.length));
+      let restoreState = false;
+      if (hasRestorableState) {
+        const choice = await this.prompt(
+          'Restore workspace state?',
+          'Editing this message resends from that point. Restore workspace files to the state before it, or keep your current files?',
+          { ok: 'Restore state', secondary: 'Keep current files', cancel: 'Cancel' },
+        );
+        if (choice === 'cancel') return;
+        restoreState = choice === 'ok';
+        if (restoreState && gitTracked) {
+          const assistantCheckpoint = conversation.items.slice(targetIndex).find(item => item.role === 'assistant' && item.gitTree);
+          if (assistantCheckpoint?.gitTree) {
+            try {
+              await restoreGitTree(root!.fsPath, assistantCheckpoint.gitTree);
+            } catch { }
+          }
+        } else if (restoreState && root) {
+          const snapshotItem = conversation.items.slice(targetIndex).find(item => item.role === 'assistant' && item.fileSnapshot?.length);
+          if (snapshotItem?.fileSnapshot?.length) await this.restoreFileSnapshots(root.fsPath, snapshotItem.fileSnapshot);
         }
       }
       conversation.items = conversation.items.slice(0, targetIndex);
@@ -1208,7 +1224,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (searxngUrl && !/^https?:\/\//i.test(searxngUrl)) throw new Error('SearXNG URL must start with http:// or https://.');
         parseMcpServers(message.mcpServers ?? '{}');
         const rawMaxSteps = Number(message.maxSteps);
-        const maxSteps = rawMaxSteps === 0 ? 0 : Math.max(1, Math.min(50, Math.round(rawMaxSteps) || 50));
+        const maxSteps = rawMaxSteps === 0 ? 0 : Math.max(1, Math.min(200, Math.round(rawMaxSteps) || 200));
 
         // Validate and normalize providers before persisting webview input.
         const previousProviders = this.getProviders();
@@ -1282,6 +1298,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.refreshModels();
       } catch (error) {
         this.post({ type: 'settingsResult', ok: false, text: errorMessage(error) });
+      }
+      return;
+    }
+    if (message.type === 'fetchProviderModels') {
+      // Preview discovery for the provider form. Nothing typed into the form is
+      // persisted here: the transient provider and the in-memory key are only
+      // used for this one request, so a brand-new (unsaved) provider can still
+      // list its models before Save.
+      try {
+        const existing = message.id ? this.getProviders().find(provider => provider.id === message.id) : undefined;
+        const provider: Provider = {
+          id: message.id || '__form__',
+          name: message.name?.trim() || 'Provider',
+          baseURL: message.baseURL.trim().replace(/\/+$/, ''),
+          customHeaders: message.customHeaders,
+          modelList: undefined,
+        };
+        const apiKey = message.apiKey?.trim() || (existing ? this.providerApiKey(existing) : '');
+        const models = sortModelsA2Z(await fetchProviderModels(provider, apiKey, this.config().extraFreeModels));
+        this.post({ type: 'providerModels', id: message.id, ok: true, text: `Found ${models.length} model${models.length === 1 ? '' : 's'}.`, models: models.map(model => model.id) });
+        if (existing) void this.refreshModels();
+      } catch (error) {
+        this.post({ type: 'providerModels', id: message.id, ok: false, text: errorMessage(error) });
       }
       return;
     }
@@ -1446,7 +1485,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const previousProviders = this.getProviders();
       const config = vscode.workspace.getConfiguration('sleepycode');
       const defaults = cloneProviders();
-      await config.update('maxSteps', 50, vscode.ConfigurationTarget.Global);
+      await config.update('maxSteps', 200, vscode.ConfigurationTarget.Global);
       await config.update('extraFreeModels', '', vscode.ConfigurationTarget.Global);
       await config.update('model', '', vscode.ConfigurationTarget.Global);
       await this.context.globalState.update('sleepycode.providers', defaults);
@@ -1459,6 +1498,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await this.context.globalState.update('sleepycode.confirmDelete', undefined);
       await this.context.globalState.update('sleepycode.compactionModel', undefined);
       await this.context.globalState.update('sleepycode.subagentModels', undefined);
+      await this.context.globalState.update('sleepycode.mcpConnections', undefined);
+      await this.context.globalState.update('sleepycode.customAgents', undefined);
+      await this.context.globalState.update('sleepycode.hooks', undefined);
+      await this.context.globalState.update('sleepycode.scheduledTasks', undefined);
       for (const provider of previousProviders) {
         await this.context.secrets.delete(`sleepycode.apiKey.${provider.id}`);
       }
@@ -3163,7 +3206,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       activeProvider: provider?.id ?? '',
       apiKey: provider?.isSleepy ? (getSleepyTokenSync() ?? '') : provider ? this.providerApiKey(provider) : '',
       baseUrl: provider?.isSleepy ? sleepyApiBase() : (provider?.baseURL ?? ''),
-      maxSteps: config.get<number>('maxSteps', 50),
+      maxSteps: config.get<number>('maxSteps', 200),
       approvalMode: normalizeApprovalMode(this.context.globalState.get<string>('sleepycode.approvalMode', 'ask')),
       searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
       systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt', ''),

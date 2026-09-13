@@ -24,6 +24,8 @@ export type WebMessage =
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'requestSettings' }
   | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap }
+  | { type: 'fetchProviderModels'; id?: string; name?: string; baseURL: string; apiKey?: string; customHeaders?: Record<string, string> }
+  | { type: 'providerModels'; id?: string; ok: boolean; text: string; models?: string[] }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }
   | { type: 'removeApiKey'; providerId: string }
   | { type: 'saveMcpConnection'; connection: import('./types').McpConnectionData }
