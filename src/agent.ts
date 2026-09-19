@@ -2546,6 +2546,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           let lastTextOnly = '';
           let totalInput = 0;
           let totalOutput = 0;
+          let totalCacheRead = 0;
+          let totalCacheWrite = 0;
           for (let step = 0; step < maxSubagentSteps; step++) {
             const result = await streamText({
               model: subagentProvider(subagentModelId),
@@ -2569,6 +2571,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             const usage = await result.usage;
             totalInput += usage?.inputTokens ?? 0;
             totalOutput += usage?.outputTokens ?? 0;
+            totalCacheRead += usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+            totalCacheWrite += usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
             const nativeCallCount = (await result.toolCalls)?.length ?? 0;
             if (nativeCallCount > 0) {
               // Native tool calls (already executed by streamText): hand the resulting messages back to the model.
@@ -2615,7 +2619,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             subagentText = lastTextOnly.replace(/<invoke[\s\S]*?<\/invoke>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
           }
           if (totalInput || totalOutput) {
-            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput });
+            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
           const text = subagentText.trim() || '(Subagent completed without a text response.)';
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
@@ -2712,8 +2716,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         let continuationCount = 0;
         let liveInput = 0;
         let liveOutput = 0;
+        let liveCacheRead = 0;
+        let liveCacheWrite = 0;
         let runInput = 0;
         let runOutput = 0;
+        let runCacheRead = 0;
+        let runCacheWrite = 0;
         let lastStepInput = 0;
         let liveStartTime = Date.now();
         let streamStartTime = Date.now();
@@ -2836,6 +2844,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 const usage = part.usage;
                 const input = usage?.inputTokens ?? 0;
                 const output = usage?.outputTokens ?? 0;
+                const cacheRead = usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+                const cacheWrite = usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
                 // The most recent step's prompt_tokens is the true context size the
                 // provider counted for the last call — the closest measured proxy for
                 // current context-window occupancy.
@@ -2843,12 +2853,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 if (input || output) {
                   liveInput += input;
                   liveOutput += output;
+                  liveCacheRead += cacheRead;
+                  liveCacheWrite += cacheWrite;
                   const liveSpeed = Math.round((liveOutput / Math.max(1, Date.now() - liveStartTime)) * 1000);
                   // contextTokens is the LATEST step's prompt_tokens — the true
                   // context size the provider counted for the current call. It is
                   // pushed live so the context-window pill updates during the run,
                   // not only after the assistant item is committed.
-                  this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput, speed: liveSpeed, contextTokens: input });
+                  this.post({ type: 'liveUsage', conversationId, model, provider: providerConfig.id, inputTokens: liveInput, outputTokens: liveOutput, cacheReadTokens: liveCacheRead, cacheWriteTokens: liveCacheWrite, speed: liveSpeed, contextTokens: input });
                 }
               } else if (part.type === 'error') {
                 throw part.error;
@@ -2874,11 +2886,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             if (usage?.inputTokens || usage?.outputTokens) {
               const uin = usage.inputTokens ?? 0;
               const uout = usage.outputTokens ?? 0;
+              const ucacheRead = usage.inputTokenDetails?.cacheReadTokens ?? 0;
+              const ucacheWrite = usage.inputTokenDetails?.cacheWriteTokens ?? 0;
               runInput += uin;
               runOutput += uout;
+              runCacheRead += ucacheRead;
+              runCacheWrite += ucacheWrite;
               const durationMs = Date.now() - streamStartTime;
               const tokensPerSecond = durationMs > 0 ? Math.round((uout / durationMs) * 1000) : 0;
-              recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, durationMs, tokensPerSecond });
+              recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
             }
             if (finishReason === 'error') throw new Error('The model stopped because the provider reported a generation error.');
             if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');
@@ -2900,7 +2916,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // When continuing a partial response, prepend the preserved half so the
           // committed message reads as one uninterrupted answer.
           const finalAnswer = resume?.partialText ? resume.partialText + answer : answer;
-          const assistantItem = createTranscriptItem('assistant', finalAnswer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput);
+          const assistantItem = createTranscriptItem('assistant', finalAnswer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput, runCacheRead || liveCacheRead, runCacheWrite || liveCacheWrite);
           if (lastStepInput) assistantItem.contextTokens = lastStepInput;
           if (paused) {
             assistantItem.paused = true;
@@ -3241,6 +3257,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 provider: providerConfig.id,
                 inputTokens: attemptUsage.inputTokens ?? 0,
                 outputTokens: attemptUsage.outputTokens ?? 0,
+                cacheReadTokens: attemptUsage.inputTokenDetails?.cacheReadTokens ?? 0,
+                cacheWriteTokens: attemptUsage.inputTokenDetails?.cacheWriteTokens ?? 0,
               });
               this.sendUsage();
             }

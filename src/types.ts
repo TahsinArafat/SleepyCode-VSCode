@@ -155,6 +155,8 @@ export type TranscriptItem = {
   seconds?: number;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   contextTokens?: number;
   attachments?: Attachment[];
   changes?: FileChange[];
@@ -314,6 +316,8 @@ export type UsageRecord = {
   timestamp: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   durationMs?: number;
   tokensPerSecond?: number;
 };

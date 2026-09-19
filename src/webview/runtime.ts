@@ -185,15 +185,17 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   const compactionCancelBtn=document.getElementById('compactionCancel');
   if(compactionCancelBtn)compactionCancelBtn.onclick=()=>{compactionCancelBtn.disabled=true;compactionCancelBtn.textContent='Cancelling…';vscode.postMessage({type:'cancelCompact',conversationId:activeConversationId})};
   function sessionMetrics(){
-    let inTok=0, outTok=0;
+    let inTok=0, outTok=0, cacheReadTok=0, cacheWriteTok=0;
     for(const item of activeConversationItems){
       if(item.inputTokens||item.outputTokens){
         inTok+=item.inputTokens||0;
         outTok+=item.outputTokens||0;
+        cacheReadTok+=item.cacheReadTokens||0;
+        cacheWriteTok+=item.cacheWriteTokens||0;
       }
     }
     const live=liveRuns.get(activeConversationId);
-    if(live){inTok+=live.input||0;outTok+=live.output||0}
+    if(live){inTok+=live.input||0;outTok+=live.output||0;cacheReadTok+=live.cacheRead||0;cacheWriteTok+=live.cacheWrite||0}
     // Context occupancy prefers the provider-reported prompt_tokens from the most
     // recent run (the true measured context size), falling back to the chars/4
     // estimate only for fresh or just-compacted sessions with no measurement yet.
@@ -257,12 +259,21 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     if(providerId==='sleepyai'){
       const p=sleepyModelPrices.find(x=>x.modelId===effectiveModel||x.name===effectiveModel);
       if(p&&p.inputPrice!==undefined&&p.outputPrice!==undefined){
-        const inputCost=inTok*(p.inputPrice/1e6);
+        // inputTokens is the total prompt count and already includes cache reads.
+        // Bill cached reads at the cache-read rate and the remainder at the
+        // standard input rate; cache writes (Anthropic-style) are billed on top.
+        const cachedRead=Math.min(cacheReadTok,inTok);
+        const uncachedInput=Math.max(0,inTok-cachedRead);
+        const inputCost=uncachedInput*(p.inputPrice/1e6);
+        const cacheReadPrice=p.cacheReadPrice!==undefined?p.cacheReadPrice:p.inputPrice;
+        const cacheWritePrice=p.cacheWritePrice!==undefined?p.cacheWritePrice:p.inputPrice;
+        const cacheReadCost=cachedRead*(cacheReadPrice/1e6);
+        const cacheWriteCost=cacheWriteTok*(cacheWritePrice/1e6);
         const outputCost=outTok*(p.outputPrice/1e6);
-        cost={input:inputCost,output:outputCost,total:inputCost+outputCost};
+        cost={input:inputCost,cacheRead:cacheReadCost,cacheWrite:cacheWriteCost,output:outputCost,total:inputCost+cacheReadCost+cacheWriteCost+outputCost};
       }
     }
-    return {inTok,outTok,total:inTok+outTok,contextTokens,measured,ctxLimit,effectiveModel,providerId,cost};
+    return {inTok,outTok,cacheReadTok,cacheWriteTok,total:inTok+outTok,contextTokens,measured,ctxLimit,effectiveModel,providerId,cost};
   }
   function updateSessionStats(){
     const statContext=document.getElementById('statContext');
@@ -280,11 +291,11 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     statContext.textContent=(s.measured?'':'~')+fmt(s.contextTokens)+' / '+ctxLabel;
     statContext.title=s.measured?'Context window usage reported by the provider':'Estimated context window usage';
     statTokens.textContent='⬆ '+fmt(s.inTok)+'  ⬇ '+fmt(s.outTok);
-    statTokens.title='Session token spend (cumulative)';
+    statTokens.title='Session token spend (cumulative)'+(s.cacheReadTok?' · '+fmt(s.cacheReadTok)+' cache read':'');
     if(s.cost&&statCost){
       statCost.textContent=sessionMoney(s.cost.total);
       statCost.style.display='inline-flex';
-      statCost.title='Estimated session cost ('+sessionMoney(s.cost.input)+' in / '+sessionMoney(s.cost.output)+' out)';
+      statCost.title='Estimated session cost ('+sessionMoney(s.cost.input)+' in / '+sessionMoney(s.cost.output)+' out'+(s.cost.cacheRead? ' / '+sessionMoney(s.cost.cacheRead)+' cache read':'')+(s.cost.cacheWrite? ' / '+sessionMoney(s.cost.cacheWrite)+' cache write':'')+')';
     }else if(statCost){statCost.style.display='none'}
     if(live&&live.speed&&statPerf&&statSpeed){statPerf.style.display='inline-flex';statSpeed.textContent=live.speed+' tok/s'}else if(statPerf){statPerf.style.display='none'}
     const sessionInfo=document.getElementById('sessionInfo');
@@ -299,9 +310,10 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     const barColor=pct>=80?'danger':pct>=50?'warn':'safe';
     const modelLabel=s.effectiveModel||'No model selected';
     const costHtml=s.cost
-      ?'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(sessionMoney(s.cost.total))+'</div></div><div class="session-info-cell"><div class="k">In / out cost</div><div class="v">'+esc(sessionMoney(s.cost.input))+' / '+esc(sessionMoney(s.cost.output))+'</div></div>'
+      ?'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(sessionMoney(s.cost.total))+'</div></div><div class="session-info-cell"><div class="k">In / out cost</div><div class="v">'+esc(sessionMoney(s.cost.input))+' / '+esc(sessionMoney(s.cost.output))+'</div></div>'+(s.cost.cacheRead||s.cost.cacheWrite?'<div class="session-info-cell"><div class="k">Cache cost</div><div class="v">'+esc(sessionMoney((s.cost.cacheRead||0)+(s.cost.cacheWrite||0)))+'</div></div>':'')
       :'<div class="session-info-cell"><div class="k">Est. cost</div><div class="v">'+esc(s.providerId==='sleepyai'?'Sign in for pricing':'Not available')+'</div></div>';
-    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div><div class="session-info-cell"><div class="k">Session tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>'+(s.measured?'Context used':'Context used (estimated)')+'</span><span class="v">'+esc((s.measured?'':'~')+fmt(s.contextTokens))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
+    const cacheCell=s.cacheReadTok||s.cacheWriteTok?'<div class="session-info-cell"><div class="k">Cache read / write</div><div class="v">'+esc(fmt(s.cacheReadTok))+' / '+esc(fmt(s.cacheWriteTok))+'</div></div>':'';
+    sessionInfo.innerHTML='<div class="session-info-head"><span class="session-info-model" title="'+esc(modelLabel)+'">'+esc(modelLabel)+'</span><button type="button" class="session-info-close" id="sessionInfoClose" aria-label="Close session info">×</button></div><div class="session-info-grid"><div class="session-info-cell"><div class="k">Input tokens</div><div class="v">'+esc(fmt(s.inTok))+'</div></div><div class="session-info-cell"><div class="k">Output tokens</div><div class="v">'+esc(fmt(s.outTok))+'</div></div>'+cacheCell+'<div class="session-info-cell"><div class="k">Session tokens</div><div class="v">'+esc(fmt(s.total))+'</div></div><div class="session-info-cell"><div class="k">Context window</div><div class="v">'+esc(ctxLabel)+'</div></div>'+costHtml+'</div><div class="session-info-bar"><div class="bar-head"><span>'+(s.measured?'Context used':'Context used (estimated)')+'</span><span class="v">'+esc((s.measured?'':'~')+fmt(s.contextTokens))+' / '+esc(ctxLabel)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+barColor+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% of context window</div></div>';
     const close=sessionInfo.querySelector('#sessionInfoClose');
     if(close)close.onclick=()=>toggleSessionInfo(false);
   }
@@ -336,10 +348,10 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function runMarketplaceSearch(live){const run=()=>{const q=marketplaceQuery.value.trim();q?marketplaceSearch():loadMarketplaceTop(true,marketplaceSort.value)};if(!live){run();return}clearTimeout(marketplaceDebounce);marketplaceDebounce=setTimeout(run,300)}
   function marketplaceListRepo(){const source=marketplaceRepo.value.trim();if(!source)return;marketplaceTopLoaded=true;marketplaceHeading='Skills in '+source;marketplaceHint='Preview a skill before installing it.';marketplaceBusy=true;marketplaceCards=[];marketplaceActions=[];marketplaceStatusText('');renderMarketplaceResults();vscode.postMessage({type:'marketplaceListRepo',source})}
   const USAGE_PERIODS=[['today','Today'],['yesterday','Yesterday'],['week','7 days'],['month','30 days']];
-  const zeroTokens=()=>({input:0,output:0});
+  const zeroTokens=()=>({input:0,output:0,cacheRead:0,cacheWrite:0});
   const trimNum=s=>s.replace(/\.?0+$/,'');
   const fmt=n=>{n=n||0;if(n>=1000000)return trimNum((n/1000000).toFixed(2))+'M';if(n>=1000)return trimNum((n/1000).toFixed(1))+'k';return String(n)};
-  const tokenText=t=>'<span class="tokens" title="'+t.input.toLocaleString()+' input · '+t.output.toLocaleString()+' output">'+(t.input?fmt(t.input):'0')+'<span class="sep">/</span>'+(t.output?fmt(t.output):'0')+'</span>';
+  const tokenText=t=>'<span class="tokens" title="'+t.input.toLocaleString()+' input · '+t.output.toLocaleString()+' output'+(t.cacheRead?' · '+t.cacheRead.toLocaleString()+' cache read':'')+(t.cacheWrite?' · '+t.cacheWrite.toLocaleString()+' cache write':'')+'">'+(t.input?fmt(t.input):'0')+'<span class="sep">/</span>'+(t.output?fmt(t.output):'0')+'</span>';
   function renderUsage(){
     const data=usageData||{models:[],totals:{}};
     const models=data.models||[],totals=data.totals||{};
@@ -375,7 +387,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     const hasUsage=models.length>0||live.input>0||live.output>0;
     if(!hasUsage){usageActivity.innerHTML='<div class="usage-local-note">No local model activity recorded yet. This section tracks requests from this VS Code installation; SleepyAI billing above is the authoritative account view.</div><div class="usage-empty" style="height:auto;min-height:120px">No requests recorded for this period.</div>';return}
     const liveByModel=new Map();
-    for(const v of liveRuns.values()){if(!v.input&&!v.output)continue;const key=(v.model||'')+'|'+(v.provider||'');const e=liveByModel.get(key)||{model:v.model,provider:v.provider,input:0,output:0};e.input+=v.input||0;e.output+=v.output||0;liveByModel.set(key,e)}
+    for(const v of liveRuns.values()){if(!v.input&&!v.output)continue;const key=(v.model||'')+'|'+(v.provider||'');const e=liveByModel.get(key)||{model:v.model,provider:v.provider,input:0,output:0,cacheRead:0,cacheWrite:0};e.input+=v.input||0;e.output+=v.output||0;e.cacheRead+=v.cacheRead||0;e.cacheWrite+=v.cacheWrite||0;liveByModel.set(key,e)}
     const rows=[];
     const seen=new Set();
     for(const m of models){
@@ -383,19 +395,19 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
       seen.add(key);
       const base=(m.periods&&m.periods[usagePeriod])||zeroTokens();
       const l=usagePeriod==='today'?liveByModel.get(key):undefined;
-      const tokens={input:base.input+(l?l.input:0),output:base.output+(l?l.output:0)};
+      const tokens={input:base.input+(l?l.input:0),output:base.output+(l?l.output:0),cacheRead:(base.cacheRead||0)+(l?(l.cacheRead||0):0),cacheWrite:(base.cacheWrite||0)+(l?(l.cacheWrite||0):0)};
       const speed=m.avgTokensPerSecond?m.avgTokensPerSecond:undefined;
       const priceInfo=m.provider==='sleepyai'?sleepyModelPrices.find(p=>p.modelId===m.model||p.name===m.model):undefined;
-      const cost=priceInfo&&priceInfo.inputPrice!==undefined&&priceInfo.outputPrice!==undefined?{input:priceInfo.inputPrice,output:priceInfo.outputPrice}:undefined;
+      const cost=priceInfo&&priceInfo.inputPrice!==undefined&&priceInfo.outputPrice!==undefined?{input:priceInfo.inputPrice,output:priceInfo.outputPrice,cacheRead:priceInfo.cacheReadPrice,cacheWrite:priceInfo.cacheWritePrice}:undefined;
       if(tokens.input||tokens.output)rows.push({model:m.model,provider:m.provider||'',tokens,speed,cost});
     }
-    for(const [key,v] of liveByModel){if(seen.has(key))continue;rows.push({model:v.model,provider:v.provider||'',tokens:{input:v.input,output:v.output}})}
+    for(const [key,v] of liveByModel){if(seen.has(key))continue;rows.push({model:v.model,provider:v.provider||'',tokens:{input:v.input,output:v.output,cacheRead:v.cacheRead||0,cacheWrite:v.cacheWrite||0}})}
     rows.sort((a,b)=>(b.tokens.input+b.tokens.output)-(a.tokens.input+a.tokens.output)||a.model.localeCompare(b.model));
-    const total=usagePeriod==='today'?{input:(totals.today&&totals.today.input||0)+live.input,output:(totals.today&&totals.today.output||0)+live.output}:(totals[usagePeriod]||zeroTokens());
+    const total=usagePeriod==='today'?{input:(totals.today&&totals.today.input||0)+live.input,output:(totals.today&&totals.today.output||0)+live.output,cacheRead:(totals.today&&totals.today.cacheRead||0)+(live.cacheRead||0),cacheWrite:(totals.today&&totals.today.cacheWrite||0)+(live.cacheWrite||0)}:(totals[usagePeriod]||zeroTokens());
     const fmtPrice=n=>{if(n===undefined||n===null)return'';if(n>=1)return'$'+n.toFixed(2)+'/M';if(n>=0.001)return'$'+n.toFixed(3)+'/M';return'$'+n.toFixed(4)+'/M'};
     const rowHtml=r=>{
       let costHtml='';
-      if(r.cost){const parts=[];if(r.cost.input!==undefined)parts.push('in '+fmtPrice(r.cost.input));if(r.cost.output!==undefined)parts.push('out '+fmtPrice(r.cost.output));if(parts.length)costHtml=' <span style="opacity:.72">('+parts.join(', ')+')</span>'}
+      if(r.cost){const parts=[];if(r.cost.input!==undefined)parts.push('in '+fmtPrice(r.cost.input));if(r.cost.output!==undefined)parts.push('out '+fmtPrice(r.cost.output));if(r.cost.cacheRead!==undefined)parts.push('cache read '+fmtPrice(r.cost.cacheRead));if(r.cost.cacheWrite!==undefined)parts.push('cache write '+fmtPrice(r.cost.cacheWrite));if(parts.length)costHtml=' <span style="opacity:.72">('+parts.join(', ')+')</span>'}
       return'<div class="usage-row"><div class="usage-model"><div class="model-id" title="'+esc(r.model)+'">'+esc(displayModel(r.model))+'</div><div class="provider">'+esc(r.provider)+(r.speed?' &bull; '+r.speed+' tok/s':'')+costHtml+'</div></div>'+tokenText(r.tokens)+'</div>';
     };
     let summaryExtra='';
@@ -1117,7 +1129,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     case'showUsage':openUsageView();break;case'showMarketplace':openMarketplaceView();break;case'showPanel':openPanelView(m.panel);break;case'marketplaceInstalled':installedSkills=m.skills||[];renderInstalledSkills();if(marketplaceView.classList.contains('visible'))renderMarketplaceResults();break;case'marketplaceResults':{marketplaceBusy=false;marketplaceCards=(m.skills||[]).map(x=>({key:x.githubUrl||x.name,name:x.name,author:x.author||'',description:x.description||'',meta:(x.stars?String(x.stars)+' ★':'')+(x.author?' · '+esc(x.author):''),installed:installedMatch(x.author,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:x.githubUrl?{source:x.githubUrl,path:''}:null,install:x.githubUrl?{source:x.githubUrl,skill:undefined}:null}));marketplaceHeading=m.query?'Search results':'Popular skills';marketplaceHint=m.query?'Try another search to explore more.':'Search above to discover more skills.';marketplaceStatusText(m.query?'Found '+(m.total||(m.skills||[]).length)+' skills for "'+m.query+'".':'',true);renderMarketplaceResults();break}case'marketplaceRepoSkills':{marketplaceBusy=false;const source=m.owner+'/'+m.repo;marketplaceCards=(m.skills||[]).map(x=>({key:source+'/'+x.path,name:x.name,author:source,description:'',meta:'from '+esc(source),installed:installedMatch(source,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:{source,path:x.path},install:{source,skill:x.name}}));marketplaceHeading='Skills in '+source;marketplaceHint='Preview a skill before installing it.';marketplaceStatusText((m.skills||[]).length+' skills found.',true);renderMarketplaceResults();break}case'marketplacePreview':{previewContent.innerHTML=markdown(m.markdown||'');previewInstall.style.display='';document.getElementById('previewTitle').textContent=m.title||'Skill preview';break}case'marketplaceInstallProgress':{const st=marketplaceInstalling[m.key];if(st){st.done=m.done||0;st.total=m.total||0;st.label='Installing… '+(m.done||0)+'/'+(m.total||0)+' files';updateCardProgress(m.key);updatePreviewProgress(m.key)}break}case'marketplaceResult':{if(m.key)delete marketplaceInstalling[m.key];marketplaceStatusText(m.text,!!m.ok);if(m.ok){if(previewState&&previewState.key===m.key){closeSkillPreview()}if(marketplaceView.classList.contains('visible'))vscode.postMessage({type:'requestMarketplaceInstalled'})}else{if(previewState&&previewState.key===m.key){previewProgress.classList.add('visible','error');previewProgressFill.style.width='100%';previewProgressLabel.textContent=m.text||'Install failed.'}renderMarketplaceResults()}break}case'marketplaceError':{marketplaceBusy=false;marketplaceStatusText(m.text||'Request failed.',false);renderMarketplaceResults();break}
     case'usage':usageData=m;if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break;
     case'panel':renderPanel(m);break;
-    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,speed:m.speed||0,contextTokens:m.contextTokens||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
+    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,cacheRead:m.cacheReadTokens||0,cacheWrite:m.cacheWriteTokens||0,speed:m.speed||0,contextTokens:m.contextTokens||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
     case'user':{liveByConversation.set(m.conversationId,freshLive());if(m.conversationId===activeConversationId)activeConversationItems.push(m.item);if(m.conversationId===activeConversationId){const tmpBubble=currentTurn?.querySelector('.user-text');if(currentTurn&&tmpBubble){const footer=currentTurn.querySelector('.message-footer');if(footer)footer.remove();currentTurn.appendChild(messageFooter(m.item,false))}else{beginTurn(m.item)}}break}
     case'resume':{const s=liveState(m.conversationId);s.phase='thinking';s.activity=null;s.currentRaw=m.partialText||'';if(m.conversationId===activeConversationId){currentTurn=document.querySelector('.turn:last-child')||null;current=activity=activityBody=reasoning=null;followOutput=true;if(m.partialText){current=document.createElement('div');current.className='assistant streaming';current.dataset.raw=m.partialText;current.innerHTML=markdown(m.partialText);currentTurn.appendChild(current)}scroll(true)}break}
     case'workPhase':{const s=liveState(m.conversationId);s.phase='work';if(s.activity)s.activity.reasoningParts.push('');if(m.conversationId===activeConversationId)nextWorkPhase();break}

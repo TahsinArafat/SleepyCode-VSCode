@@ -29,16 +29,18 @@ export function recordUsage(context: vscode.ExtensionContext, entry: Omit<UsageR
   void context.globalState.update(USAGE_STORAGE_KEY, records.slice(-MAX_RECORDS));
 }
 
-export type Tokens = { input: number; output: number };
+export type Tokens = { input: number; output: number; cacheRead: number; cacheWrite: number };
 export type PeriodAggregate = { today: Tokens; yesterday: Tokens; week: Tokens; month: Tokens };
 export type ModelAggregate = { model: string; provider: string; periods: PeriodAggregate; avgTokensPerSecond?: number; totalDurationMs?: number; requestCount?: number };
 export type UsageAggregate = { models: ModelAggregate[]; totals: PeriodAggregate; overallAvgTokensPerSecond?: number; totalRequests?: number; totalDurationMs?: number };
 
-function emptyTokens(): Tokens { return { input: 0, output: 0 }; }
+function emptyTokens(): Tokens { return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }; }
 function emptyPeriod(): PeriodAggregate { return { today: emptyTokens(), yesterday: emptyTokens(), week: emptyTokens(), month: emptyTokens() }; }
-function addTokens(target: Tokens, input: number, output: number): void {
-  target.input += input;
-  target.output += output;
+function addTokens(target: Tokens, record: UsageRecord): void {
+  target.input += record.inputTokens;
+  target.output += record.outputTokens;
+  target.cacheRead += record.cacheReadTokens ?? 0;
+  target.cacheWrite += record.cacheWriteTokens ?? 0;
 }
 
 function startOfDay(timestamp: number): number {
@@ -70,10 +72,10 @@ export function aggregateUsage(records: UsageRecord[]): UsageAggregate {
       entry = { model: record.model, provider: record.provider, periods: emptyPeriod(), avgTokensPerSecond: 0, totalDurationMs: 0, requestCount: 0 };
       byModel.set(record.model, entry);
     }
-    if (inToday) { addTokens(entry.periods.today, record.inputTokens, record.outputTokens); addTokens(totals.today, record.inputTokens, record.outputTokens); }
-    if (inYesterday) { addTokens(entry.periods.yesterday, record.inputTokens, record.outputTokens); addTokens(totals.yesterday, record.inputTokens, record.outputTokens); }
-    if (inWeek) { addTokens(entry.periods.week, record.inputTokens, record.outputTokens); addTokens(totals.week, record.inputTokens, record.outputTokens); }
-    if (inMonth) { addTokens(entry.periods.month, record.inputTokens, record.outputTokens); addTokens(totals.month, record.inputTokens, record.outputTokens); }
+    if (inToday) { addTokens(entry.periods.today, record); addTokens(totals.today, record); }
+    if (inYesterday) { addTokens(entry.periods.yesterday, record); addTokens(totals.yesterday, record); }
+    if (inWeek) { addTokens(entry.periods.week, record); addTokens(totals.week, record); }
+    if (inMonth) { addTokens(entry.periods.month, record); addTokens(totals.month, record); }
     if (record.durationMs && record.tokensPerSecond) {
       entry.totalDurationMs = (entry.totalDurationMs ?? 0) + record.durationMs;
       entry.requestCount = (entry.requestCount ?? 0) + 1;
