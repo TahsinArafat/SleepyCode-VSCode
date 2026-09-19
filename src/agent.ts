@@ -14,9 +14,10 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
-import { createThinkSplitter, stripThinkBlocks } from './think-strip';
+import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
+import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
@@ -153,7 +154,8 @@ function parseInvokeBlocks(text: string): { name: string; params: [string, strin
   return calls;
 }
 
-function userOsName(): string {  switch (process.platform) {
+function userOsName(): string {
+  switch (process.platform) {
     case 'darwin': return 'macOS (darwin)';
     case 'win32': return 'Windows (win32)';
     case 'linux': return 'Linux (linux)';
@@ -2416,10 +2418,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
       mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
         ? await Promise.race([
-            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(() => ({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => {} })),
-            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => {} }), 10_000)),
-          ])
-        : { tools: {}, instructions: [], errors: [], close: async () => {} };
+          connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(() => ({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => { } })),
+          new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => { } }), 10_000)),
+        ])
+        : { tools: {}, instructions: [], errors: [], close: async () => { } };
       this.log('info', 'run.mcp.legacy.done');
       const savedConnections = await Promise.race([
         loadMcpConnections(this.context).catch(() => [] as McpConnectionData[]),
@@ -2431,7 +2433,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'run.mcp.saved.start');
         const extra = await Promise.race([
           connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
-          new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => {} }, statuses: [] }), 10_000)),
+          new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => { } }, statuses: [] }), 10_000)),
         ]);
         this.log('info', 'run.mcp.saved.done');
         mcpConnection = {
@@ -2543,7 +2545,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         let textToolSequence = 0;
         try {
           let subagentText = '';
-          let lastTextOnly = '';
+          let leftoverText = '';
           let totalInput = 0;
           let totalOutput = 0;
           let totalCacheRead = 0;
@@ -2567,21 +2569,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               },
             });
             const stepText = await result.text;
-            const stepContent = stripThinkBlocks(stepText);
             const usage = await result.usage;
             totalInput += usage?.inputTokens ?? 0;
             totalOutput += usage?.outputTokens ?? 0;
             totalCacheRead += usage?.inputTokenDetails?.cacheReadTokens ?? 0;
             totalCacheWrite += usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
             const nativeCallCount = (await result.toolCalls)?.length ?? 0;
-            if (nativeCallCount > 0) {
+            const xmlCalls = nativeCallCount > 0 ? [] : parseInvokeBlocks(stepText);
+            const decision = classifySubagentStep(stepText, nativeCallCount, xmlCalls.length);
+            leftoverText = rememberVisibleText(leftoverText, decision.visibleText);
+            if (decision.kind === 'native-tools') {
               // Native tool calls (already executed by streamText): hand the resulting messages back to the model.
               const responseMessages = (await result.responseMessages) ?? [];
               subagentMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
               continue;
             }
-            const xmlCalls = parseInvokeBlocks(stepText);
-            if (xmlCalls.length > 0) {
+            if (decision.kind === 'xml-tools') {
               // Claude-Code style text tool calls: execute them directly and feed the results back.
               const xmlResults: string[] = [];
               for (const call of xmlCalls) {
@@ -2609,19 +2612,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               subagentMessages.push({ role: 'user', content: `Tool results:\n${xmlResults.join('\n\n')}\n\nContinue the task. When finished, give the final answer as plain text without XML tool tags.` });
               continue;
             }
-            if (stepContent.trim()) {
-              subagentText = stepContent.trim();
+            if (decision.kind === 'final') {
+              subagentText = decision.visibleText;
               break;
             }
-            lastTextOnly = stepContent;
+            // Think-only / whitespace-only step: keep going so the model can
+            // emit a parent-visible answer instead of returning the placeholder.
+            subagentMessages.push({
+              role: 'user',
+              content: leftoverText
+                ? `You produced no parent-visible final answer. Convert the findings below into a concise plain-text result for the parent agent. Do not call tools unless required to finish.\n\nFindings so far:\n${leftoverText}`
+                : 'You produced no parent-visible final answer. Reply now with the concise plain-text result for the parent agent. Do not call tools unless required to finish.',
+            });
           }
-          if (!subagentText && lastTextOnly) {
-            subagentText = lastTextOnly.replace(/<invoke[\s\S]*?<\/invoke>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
-          }
+          const harvested = harvestSubagentText(subagentText, leftoverText);
+          subagentText = harvested.text;
           if (totalInput || totalOutput) {
             recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
-          const text = subagentText.trim() || '(Subagent completed without a text response.)';
+          const text = subagentText;
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
           return text;
         } catch (error) {

@@ -45,6 +45,13 @@ test('subagents cannot recurse and failures propagate to the parent agent', () =
   assert.match(agent, /throw new Error\(`Subagent \(\$\{role\}\) failed:/);
 });
 
+test('subagent results harvest leftover step text instead of returning empty', () => {
+  assert.match(agent, /classifySubagentStep\(stepText, nativeCallCount, xmlCalls\.length\)/);
+  assert.match(agent, /leftoverText = rememberVisibleText\(leftoverText, decision\.visibleText\)/);
+  assert.match(agent, /harvestSubagentText\(subagentText, leftoverText\)/);
+  assert.doesNotMatch(agent, /lastTextOnly/);
+});
+
 test('message history scrolls independently from a bounded composer', () => {
   assert.match(styles, /html,body\{[^}]*overflow:hidden/);
   assert.match(styles, /#messages\{[^}]*flex:1 1 0[^}]*overflow-y:auto/);
