@@ -2339,6 +2339,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
+    let model = selection.model;
     try {
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
@@ -2353,7 +2354,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         configuredModel = this.selectionFor(conversation).model;
         if (!configuredModel) throw new Error('No model is selected. Choose a model from the composer and retry.');
       }
-      let model = configuredModel;
+      model = configuredModel;
       const { apiKey, baseUrl } = this.providerCredentials(providerConfig);
       if (configuredModel === SLEEPY_AUTO_MODEL_ID) {
         if (!this.resolveAutoModel(providerConfig.id)) await this.refreshModels();
@@ -2926,6 +2927,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // committed message reads as one uninterrupted answer.
           const finalAnswer = resume?.partialText ? resume.partialText + answer : answer;
           const assistantItem = createTranscriptItem('assistant', finalAnswer, undefined, runGitTree, keptWork, workSeconds, runInput || liveInput, runOutput || liveOutput, runCacheRead || liveCacheRead, runCacheWrite || liveCacheWrite);
+          if (model) assistantItem.model = model;
           if (lastStepInput) assistantItem.contextTokens = lastStepInput;
           if (paused) {
             assistantItem.paused = true;
@@ -2993,6 +2995,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const message = errorInfo.message;
         if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
+        if (model) errorItem.model = model;
         errorItem.errorInfo = errorInfo;
         if (partialAnswer.trim()) errorItem.partialText = partialAnswer;
         if (runChanges.size) errorItem.changes = [...runChanges.values()];
@@ -3313,6 +3316,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       .map(item => {
         const copy = createTranscriptItem(item.role, item.text, undefined, item.gitTree);
         copy.timestamp = item.timestamp;
+        if (item.model) copy.model = item.model;
         if (item.attachments?.length) copy.attachments = item.attachments;
         if (item.changes?.length) copy.changes = item.changes;
         if (item.commitHash) {

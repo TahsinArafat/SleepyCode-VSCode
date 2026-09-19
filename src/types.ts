@@ -148,6 +148,8 @@ export type TranscriptItem = {
   text: string;
   /** Text streamed before an error interrupted the run; kept so a retry can continue from the halfway point. */
   partialText?: string;
+  /** Routed model id that produced this assistant response. */
+  model?: string;
   timestamp: number;
   kind?: 'error' | 'divider';
   gitTree?: string;

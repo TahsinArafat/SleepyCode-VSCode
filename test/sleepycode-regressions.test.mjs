@@ -52,6 +52,54 @@ test('subagent results harvest leftover step text instead of returning empty', (
   assert.doesNotMatch(agent, /lastTextOnly/);
 });
 
+test('composer keeps the writing surface first and a quiet overflow-safe toolbar', () => {
+  const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
+  assert.ok(composer.includes('id="composerBox"'), 'composer box exists');
+  assert.ok(composer.indexOf('id="sessionMetaRow"') < composer.indexOf('id="composerBox"'), 'status sits above the writing box');
+  assert.ok(composer.indexOf('id="input"') < composer.indexOf('class="actions"'), 'textarea sits above the toolbar');
+  assert.ok(composer.includes('class="composer-tools"'), 'secondary controls are grouped away from send');
+  assert.ok(composer.indexOf('class="composer-tools"') < composer.indexOf('id="send"'), 'send stays last in the toolbar');
+  assert.match(styles, /\.composer-tools\{display:flex/);
+  assert.match(styles, /\.composer \.actions \.send\{[^}]*margin-left:auto/);
+  assert.match(styles, /\.control-pill\{[^}]*background:transparent/);
+  assert.match(styles, /\.context-summary\{[^}]*background:transparent/);
+});
+
+test('approval control stays a short text pill and send uses discrete idle/ready/stop states', () => {
+  const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
+  assert.match(composer, /id="safetyButton"[^>]*>Ask<\/button>/);
+  assert.doesNotMatch(composer, /id="safetyDropdown"[\s\S]*safety-icon/);
+  assert.match(composer, /class="send idle"/);
+  assert.match(composer, /class="send-svg"/);
+  assert.match(composer, /class="stop-svg"/);
+  assert.match(runtime, /function approvalShort\(id\)\{return id==='edits'\?'Auto':id==='autonomous'\?'Open':'Ask'\}/);
+  assert.match(runtime, /setSendMode\(isRunning\(\)\?'loading':\(input\.value\.trim\(\)\|\|attachments\.length\?'ready':'idle'\)\)/);
+  assert.match(styles, /\.send\.idle\{/);
+  assert.match(styles, /\.send\.ready\{/);
+  assert.match(styles, /\.send\.stop,\.send\.loading\{/);
+});
+
+test('selector popups clamp inside the viewport instead of overflowing the sidebar', () => {
+  assert.match(runtime, /function placeAnchoredMenu\(menu,anchor\)/);
+  assert.match(runtime, /function viewportBox\(\)/);
+  assert.match(runtime, /if\(conversationMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(conversationMenu/);
+  assert.match(runtime, /if\(mentionMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(mentionMenu/);
+  assert.match(runtime, /if\(slashMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(slashMenu/);
+  assert.match(styles, /\.dropdown-menu\{[^}]*position:fixed/);
+  assert.match(styles, /\.mention-menu,\.slash-menu\{[^}]*position:fixed/);
+  assert.match(styles, /\.conversation-menu\{[^}]*position:fixed/);
+  assert.match(styles, /\.context-panel\{[^}]*position:fixed/);
+});
+
+test('assistant replies show the used model under the message instead of above the composer', () => {
+  assert.match(runtime, /modelEl\.className='message-model'/);
+  assert.match(runtime, /const modelId=item\.model\|\|selectedModel\|\|''/);
+  assert.doesNotMatch(runtime, /updateActiveModelLine/);
+  assert.doesNotMatch(webviewHtml, /active-model-line|session-info-model/);
+  assert.match(runtime, /session-info-title/);
+  assert.match(styles, /\.message-model\{/);
+});
+
 test('message history scrolls independently from a bounded composer', () => {
   assert.match(styles, /html,body\{[^}]*overflow:hidden/);
   assert.match(styles, /#messages\{[^}]*flex:1 1 0[^}]*overflow-y:auto/);

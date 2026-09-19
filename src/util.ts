@@ -51,6 +51,7 @@ export function normalizeTranscriptItem(item: Partial<TranscriptItem>, fallbackT
     role: item.role === 'assistant' ? 'assistant' : 'user',
     text: item.text ?? '',
     partialText: item.partialText,
+    model: item.model,
     timestamp: item.timestamp ?? fallbackTimestamp,
     kind: item.kind,
     gitTree: item.gitTree,
