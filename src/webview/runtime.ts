@@ -631,6 +631,8 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   let sendState='idle';function setSendMode(state){if(sendState===state)return;sendState=state;const running=state==='loading';send.classList.toggle('loading',running);send.classList.toggle('stop',running);send.classList.toggle('idle',state==='idle');send.classList.toggle('ready',state==='ready');send.title=running?'Stop':'Send'}function updateSendMode(){setSendMode(isRunning()?'loading':(!input.value.trim()?'idle':'ready'))}
   function compactPrice(value){if(value===undefined||value===null)return'';const n=Number(value);if(!Number.isFinite(n))return'';if(n>=1)return'$'+trimNum(n.toFixed(2));if(n>=.01)return'$'+trimNum(n.toFixed(3));return'$'+trimNum(n.toFixed(4))}
   function modelMeta(m,mid,providerId){if(typeof m==='object'&&m&&m.isAuto)return'Cheapest model first · A–Z fallback';const price=providerId==='sleepyai'?(sleepyModelPrices||[]).find(p=>p.modelId===mid||p.name===mid||p.name===modelNameOf(m)):undefined;const context=(typeof m==='object'&&m&&m.contextWindow)||price?.contextWindow||0;const parts=[];if(typeof m==='object'&&m&&m.recommended)parts.push('Recommended');if(context)parts.push(fmt(context)+' context');if(price&&price.inputPrice!==undefined&&price.outputPrice!==undefined)parts.push(compactPrice(price.inputPrice)+' / '+compactPrice(price.outputPrice)+' per 1M in/out');return parts.join(' · ')}
+  let modelQuery='';
+  function modelMatches(m,mid,providerName){const q=modelQuery.trim().toLowerCase();if(!q)return true;return [modelNameOf(m),mid,providerName].some(v=>String(v||'').toLowerCase().includes(q))}
   function renderModelMenu(){
     modelMenu.innerHTML='';
     if(!modelGroups.length){
@@ -640,12 +642,29 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
       modelMenu.appendChild(empty);
       return;
     }
+    const search=document.createElement('div');
+    search.className='model-search-wrap';
+    const searchInput=document.createElement('input');
+    searchInput.className='model-search';
+    searchInput.type='search';
+    searchInput.placeholder='Search models\u2026';
+    searchInput.value=modelQuery;
+    searchInput.setAttribute('aria-label','Search models');
+    search.appendChild(searchInput);
+    modelMenu.appendChild(search);
+    const results=document.createElement('div');
+    results.className='model-results';
+    modelMenu.appendChild(results);
+    let total=0;
     for(const group of modelGroups){
       const label=document.createElement('div');
       label.className='dropdown-group-label';
       label.textContent=group.providerId==='sleepyai'?'SleepyAI':group.providerName;
-      modelMenu.appendChild(label);
-      for(const m of [...(group.models||[])].sort(modelA2Z)){
+      const matching=[...(group.models||[])].sort(modelA2Z).filter(m=>modelMatches(m,modelIdOf(m),group.providerName));
+      if(!matching.length)continue;
+      results.appendChild(label);
+      for(const m of matching){
+        total++;
         const mid=modelIdOf(m);
         const mname=modelNameOf(m);
         const meta=modelMeta(m,mid,group.providerId);
@@ -655,19 +674,23 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
         opt.innerHTML='<span class="model-option-head"><span class="model-option-name">'+esc(mname)+'</span>'+((typeof m==='object'&&m&&(m.isAuto||m.recommended))?'<span class="model-recommended">'+(m.isAuto?'Recommended':'Preferred')+'</span>':'')+(mid===selectedModel?'<span class="model-option-check">✓</span>':'')+'</span>'+(meta?'<span class="model-option-meta">'+esc(meta)+'</span>':'');
         opt.title=mid+' ('+group.providerName+')';
         opt.onclick=()=>selectModel(mid,group.providerId);
-        modelMenu.appendChild(opt);
+        results.appendChild(opt);
       }
     }
+    if(!total){const none=document.createElement('div');none.className='dropdown-empty';none.textContent='No models match \u201c'+modelQuery+'\u201d.';results.appendChild(none)}
+    searchInput.oninput=()=>{modelQuery=searchInput.value;renderModelMenu();const next=modelMenu.querySelector('.model-search');if(next){next.focus();const end=next.value.length;try{next.setSelectionRange(end,end)}catch{}}}
+    searchInput.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();if(modelQuery){modelQuery='';renderModelMenu();const next=modelMenu.querySelector('.model-search');next&&next.focus()}else closeModelMenu()}}
+    if(modelQuery){const end=searchInput.value.length;setTimeout(()=>{try{searchInput.focus();searchInput.setSelectionRange(end,end)}catch{}},0)}
   }
   function closeModelMenu(){modelMenu.classList.remove('open')}
-  function toggleModelMenu(){modelMenu.classList.toggle('open');if(modelMenu.classList.contains('open'))renderModelMenu()}
-  function updateActiveModelLine(){const el=document.getElementById('activeModelLine');if(!el)return;const name=selectedModel?findModelName(selectedModel):'';el.textContent=name?('Model: '+name):'';el.classList.toggle('visible',Boolean(name))}
+  function toggleModelMenu(){modelMenu.classList.toggle('open');if(modelMenu.classList.contains('open'))renderModelMenu()}  function updateActiveModelLine(){const el=document.getElementById('activeModelLine');if(!el)return;const name=selectedModel?findModelName(selectedModel):'';el.textContent=name?('Model: '+name):'';el.classList.toggle('visible',Boolean(name))}
   function selectModel(id,providerId){
     selectedModel=id;
     const name=findModelName(id);
     modelButton.textContent=name;
     modelButton.title=id;
     closeModelMenu();
+    modelQuery='';
     vscode.postMessage({type:'selectModel',model:id,provider:providerId});
     updateActiveModelLine();
     updateSessionStats();
