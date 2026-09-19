@@ -9,6 +9,7 @@ const runtime = read('src/webview/runtime.ts');
 const webviewHtml = read('src/webview.ts');
 const compactionCore = read('src/compaction-core.ts');
 const util = read('src/util.ts');
+const git = read('src/git.ts');
 const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
@@ -80,10 +81,18 @@ test('agent iterations default to 200 steps and expose a resumable max-step paus
 });
 
 test('sending during an active run queues without rendering a fake first send', () => {
-  assert.match(runtime, /if\(wasRunning\)\{queuedByConversation\.set\(activeConversationId,optimisticText\);updateQueuedVisibility\(\);vscode\.postMessage\(\{type:'send'/);
+  assert.match(runtime, /if\(wasRunning\)\{const list=queuedByConversation\.get\(activeConversationId\)\|\|\[\];list\.push\(\{id:'tmp-'\+Date\.now\(\),text:optimisticText\}\);queuedByConversation\.set\(activeConversationId,list\);updateQueuedVisibility\(\);vscode\.postMessage\(\{type:'send'/);
   const queuedBranch = runtime.match(/if\(wasRunning\)\{([\s\S]*?)updateSendMode\(\);return\}/)?.[1] ?? '';
   assert.doesNotMatch(queuedBranch, /beginTurn\(/);
   assert.doesNotMatch(queuedBranch, /runningSet\.add/);
+});
+
+test('queue keeps every follow-up sent during a run (multi-message queue)', () => {
+  // Server keeps one entry per queued prompt instead of replacing the previous one.
+  assert.match(agent, /this\.queue\.push\(\{ id: `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext \}\)/);
+  assert.doesNotMatch(agent, /this\.queue = this\.queue\.filter\(entry => entry\.conversationId !== conversationId\);\n\s*this\.queue\.push/);
+  assert.match(agent, /prompts: entries\.map\(entry => entry\.text\), ids: entries\.map\(entry => entry\.id\)/);
+  assert.match(runtime, /case'queuedPrompt':\{const ids=m\.ids\|\|\[\],texts=m\.prompts\|\|\[\]/);
 });
 
 test('installed marketplace skills can be read and explicitly used', () => {
@@ -295,4 +304,59 @@ test('error item preserves partial streamed text for retry continuation', () => 
   assert.match(styles, /interrupted-note/);
   // Resume message includes partialText
   assert.match(agent, /type: 'resume'.*partialText: resume\.partialText/);
+});
+
+test('structured model history persists across turns instead of flattening to text', () => {
+  // Conversation stores the real model-visible message array alongside display items.
+  assert.match(types, /messages\?: ModelMessage\[\]/);
+  assert.match(types, /export const MAX_STORED_MESSAGES/);
+  // The run seeds the provider with real messages when structured history exists.
+  assert.match(agent, /const history = resume \? \[\] : this\.structuredHistory\(conversation\)/);
+  assert.match(agent, /messages: agentMessages/);
+  // Response messages (assistant tool calls + tool results) are captured and kept.
+  assert.match(agent, /runMessages\.push\(\.\.\.\(responseMessages as ModelMessage\[\]\)\.filter\(message => message\.role !== 'system'\)\)/);
+  assert.match(agent, /this\.appendConversationMessages\(conversation, userText, runMessages\)/);
+  // History must never start with a tool result: strict providers reject it.
+  assert.match(agent, /let start = stored\.findIndex\(message => message\.role === 'user'\)/);
+  // Legacy conversations without structured history still use the text fallback.
+  assert.match(agent, /const structured = this\.structuredHistory\(conversation\)/);
+});
+
+test('compaction and rollbacks keep structured history in sync with the transcript', () => {
+  // Compaction replaces the structured history with the summary, never replays it.
+  assert.match(agent, /conversation\.messages = \[/);
+  assert.match(agent, /summaryText: string/);
+  assert.match(agent, /summaryText: summary\.text/);
+  // Undo/redo and checkpoint restores drop stale structured history.
+  assert.match(agent, /conversation\.messages = undefined;/);
+});
+
+test('an interrupted run keeps its partial work instead of losing it', () => {
+  // Partial structured messages are checkpointed after every completed iteration.
+  assert.match(agent, /conversation\.pending = \{ userText, messages: runMessages\.slice\(\), startedAt:/);
+  assert.match(types, /pending\?: \{ userText: string; messages: ModelMessage\[\]; startedAt: number \}/);
+  // The abort branch folds the partial turn into history and clears pending.
+  assert.match(agent, /if \(run\.controller\.signal\.aborted\) \{[\s\S]{0,400}appendConversationMessages\(conversation, userText, runMessages\)/);
+  // The error branch does the same so a retry continues rather than re-reading.
+  assert.match(agent, /conversation\.pending = undefined;/);
+  // A reload/crash recovers the pending turn into structured history on load.
+  assert.match(agent, /const pending = conversation\.pending;/);
+  assert.match(agent, /carried\.slice\(-MAX_STORED_MESSAGES\)/);
+  // Exactly one declaration, in the outer run scope so catch/finally can reach it.
+  assert.equal((agent.match(/let runMessages: ModelMessage\[\] = \[\];/g) || []).length, 1);
+});
+
+test('no destructive truncation remains in tool output paths', () => {
+  // The destructive helper is gone entirely; oversized output is archived instead.
+  assert.doesNotMatch(tools, /truncate\(content\)/);
+  assert.doesNotMatch(agent, /truncate\(content\)/);
+  assert.doesNotMatch(git, /truncate\(output/);
+  // Skill reads and marketplace previews no longer silently shorten content.
+  assert.match(tools, /capObservation\(ctx\.observationsDir\(\), 'skillsmp_get_skill'/);
+  assert.match(tools, /capObservation\(ctx\.observationsDir\(\), 'skillsmp_read_installed'/);
+  assert.match(agent, /not shown in this preview/);
+  // Command output keeps head and a rolling tail while streaming, and says so.
+  assert.match(git, /bytes elided from an earlier part of the output/);
+  // Archival is the single non-destructive path.
+  assert.match(tools, /import \{ capObservation, readObservationPage \} from '\.\/observations'/);
 });

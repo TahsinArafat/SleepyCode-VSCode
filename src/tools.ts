@@ -6,7 +6,8 @@ import { runCommand } from './git';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readInstalledSkill, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills } from './skills';
 import { MAX_FILE_BYTES } from './types';
 import type { AppConfig } from './types';
-import { assertNotSecret, isDestructiveCommand, isSecret, pathInside, truncate } from './util';
+import { assertNotSecret, isDestructiveCommand, isSecret, pathInside } from './util';
+import { capObservation, readObservationPage } from './observations';
 import type { TerminalManager } from './terminal';
 import { compareWorktrees, createWorktree, listWorktrees, mergeWorktree, removeWorktree, runInWorktree, statusOfWorktree } from './worktrees';
 import type { RepoIndex, SourceCitedMemory } from './repo-index';
@@ -31,6 +32,8 @@ export interface ToolContext {
   repoIndex?: RepoIndex;
   repoMemory?: SourceCitedMemory;
   browser?: BrowserController;
+  /** Directory where oversized tool output is archived (non-destructive). */
+  observationsDir(): string;
 }
 
 export function buildTools(ctx: ToolContext): Record<string, any> {
@@ -54,14 +57,44 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       },
     }),
     read_file: tool({
-      description: 'Read a UTF-8 text file from the workspace. Secret env files are blocked.',
-      inputSchema: z.object({ path: z.string() }),
-      execute: async ({ path: filePath }) => {
+      description: 'Read a UTF-8 text file from the workspace. Secret env files are blocked. For large files, pass offset and limit (in lines) to page through the content instead of re-reading from the start.',
+      inputSchema: z.object({
+        path: z.string(),
+        offset: z.number().int().min(0).optional().describe('0-based line number to start reading from. Defaults to 0.'),
+        limit: z.number().int().min(1).max(4000).optional().describe('Maximum number of lines to return. Defaults to 2000.'),
+      }),
+      execute: async ({ path: filePath, offset, limit }) => {
         assertNotSecret(filePath);
         const uri = ctx.resolvePath(filePath);
         const stat = await vscode.workspace.fs.stat(uri);
         if (stat.size > MAX_FILE_BYTES) throw new Error(`File is too large (${stat.size} bytes).`);
-        return truncate(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)));
+        const full = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+        const startLine = offset ?? 0;
+        const maxLines = limit ?? 2000;
+        if (startLine === 0 && maxLines >= Number.MAX_SAFE_INTEGER) return full;
+        const allLines = full.split(/\r?\n/);
+        const slice = allLines.slice(startLine, startLine + maxLines);
+        const body = slice.join('\n');
+        // Only the requested window is returned, but nothing is lost: the full
+        // text is archived and reachable through obs_recall when it was truncated.
+        const lastLine = startLine + slice.length;
+        if (lastLine < allLines.length) {
+          const capped = await capObservation(ctx.observationsDir(), 'read_file', body);
+          return `${capped.text}\n\n[showing lines ${startLine + 1}-${lastLine} of ${allLines.length}. Call read_file again with offset=${lastLine} for the next page.]`;
+        }
+        return body;
+      },
+    }),
+    obs_recall: tool({
+      description: 'Read a paged excerpt from a previously archived large tool result. Use the observation id from an "[archived observation obs_...]" header and pass byteOffset to continue reading.',
+      inputSchema: z.object({
+        id: z.string().describe('Observation id, e.g. obs_0123456789abcdef01234567'),
+        offset: z.number().int().min(0).optional().describe('Byte offset to start from. Defaults to 0.'),
+      }),
+      execute: async ({ id, offset }) => {
+        const page = await readObservationPage(ctx.observationsDir(), id, offset ?? 0);
+        const more = page.nextOffset === null ? '' : `\n\n[next byteOffset=${page.nextOffset} of ${page.totalBytes}]`;
+        return `${page.text}${more}`;
       },
     }),
     search_files: tool({
@@ -287,7 +320,8 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         return `No skill path given. Skills available in ${reference.owner}/${reference.repo} (${skills.length} total):\n\n${shown.map(skill => `- ${skill.name} (${skill.path})`).join('\n')}${skills.length > shown.length ? `\n… and ${skills.length - shown.length} more.` : ''}`;
       }
       const { content } = await readSkillMarkdown(reference.owner, reference.repo, reference.branch, folderPath, ctx.abortSignal);
-      return `# ${reference.owner}/${reference.repo} / ${folderPath}\n\n${truncate(content)}`;
+      const capped = await capObservation(ctx.observationsDir(), 'skillsmp_get_skill', content);
+      return `# ${reference.owner}/${reference.repo} / ${folderPath}\n\n${capped.text}`;
     },
   });
   tools.skillsmp_install_skill = tool({
@@ -336,7 +370,8 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
     }),
     execute: async ({ name }) => {
       const { skill, content } = await readInstalledSkill(ctx.skillsDir, name);
-      return `# Installed skill: ${skill.name}\n\n${truncate(content)}`;
+      const capped = await capObservation(ctx.observationsDir(), 'skillsmp_read_installed', content);
+      return `# Installed skill: ${skill.name}\n\n${capped.text}`;
     },
   });
   tools.worktree_create = tool({

@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { truncate } from './util';
+import { MAX_TOOL_OUTPUT } from './types';
 
 export function isGitTrackedWorkspace(rootPath?: string): boolean {
   if (!rootPath) return false;
@@ -102,7 +102,22 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, sign
   return new Promise((resolve, reject) => {
     const child = spawn(command, { cwd, shell: true, env: process.env, windowsHide: true, detached: process.platform !== 'win32' });
     let output = '';
-    const append = (chunk: Buffer) => { output = truncate(output + chunk.toString()); };
+    // Bound live memory without destroying the result: keep the head and a rolling
+    // tail so errors stay visible, and record how much was elided. The full text is
+    // not recoverable here because the process is still streaming, but nothing is
+    // silently misreported as complete.
+    let elided = 0;
+    const MAX_LIVE = MAX_TOOL_OUTPUT * 2;
+    const append = (chunk: Buffer) => {
+      output += chunk.toString();
+      if (output.length > MAX_LIVE) {
+        const overflow = output.length - MAX_LIVE;
+        const head = output.slice(0, MAX_TOOL_OUTPUT);
+        const tail = output.slice(-(MAX_LIVE - MAX_TOOL_OUTPUT));
+        elided += overflow;
+        output = `${head}\n\n…(${elided} bytes elided from an earlier part of the output — this command is still running)…\n\n${tail}`;
+      }
+    };
     child.stdout.on('data', append); child.stderr.on('data', append);
     const timer = setTimeout(() => {
       if (process.platform === 'win32') {

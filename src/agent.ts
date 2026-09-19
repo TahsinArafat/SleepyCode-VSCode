@@ -12,10 +12,10 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
-import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS } from './types';
-import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask, truncate } from './util';
+import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
+import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter, stripThinkBlocks } from './think-strip';
-import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, selectCarriedItems, shouldAutoCompact, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { pausedByStepLimit } from './iteration-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -199,14 +199,19 @@ function isProjectMeta(entry: unknown): entry is ProjectMetaEntry & { id: string
 export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static readonly LOG_KEY = 'sleepycode.extensionLogs';
   private static readonly LOG_LIMIT = 400;
+  /** Minimum gap between coalesced mid-run checkpoint writes. */
+  private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
   private runs = new Map<string, ActiveRun>();
-  private queue: { text: string; conversationId: string; context?: ComposerContext; promptContext?: string }[] = [];
+  private queue: { id: string; text: string; conversationId: string; context?: ComposerContext; promptContext?: string }[] = [];
+  private queueSeq = 0;
   private apiKeys: Record<string, string> = {};
   private persistChain: Promise<void> = Promise.resolve();
+  /** Timestamp of the last coalesced mid-run checkpoint write. */
+  private checkpointAt = 0;
   private notifySeq = 0;
   private pendingNotifies = new Map<number, (choice: 'ok' | 'secondary' | 'cancel') => void>();
   private readonly terminals = new TerminalManager();
@@ -548,6 +553,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return vscode.Uri.joinPath(this.context.globalStorageUri, 'skills');
   }
 
+  /**
+   * Where oversized tool output is archived. Lives in global storage (not the
+   * workspace) so recalling an observation never writes into the user's repo.
+   */
+  private observationsRoot(): string {
+    return vscode.Uri.joinPath(this.context.globalStorageUri, 'observations').fsPath;
+  }
+
   private async loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
     if (this.repoIndexCache?.root === root.fsPath) {
       if (!this.repoIndexCache.symboled) {
@@ -724,7 +737,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
         conversations: conversations.map(conversation => {
           const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-          return { ...conversation, items: conversation.items.map((item, index) => normalizeTranscriptItem(item, baseTimestamp + index)) };
+          const items = conversation.items.map((item, index) => normalizeTranscriptItem(item, baseTimestamp + index));
+          // A run interrupted by a reload/crash left a partial turn behind. Fold it
+          // into the structured history so the next message keeps that work, then
+          // mark the turn as interrupted so the user knows it did not finish.
+          const pending = conversation.pending;
+          if (pending?.messages?.length && !conversation.messages?.length) {
+            const carried: ModelMessage[] = [{ role: 'user', content: pending.userText }, ...pending.messages];
+            conversation.messages = carried.slice(-MAX_STORED_MESSAGES);
+          }
+          if (pending) conversation.pending = undefined;
+          return { ...conversation, items };
         }),
       };
     });
@@ -855,6 +878,67 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Structured model-visible history for a conversation: the persisted assistant
+   * turns (including their tool calls) and tool results, minus any leading
+   * messages that are not valid to start a request with.
+   *
+   * The first message MUST be a user message; a history that starts with a
+   * tool-result (e.g. after trimming) would be rejected by strict providers.
+   *
+   * Selection is token-budgeted and cut only at safe boundaries: a turn's tool
+   * results are never separated from the assistant message that requested them,
+   * because an orphaned tool-call id makes strict providers reject the request.
+   */
+  private structuredHistory(conversation: Conversation, budgetTokens = STRUCTURED_HISTORY_BUDGET_TOKENS): ModelMessage[] {
+    const stored = conversation.messages;
+    if (!stored?.length) return [];
+    // Drop any leading tool-result/assistant messages that have no user turn.
+    let start = stored.findIndex(message => message.role === 'user');
+    if (start < 0) return [];
+    if (start > 0) start = this.safeHistoryStart(stored, start);
+    const aligned = stored.slice(start);
+    // Walk backwards accumulating cost, but only cut at a user-message boundary so
+    // each retained slice begins a real turn and keeps its tool results attached.
+    let cost = 0;
+    let cut = 0;
+    for (let index = aligned.length - 1; index >= 0; index--) {
+      cost += estimateMessageTokens(aligned[index]!);
+      if (cost <= budgetTokens) continue;
+      cut = this.nextTurnStart(aligned, index);
+      break;
+    }
+    if (cut > 0) return aligned.slice(cut);
+    return aligned;
+  }
+
+  /** Index of the next user message at or after `index` (a valid cut point). */
+  private nextTurnStart(messages: ModelMessage[], index: number): number {
+    for (let cursor = Math.max(0, index); cursor < messages.length; cursor++) {
+      if (messages[cursor]!.role === 'user') return cursor;
+    }
+    return messages.length;
+  }
+
+  /** Advances past a leading tool-result to the turn that owns it, if any. */
+  private safeHistoryStart(messages: ModelMessage[], start: number): number {
+    let cursor = start;
+    while (cursor > 0 && messages[cursor]!.role !== 'user') cursor--;
+    return cursor;
+  }
+
+  /**
+   * Append this run's structured messages to the conversation, paired with the
+   * user turn that produced them. Keeps a hard count bound and always trims from
+   * the front so the newest context survives.
+   */
+  private appendConversationMessages(conversation: Conversation, userText: string, produced: ModelMessage[]): void {
+    const existing = conversation.messages ?? [];
+    const userTurn: ModelMessage = { role: 'user', content: userText };
+    const next = [...existing, userTurn, ...produced];
+    conversation.messages = next.length > MAX_STORED_MESSAGES ? next.slice(-MAX_STORED_MESSAGES) : next;
+  }
+
+  /**
    * Select the transcript items to hand the model as "previous conversation".
    * Walks backwards accumulating a chars/4 token cost until the budget is hit,
    * keeping a minimum of COMPACTION_HISTORY_ITEMS so short conversations always
@@ -905,6 +989,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return this.persistChain;
   }
 
+  /**
+   * Persist a mid-run checkpoint without writing on every tool iteration.
+   *
+   * A checkpoint after each completed iteration is what makes an interrupted run
+   * recoverable, but serializing every project and every conversation to SQLite
+   * per iteration is heavy on long runs. Coalesce: write at most once per window,
+   * and always flush immediately at the end of a run so nothing is left dirty.
+   */
+  private checkpointProjects(force = false): Promise<void> {
+    if (force) {
+      this.checkpointAt = 0;
+      return this.persistProjects();
+    }
+    const now = Date.now();
+    if (now - this.checkpointAt < AgentViewProvider.CHECKPOINT_INTERVAL_MS) return this.persistChain;
+    this.checkpointAt = now;
+    return this.persistProjects();
+  }
+
   private sortConversations(project: Project): void {
     project.conversations.sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
@@ -928,7 +1031,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           changeCount: lastAssistant?.changes?.length ?? 0,
           status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? 'failed' : lastAssistant ? 'done' : 'empty',
           running: this.runs.has(id),
-          queued: this.queue.find(entry => entry.conversationId === id)?.text ?? null,
+          queued: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.text),
+          queuedIds: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.id),
         };
       }), activeId: project.activeConversationId
     });
@@ -1002,7 +1106,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'removeQueued') {
-      this.queue = this.queue.filter(entry => entry.conversationId !== message.conversationId);
+      // Prefer the exact entry by id; fall back to the oldest queued prompt for the
+      // conversation so optimistic (client-generated) ids still remove something.
+      const own = this.queue.filter(entry => entry.conversationId === message.conversationId);
+      const target = (message.id ? own.find(entry => entry.id === message.id) : undefined) ?? own[0];
+      if (target) this.queue = this.queue.filter(entry => entry !== target);
       this.postQueued(message.conversationId);
       return;
     }
@@ -1137,6 +1245,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       conversation.items = conversation.items.slice(0, targetIndex + 1);
+      // Structured history no longer matches the rolled-back transcript.
+      conversation.messages = undefined;
       conversation.updatedAt = Date.now();
       project.activeConversationId = conversation.id;
       project.updatedAt = Date.now();
@@ -1198,6 +1308,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
       conversation.items = conversation.items.slice(0, targetIndex);
+      conversation.messages = undefined;
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
@@ -1325,7 +1436,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         const { content } = await readSkillMarkdown(reference.owner, reference.repo, reference.branch, folderPath);
-        this.post({ type: 'marketplacePreview', title: reference.owner + '/' + reference.repo + ' / ' + folderPath, markdown: truncate(content), source: message.source, path: folderPath });
+        // Display-only preview: cap the rendered markdown but say so, rather than
+        // silently presenting a shortened skill as if it were complete.
+        const previewCap = 40_000;
+        const markdown = content.length > previewCap
+          ? `${content.slice(0, previewCap)}\n\n…(${content.length - previewCap} bytes not shown in this preview)…`
+          : content;
+        this.post({ type: 'marketplacePreview', title: reference.owner + '/' + reference.repo + ' / ' + folderPath, markdown, source: message.source, path: folderPath });
       } catch (error) {
         this.post({ type: 'marketplaceError', text: errorMessage(error) });
       }
@@ -2060,14 +2177,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string): void {
-    this.queue = this.queue.filter(entry => entry.conversationId !== conversationId);
-    this.queue.push({ text, conversationId, context, promptContext });
+    // Multiple follow-ups may be queued for the same conversation; they run in FIFO order.
+    this.queue.push({ id: `q${++this.queueSeq}`, text, conversationId, context, promptContext });
     this.postQueued(conversationId);
   }
 
   private postQueued(conversationId: string): void {
-    const entry = this.queue.find(item => item.conversationId === conversationId);
-    this.post({ type: 'queuedPrompt', conversationId, prompt: entry?.text ?? null });
+    const entries = this.queue.filter(item => item.conversationId === conversationId);
+    this.post({ type: 'queuedPrompt', conversationId, prompts: entries.map(entry => entry.text), ids: entries.map(entry => entry.id) });
   }
 
   private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
@@ -2114,6 +2231,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
     const work: WorkItem[] = resume ? [...(resume.work ?? [])] : [];
     const runChanges = new Map<string, FileChange>((resume?.changes ?? []).map(change => [change.path, change]));
+    // Written after each completed iteration so an interrupted run is recoverable.
+    let runMessages: ModelMessage[] = [];
     const snapshotByPath = new Map<string, FileSnapshot>((resume?.fileSnapshot ?? []).map(snap => [snap.path, snap]));
     const postToolEvent = (message: unknown): void => {
       if (!message || typeof message !== 'object') {
@@ -2366,6 +2485,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           reviewEdit: (filePath, before, after, reason, destructive) => this.reviewEdit(filePath, before, after, reason, destructive),
           post: subagentPost,
           resolvePath: filePath => this.resolveWorkspacePath(filePath),
+          observationsDir: () => this.observationsRoot(),
           describePlan: () => 'Subagents do not publish a parent plan. Work directly on the assigned task.',
           abortSignal: run.controller.signal,
           terminals: this.terminals,
@@ -2524,6 +2644,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           repoIndex,
           repoMemory,
           browser: this.browser,
+          observationsDir: () => this.observationsRoot(),
         }),
         ...mcpConnection.tools,
       }, conversationAgent?.tools);
@@ -2563,13 +2684,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ? `${resumeDirection}\n\n${resumeContext}`
           : userText;
       } else {
-        const budgetTokens = Math.max(2_000, Math.floor((DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_RATIO) / 2));
-        const recent = this.recentContextItems(conversation, budgetTokens)
-          .map(item => `${item.role.toUpperCase()}: ${item.text}`)
-          .join('\n\n');
-        streamPrompt = recent
-          ? `Previous conversation:\n${recent}\n\nCurrent request:\n${userText}${promptContext}`
-          : `${userText}${promptContext}`;
+        // Prefer the structured model history (assistant turns + tool calls + tool
+        // results). Fall back to the flattened text window only for conversations
+        // that predate structured history or were compacted to text summaries.
+        const structured = this.structuredHistory(conversation);
+        if (structured.length) {
+          streamPrompt = `${userText}${promptContext}`;
+        } else {
+          const budgetTokens = Math.max(2_000, Math.floor((DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_RATIO) / 2));
+          const recent = this.recentContextItems(conversation, budgetTokens)
+            .map(item => `${item.role.toUpperCase()}: ${item.text}`)
+            .join('\n\n');
+          streamPrompt = recent
+            ? `Previous conversation:\n${recent}\n\nCurrent request:\n${userText}${promptContext}`
+            : `${userText}${promptContext}`;
+        }
       }
       const maxRunRetries = MAX_RUN_RETRIES;
       let runAttempt = 0;
@@ -2602,10 +2731,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 ]
               }]
               : streamPrompt;
+            // When the conversation has structured history, send it as real messages
+            // so prior tool calls and their results stay in context; otherwise use the
+            // flattened text prompt built above.
+            const history = resume ? [] : this.structuredHistory(conversation);
+            let agentMessages: ModelMessage[] | undefined;
+            if (history.length) {
+              if (imageAttachments.length) {
+                const imageParts = await Promise.all(imageAttachments.map(async attachment => ({ type: 'image' as const, image: await readFile(attachment.tempPath!), mediaType: attachment.mimeType })));
+                agentMessages = [...history, { role: 'user', content: [{ type: 'text' as const, text: streamPrompt }, ...imageParts] }];
+              } else {
+                agentMessages = [...history, { role: 'user', content: streamPrompt }];
+              }
+            }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
             this.log('info', 'run.stream.start', `conversation=${conversationId}; model=${model}`);
             const result = await agent.stream({
-              prompt,
+              ...(agentMessages ? { messages: agentMessages } : { prompt }),
               abortSignal: run.controller.signal,
               onToolExecutionStart: ({ toolCall }) => {
                 this.enforceHooks('beforeTool', { tool: toolCall.toolName, text: JSON.stringify(toolCall.input ?? {}) });
@@ -2715,6 +2857,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               }
             }
             lastIterationStepCount = iterationStepCount;
+            // Capture the structured turn (assistant message with tool calls + the
+            // tool results) so it can be persisted for the next user turn.
+            if (!run.controller.signal.aborted) {
+              const responseMessages = (await result.responseMessages) ?? [];
+              runMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              // Checkpoint after every completed iteration. If VS Code reloads, the
+              // connection drops, or the model errors mid-run, this partial turn is
+              // recoverable instead of being lost and re-read from scratch.
+              if (!resume) {
+                conversation.pending = { userText, messages: runMessages.slice(), startedAt: workStartedAt || Date.now() };
+                void this.checkpointProjects();
+              }
+            }
             const usage = await result.usage;
             if (usage?.inputTokens || usage?.outputTokens) {
               const uin = usage.inputTokens ?? 0;
@@ -2754,6 +2909,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           }
           if (runChanges.size) assistantItem.changes = [...runChanges.values()];
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
+          // Persist the structured model history so the next turn keeps prior tool
+          // calls and their results in context instead of re-reading files.
+          if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+          conversation.pending = undefined;
           conversation.items.push(assistantItem);
           this.boundConversationItems(conversation);
           conversation.updatedAt = Date.now();
@@ -2791,6 +2950,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       if (run.controller.signal.aborted) {
+        // Keep whatever the turn accomplished before it was stopped so a later
+        // message continues from real context instead of re-reading files.
+        if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+        conversation.pending = undefined;
+        conversation.updatedAt = Date.now();
+        project.updatedAt = Date.now();
+        await this.persistProjects();
         if (planState) { planState.interrupted = true; postPlan(); }
         if (run.steering) {
           carriedGitTree = runGitTree;
@@ -2805,6 +2971,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         errorItem.errorInfo = errorInfo;
         if (partialAnswer.trim()) errorItem.partialText = partialAnswer;
         if (runChanges.size) errorItem.changes = [...runChanges.values()];
+        // Keep the work already done: merge the partial turn's tool calls and
+        // results into the structured history so a retry continues instead of
+        // re-reading every file.
+        if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+        conversation.pending = undefined;
         conversation.items.push(errorItem);
         this.boundConversationItems(conversation);
         conversation.updatedAt = Date.now();
@@ -2880,6 +3051,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const before = conversation.items;
       const summarized = await this.summarizeConversation(before, selection, controller.signal);
       conversation.items = summarized.items;
+      // The structured model history must follow the compacted transcript, otherwise
+      // the next turn would replay the pre-compaction tool calls we just summarized.
+      conversation.messages = [
+        { role: 'user', content: `Conversation summary (earlier context was compacted):\n\n${summarized.summaryText}` },
+      ];
       // Snapshot the boundary so the divider can be undone/redone. A fresh
       // compaction supersedes any pending redo at this boundary.
       const undo = this.compactionUndoStacks.get(targetId ?? '') ?? [];
@@ -2944,6 +3120,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     redo.push(snapshot);
     this.compactionRedoStacks.set(conversation.id, redo.slice(-3));
     conversation.items = snapshot.before;
+    conversation.messages = undefined;
     void this.persistCompactionSnapshots(conversation.id);
     return true;
   }
@@ -2996,16 +3173,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     items: TranscriptItem[],
     selection: { model: string; provider: string; agentId: string },
     signal: AbortSignal,
-  ): Promise<{ items: TranscriptItem[]; usage?: { inputTokens?: number; outputTokens?: number }; modelId: string; providerId: string }> {
+  ): Promise<{ items: TranscriptItem[]; summaryText: string; usage?: { inputTokens?: number; outputTokens?: number }; modelId: string; providerId: string }> {
     const text = compactionPromptInput(items);
+    // Carry what the conversation already inspected and edited. Without this the
+    // next turn re-reads every file to rediscover the same facts — the re-read
+    // loop this work exists to remove.
+    const fileOps = summarizeFileOperations(items);
     const prompt = [
       'Summarize the conversation below into a compact continuation context.',
       'Preserve: active goal, unresolved blockers, open todos, key decisions, and latest state.',
       'Omit completed subtasks, repeated confirmations, and tool trivia unless they affect the next steps.',
       'Keep it under 1200 words and write it as a brief assistant message that can be injected into the next run.',
+      fileOps,
       '',
       text,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
     let summaryText = '';
     let usage: { inputTokens?: number; outputTokens?: number } | undefined;
     let modelId = '';
@@ -3114,6 +3296,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       });
     return {
       items: [summary, ...carried, createTranscriptItem('user', '', 'divider')],
+      summaryText: summary.text,
       usage,
       modelId,
       providerId,

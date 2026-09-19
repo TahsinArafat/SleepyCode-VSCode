@@ -88,6 +88,68 @@ export function contextOccupancy(items: readonly CompactableItem[]): { tokens: n
   return { tokens: estimateContextTokens(items), measured: false };
 }
 
+/**
+ * Estimate the tokens a single model-visible message contributes, using the same
+ * chars/4 heuristic as the rest of the harness. Tool calls and their results are
+ * counted from their serialized payload so a large observation is not undercounted.
+ */
+export function estimateMessageTokens(message: { role: string; content?: unknown; toolCalls?: unknown }): number {
+  let chars = 0;
+  const content = message.content;
+  if (typeof content === 'string') chars += content.length;
+  else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part === 'string') chars += part.length;
+      else if (part && typeof part === 'object') {
+        const record = part as Record<string, unknown>;
+        if (typeof record.text === 'string') chars += record.text.length;
+        else chars += JSON.stringify(part).length;
+      }
+    }
+  } else if (content && typeof content === 'object') {
+    chars += JSON.stringify(content).length;
+  }
+  if (message.toolCalls) chars += JSON.stringify(message.toolCalls).length;
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+/**
+ * Summarize which files the conversation already read and changed, so a compacted
+ * transcript still tells the next turn what has been inspected. Mirrors Pi's
+ * CompactionDetails (readFiles/modifiedFiles). Returns '' when nothing is known.
+ */
+export function summarizeFileOperations(items: readonly { work?: readonly { kind?: string; tool?: string; text?: string }[] }[]): string {
+  const read = new Set<string>();
+  const modified = new Set<string>();
+  const READ_TOOLS = /^(read_file|obs_recall)$/;
+  const WRITE_TOOLS = /^(write_file|replace_text|delete_file)$/;
+  // Tool labels read as "<Human Name> · <path>"; match a path-like token anywhere.
+  const PATH_IN_TEXT = /([\w./@-]+\.[A-Za-z0-9]{1,8})(?![\w./@-])/g;
+  for (const item of items) {
+    for (const entry of item.work ?? []) {
+      if (entry.kind !== 'task' || !entry.tool || !entry.text) continue;
+      const paths = [...entry.text.matchAll(PATH_IN_TEXT)].map(match => match[1]!).filter(Boolean);
+      for (const filePath of paths) {
+        if (READ_TOOLS.test(entry.tool)) read.add(filePath);
+        else if (WRITE_TOOLS.test(entry.tool)) modified.add(filePath);
+      }
+    }
+  }
+  for (const filePath of [...modified]) read.delete(filePath);
+  const lines = [
+    read.size ? `Files already read (do not re-read unless changed): ${[...read].slice(0, 40).join(', ')}` : '',
+    modified.size ? `Files modified in this session: ${[...modified].slice(0, 40).join(', ')}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+/**
+ * Token budget for the structured history handed to the provider on each turn.
+ * Deliberately well below the compaction threshold so the newest work always fits
+ * with room for the model's response; older turns are summarized by compaction.
+ */
+export const STRUCTURED_HISTORY_BUDGET_TOKENS = 60_000;
+
 /** True when the estimated occupancy reaches the auto-compaction threshold. */
 export function shouldAutoCompact(contextTokens: number, contextWindow?: number | null): boolean {
   const window = contextWindow && contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW;

@@ -1,3 +1,4 @@
+import type { ModelMessage } from 'ai';
 import type { ProjectIntelligence } from './project-index-core';
 
 export type WebMessage =
@@ -18,8 +19,8 @@ export type WebMessage =
   | { type: 'gitCommit'; conversationId: string; itemId: string }
   | { type: 'reindexProject' }
   | { type: 'copyText'; text: string }
-  | { type: 'steerQueued'; conversationId: string }
-  | { type: 'removeQueued'; conversationId: string }
+  | { type: 'steerQueued'; conversationId: string; id?: string }
+  | { type: 'removeQueued'; conversationId: string; id?: string }
   | { type: 'setKey' }
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'requestSettings' }
@@ -170,6 +171,20 @@ export type Conversation = {
   id: string;
   title: string;
   items: TranscriptItem[];
+  /**
+   * Structured model-visible history (assistant turns incl. their tool calls, and
+   * the tool results). This is the source of truth handed to the provider on the
+   * next turn. `items` is only the display transcript; keeping them separate means
+   * tool output survives between user turns instead of being re-read every time.
+   */
+  messages?: ModelMessage[];
+  /**
+   * User turn + structured messages of a run that has not finished yet. Written
+   * after every completed tool iteration so an aborted run, connection drop,
+   * model error, or VS Code reload can resume with the work already done instead
+   * of losing it and re-reading everything.
+   */
+  pending?: { userText: string; messages: ModelMessage[]; startedAt: number };
   archived: boolean;
   pinned?: boolean;
   createdAt: number;
@@ -323,6 +338,8 @@ export type { ProjectIntelligence };
 
 export const MAX_FILE_BYTES = 250_000;
 export const MAX_TOOL_OUTPUT = 40_000;
+/** Hard cap on the structured model history persisted per conversation. */
+export const MAX_STORED_MESSAGES = 400;
 export const MAX_PERSISTED_REASONING = 3_000;
 /** Hard memory guard only — history is not routinely trimmed at this size. */
 export const MAX_STORED_ITEMS = 2_000;

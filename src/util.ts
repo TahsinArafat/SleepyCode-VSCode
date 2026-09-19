@@ -1,7 +1,6 @@
 import * as path from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { Provider } from './providers';
-import { MAX_TOOL_OUTPUT } from './types';
 import type { TranscriptItem, WorkItem, ApprovalMode, AgentErrorPresentation } from './types';
 
 export function pathInside(root: string, candidate: string): boolean {
@@ -124,10 +123,6 @@ export function isSecret(filePath: string): boolean {
 
 export function assertNotSecret(filePath: string): void {
   if (isSecret(filePath)) throw new Error('Access to environment and credential files is blocked.');
-}
-
-export function truncate(value: string): string {
-  return value.length > MAX_TOOL_OUTPUT ? `${value.slice(0, MAX_TOOL_OUTPUT)}\n…(truncated)` : value;
 }
 
 export function summarizeInput(input: unknown): string {
