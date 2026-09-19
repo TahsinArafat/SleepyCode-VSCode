@@ -2,15 +2,19 @@ import * as vscode from 'vscode';
 import { isGitTrackedWorkspace } from './git';
 import { WEBVIEW_STYLES } from './webview/styles';
 import { getWebviewRuntime } from './webview/runtime';
+import { loadKatexAssets } from './webview/katex-assets';
 
 export function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, rootPath?: string): string {
   const nonce = Math.random().toString(36).slice(2);
   const markUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'sleepycode-mark.svg'));
   const gitTracked = isGitTrackedWorkspace(rootPath);
+  const katex = loadKatexAssets(webview, extensionUri);
+  const katexStyle = katex ? `<style>${katex.css}</style>` : '';
+  const katexScript = katex ? `${katex.js}\n` : '';
   return String.raw`<!doctype html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>${WEBVIEW_STYLES}</style></head><body><div class="app">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>${WEBVIEW_STYLES}</style>${katexStyle}</head><body><div class="app">
   <div class="top"><div class="chat-bar"><button class="conversation-button" id="conversationButton"><span class="conversation-title" id="conversationTitle">New conversation</span><svg class="conversation-caret" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button><button class="icon" id="newConversation" title="New conversation"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button><button class="icon" id="undoButton" title="Undo last turn" aria-label="Undo last turn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/></svg></button><button class="icon" id="redoButton" title="Redo last turn" aria-label="Redo last turn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13"/></svg></button><button class="icon" id="usageButton" title="Token usage"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6" rx=".5"/><rect x="12" y="8" width="3" height="10" rx=".5"/><rect x="17" y="4" width="3" height="14" rx=".5"/></svg></button><button class="icon" id="marketplaceButton" title="Skill marketplace"><svg viewBox="0 0 24 24"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18"/><path d="M4 9v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><path d="M9 21v-8h6v8"/></svg></button><button class="icon settings-icon" id="settingsButton" title="Settings"><svg viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg></button><div class="conversation-menu" id="conversationMenu"></div></div></div>
   <div class="login-banner" id="loginBanner"><div class="login-banner-info"><svg class="login-banner-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg><span>Sign in to <strong>SleepyAI</strong> to access models and limits.</span></div><button type="button" class="login-banner-btn" id="loginBannerBtn">Sign in</button></div>
   <div id="plan"></div>
@@ -61,5 +65,5 @@ export function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
   <div class="settings-body"><div class="settings-card" id="panelsBody"><div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Loading…</div></div></div>
 </div>
 <div class="modal-backdrop" id="notifyBackdrop"><div class="modal notify-modal" id="notifyModal" role="dialog" aria-modal="true" aria-labelledby="notifyTitle"><div class="modal-head"><span class="notify-title-icon" id="notifyIcon"><svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span><span class="modal-title" id="notifyTitle"></span><button class="icon" id="notifyClose" aria-label="Close">×</button></div><div class="modal-body"><div class="notify-risk" id="notifyRisk" style="display:none"></div><p class="notify-body" id="notifyBody"></p></div><div class="modal-actions notify-actions"><button class="secondary" id="notifySecondary" style="display:none"></button><span class="spacer"></span><button class="secondary" id="notifyCancel"></button><button class="primary" id="notifyOk"></button></div></div></div>
-<script nonce="${nonce}">${getWebviewRuntime(markUri.toString(), gitTracked)}</script></body></html>`;
+<script nonce="${nonce}">${katexScript}${getWebviewRuntime(markUri.toString(), gitTracked)}</script></body></html>`;
 }

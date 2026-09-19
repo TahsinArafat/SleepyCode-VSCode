@@ -1,6 +1,13 @@
 import * as esbuild from 'esbuild';
+import { execFileSync } from 'node:child_process';
 
 const watch = process.argv.includes('--watch');
+
+function copyKatexAssets() {
+  execFileSync(process.execPath, ['scripts/copy-katex-assets.mjs'], { stdio: 'inherit' });
+}
+
+copyKatexAssets();
 const options = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
