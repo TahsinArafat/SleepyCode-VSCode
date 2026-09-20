@@ -12,11 +12,12 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
-import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_REASONING, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
+import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
+import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
-import { pausedByStepLimit } from './iteration-core';
+import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -696,6 +697,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       onlyDefaultModels: this.config().onlyDefaultModels,
       confirmDelete: this.confirmDeleteConversations(),
       compactionModel: config.compactionModel,
+      maxPersistedReasoning: config.maxPersistedReasoning,
       initialSetup,
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
       subagentModels: this.subagentModels(),
@@ -753,10 +755,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // into the structured history so the next message keeps that work, then
           // mark the turn as interrupted so the user knows it did not finish.
           const pending = conversation.pending;
-          if (pending?.messages?.length && !conversation.messages?.length) {
-            const carried: ModelMessage[] = [{ role: 'user', content: pending.userText }, ...pending.messages];
-            conversation.messages = carried.slice(-MAX_STORED_MESSAGES);
-          }
+          conversation.messages = recoverPendingHistory(conversation.messages, pending, MAX_STORED_MESSAGES);
           if (pending) conversation.pending = undefined;
           return { ...conversation, items };
         }),
@@ -901,40 +900,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * because an orphaned tool-call id makes strict providers reject the request.
    */
   private structuredHistory(conversation: Conversation, budgetTokens = STRUCTURED_HISTORY_BUDGET_TOKENS): ModelMessage[] {
-    const stored = conversation.messages;
-    if (!stored?.length) return [];
-    // Drop any leading tool-result/assistant messages that have no user turn.
-    let start = stored.findIndex(message => message.role === 'user');
-    if (start < 0) return [];
-    if (start > 0) start = this.safeHistoryStart(stored, start);
-    const aligned = stored.slice(start);
-    // Walk backwards accumulating cost, but only cut at a user-message boundary so
-    // each retained slice begins a real turn and keeps its tool results attached.
-    let cost = 0;
-    let cut = 0;
-    for (let index = aligned.length - 1; index >= 0; index--) {
-      cost += estimateMessageTokens(aligned[index]!);
-      if (cost <= budgetTokens) continue;
-      cut = this.nextTurnStart(aligned, index);
-      break;
-    }
-    if (cut > 0) return aligned.slice(cut);
-    return aligned;
-  }
-
-  /** Index of the next user message at or after `index` (a valid cut point). */
-  private nextTurnStart(messages: ModelMessage[], index: number): number {
-    for (let cursor = Math.max(0, index); cursor < messages.length; cursor++) {
-      if (messages[cursor]!.role === 'user') return cursor;
-    }
-    return messages.length;
-  }
-
-  /** Advances past a leading tool-result to the turn that owns it, if any. */
-  private safeHistoryStart(messages: ModelMessage[], start: number): number {
-    let cursor = start;
-    while (cursor > 0 && messages[cursor]!.role !== 'user') cursor--;
-    return cursor;
+    const selected = selectStructuredHistory(conversation.messages, budgetTokens, estimateMessageTokens);
+    return backfillAssistantReasoning(selected, reasoningTextsFromItems(conversation.items));
   }
 
   /**
@@ -943,10 +910,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * the front so the newest context survives.
    */
   private appendConversationMessages(conversation: Conversation, userText: string, produced: ModelMessage[]): void {
-    const existing = conversation.messages ?? [];
-    const userTurn: ModelMessage = { role: 'user', content: userText };
-    const next = [...existing, userTurn, ...produced];
-    conversation.messages = next.length > MAX_STORED_MESSAGES ? next.slice(-MAX_STORED_MESSAGES) : next;
+    conversation.messages = appendConversationMessages(conversation.messages, userText, produced, MAX_STORED_MESSAGES);
   }
 
   /**
@@ -1522,6 +1486,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         parseMcpServers(message.mcpServers ?? '{}');
         const rawMaxSteps = Number(message.maxSteps);
         const maxSteps = rawMaxSteps === 0 ? 0 : Math.max(1, Math.min(200, Math.round(rawMaxSteps) || 200));
+        const maxPersistedReasoning = normalizePersistedReasoningLimit(message.maxPersistedReasoning, DEFAULT_PERSISTED_REASONING);
 
         // Validate and normalize providers before persisting webview input.
         const previousProviders = this.getProviders();
@@ -1565,6 +1530,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
         const config = vscode.workspace.getConfiguration('sleepycode');
         await config.update('maxSteps', maxSteps, vscode.ConfigurationTarget.Global);
+        await config.update('maxPersistedReasoning', maxPersistedReasoning, vscode.ConfigurationTarget.Global);
         await config.update('extraFreeModels', message.extraFreeModels ?? '', vscode.ConfigurationTarget.Global);
         await this.context.globalState.update('sleepycode.providers', providers);
         await this.context.globalState.update('sleepycode.activeProvider', activeProvider);
@@ -1783,6 +1749,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const config = vscode.workspace.getConfiguration('sleepycode');
       const defaults = cloneProviders();
       await config.update('maxSteps', 200, vscode.ConfigurationTarget.Global);
+      await config.update('maxPersistedReasoning', DEFAULT_PERSISTED_REASONING, vscode.ConfigurationTarget.Global);
       await config.update('extraFreeModels', '', vscode.ConfigurationTarget.Global);
       await config.update('model', '', vscode.ConfigurationTarget.Global);
       await this.context.globalState.update('sleepycode.providers', defaults);
@@ -2295,6 +2262,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post(next);
     };
     const activeTasks = new Map<string, WorkItem>();
+    const reasoningLimit = this.config().maxPersistedReasoning;
     let reasoningBuffer = '';
     let reasoningTruncated = false;
     // Longest streamed text before an interruption; preserved on error items so
@@ -2606,10 +2574,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             const xmlCalls = nativeCallCount > 0 ? [] : parseInvokeBlocks(stepText);
             const decision = classifySubagentStep(stepText, nativeCallCount, xmlCalls.length);
             leftoverText = rememberVisibleText(leftoverText, decision.visibleText);
+            const stepThinking = extractThinkBlocks(stepText);
             if (decision.kind === 'native-tools') {
               // Native tool calls (already executed by streamText): hand the resulting messages back to the model.
               const responseMessages = (await result.responseMessages) ?? [];
               subagentMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              attachReasoningToLatestAssistant(subagentMessages, stepThinking);
               continue;
             }
             if (decision.kind === 'xml-tools') {
@@ -2637,15 +2607,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 }
                 this.notifyHooks('afterTool', { tool: call.name });
               }
+              attachReasoningToLatestAssistant(subagentMessages, stepThinking);
               subagentMessages.push({ role: 'user', content: `Tool results:\n${xmlResults.join('\n\n')}\n\nContinue the task. When finished, give the final answer as plain text without XML tool tags.` });
               continue;
             }
             if (decision.kind === 'final') {
+              attachReasoningToLatestAssistant(subagentMessages, stepThinking);
               subagentText = decision.visibleText;
               break;
             }
             // Think-only / whitespace-only step: keep going so the model can
             // emit a parent-visible answer instead of returning the placeholder.
+            attachReasoningToLatestAssistant(subagentMessages, stepThinking);
             subagentMessages.push({
               role: 'user',
               content: leftoverText
@@ -2711,10 +2684,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const doneLines = work.filter(item => item.kind === 'task' && item.done !== false).slice(-10)
           .map(item => `- ${item.text.replace(/\s+/g, ' ')}`)
           .join('\n');
+        const priorThinking = persistedReasoningBody(collectReasoningText(work));
         resumeContext = [
           planLines ? `Task plan:\n${planLines}` : '',
           inProgressLines ? `Current task (continue from here):\n${inProgressLines}` : '',
           doneLines ? `Work already completed (do not redo):\n${doneLines}` : '',
+          priorThinking ? `Your previous thinking (continue from it; do not repeat it):\n${priorThinking.slice(-this.config().maxPersistedReasoning)}` : '',
           resume?.errorText ? `The last attempt ended with:\n${resume.errorText}` : '',
           resume?.partialText ? `You had already written this partial response before the interruption. Continue it from exactly where it stops: do NOT restart the response and do NOT reproduce this text. Pick up mid-sentence and finish naturally.\n\nPartial response:\n${resume.partialText.slice(-6000)}` : '',
         ].filter(Boolean).join('\n\n');
@@ -2776,17 +2751,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 ]
               }]
               : streamPrompt;
-            // When the conversation has structured history, send it as real messages
-            // so prior tool calls and their results stay in context; otherwise use the
-            // flattened text prompt built above.
-            const history = resume ? [] : this.structuredHistory(conversation);
+            // Keep prior conversation history AND this turn's already-produced
+            // tool calls/results. Resume/auto-continue used to drop that live
+            // slice, which is how partial context disappeared mid-iteration.
+            const history = this.structuredHistory(conversation);
             let agentMessages: ModelMessage[] | undefined;
-            if (history.length) {
+            if (history.length || runMessages.length) {
+              agentMessages = iterationRequestMessages(history, runMessages, streamPrompt);
               if (imageAttachments.length) {
                 const imageParts = await Promise.all(imageAttachments.map(async attachment => ({ type: 'image' as const, image: await readFile(attachment.tempPath!), mediaType: attachment.mimeType })));
-                agentMessages = [...history, { role: 'user', content: [{ type: 'text' as const, text: streamPrompt }, ...imageParts] }];
-              } else {
-                agentMessages = [...history, { role: 'user', content: streamPrompt }];
+                const last = agentMessages[agentMessages.length - 1];
+                if (last) last.content = [{ type: 'text' as const, text: streamPrompt }, ...imageParts];
               }
             }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
@@ -2860,15 +2835,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                   if (answer.length > partialAnswer.length) partialAnswer = answer;
                   this.post({ type: 'delta', conversationId, text: content });
                 }
-                if (thinking) this.post({ type: 'reasoningDelta', conversationId, text: thinking });
+                if (thinking) {
+                  const remembered = rememberReasoningText(reasoningBuffer, thinking, reasoningLimit);
+                  reasoningBuffer = remembered.text;
+                  reasoningTruncated = remembered.truncated;
+                  this.post({ type: 'reasoningDelta', conversationId, text: thinking });
+                }
               } else if (part.type === 'reasoning-delta') {
                 workStartedAt ||= Date.now();
-                const remaining = MAX_PERSISTED_REASONING - reasoningBuffer.length;
-                if (remaining > 0) reasoningBuffer += part.text.slice(0, remaining);
-                if (reasoningBuffer.length >= MAX_PERSISTED_REASONING) reasoningTruncated = true;
+                const remembered = rememberReasoningText(reasoningBuffer, part.text, reasoningLimit);
+                reasoningBuffer = remembered.text;
+                reasoningTruncated = remembered.truncated;
                 this.post({ type: 'reasoningDelta', conversationId, text: part.text });
               } else if (part.type === 'reasoning-end') {
-                if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+                if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
                 reasoningBuffer = '';
                 reasoningTruncated = false;
                 this.post({ type: 'reasoningEnd' });
@@ -2911,13 +2891,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             if (!run.controller.signal.aborted) {
               const responseMessages = (await result.responseMessages) ?? [];
               runMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              // Some reasoning models must reread their previous thinking. Keep the
+              // live buffer (native deltas + XML <think>) on the latest assistant
+              // message so the next step/continue/resume still has it.
+              attachReasoningToLatestAssistant(runMessages, reasoningBuffer.trim() || collectReasoningText(work));
               // Checkpoint after every completed iteration. If VS Code reloads, the
               // connection drops, or the model errors mid-run, this partial turn is
               // recoverable instead of being lost and re-read from scratch.
-              if (!resume) {
-                conversation.pending = { userText, messages: runMessages.slice(), startedAt: workStartedAt || Date.now() };
-                void this.checkpointProjects();
-              }
+              conversation.pending = { userText, messages: runMessages.slice(), startedAt: workStartedAt || Date.now() };
+              void this.checkpointProjects();
             }
             const usage = await result.usage;
             if (usage?.inputTokens || usage?.outputTokens) {
@@ -2937,12 +2919,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');
             if (!shouldAutoContinue(answer, finishReason, continuationCount)) break;
             continuationCount++;
-            streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}`;
+            const priorThinking = persistedReasoningBody(reasoningBuffer.trim() || collectReasoningText(work));
+            streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}${priorThinking ? `\n\nYour previous thinking (do not repeat it; continue from it):\n${priorThinking.slice(-reasoningLimit)}` : ''}`;
           } while (continuationCount < 2 && !run.controller.signal.aborted);
           this.sendUsage();
           const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
           if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
-          if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+          if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
           if (paused) {
             if (planState) { planState.interrupted = true; postPlan(); }
           } else {
@@ -2965,7 +2948,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           // Persist the structured model history so the next turn keeps prior tool
           // calls and their results in context instead of re-reading files.
-          if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+          if (runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
           conversation.pending = undefined;
           conversation.items.push(assistantItem);
           this.boundConversationItems(conversation);
@@ -3006,7 +2989,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (run.controller.signal.aborted) {
         // Keep whatever the turn accomplished before it was stopped so a later
         // message continues from real context instead of re-reading files.
-        if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+        if (runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
         conversation.pending = undefined;
         conversation.updatedAt = Date.now();
         project.updatedAt = Date.now();
@@ -3020,7 +3003,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (reconnectAttempt) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: reconnectAttempt, max: 5 });
         const errorInfo = classifyAgentError(error, providerConfig);
         const message = errorInfo.message;
-        if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer + (reasoningTruncated ? '\n…(truncated)' : '') });
+        if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
         if (model) errorItem.model = model;
         errorItem.errorInfo = errorInfo;
@@ -3029,7 +3012,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Keep the work already done: merge the partial turn's tool calls and
         // results into the structured history so a retry continues instead of
         // re-reading every file.
-        if (!resume && runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
+        if (runMessages.length) this.appendConversationMessages(conversation, userText, runMessages);
         conversation.pending = undefined;
         conversation.items.push(errorItem);
         this.boundConversationItems(conversation);
@@ -3717,6 +3700,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       apiKey: provider?.isSleepy ? (getSleepyTokenSync() ?? '') : provider ? this.providerApiKey(provider) : '',
       baseUrl: provider?.isSleepy ? sleepyApiBase() : (provider?.baseURL ?? ''),
       maxSteps: config.get<number>('maxSteps', 200),
+      maxPersistedReasoning: normalizePersistedReasoningLimit(config.get<number>('maxPersistedReasoning', DEFAULT_PERSISTED_REASONING), DEFAULT_PERSISTED_REASONING),
       approvalMode: normalizeApprovalMode(this.context.globalState.get<string>('sleepycode.approvalMode', 'ask')),
       searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
       systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt', ''),

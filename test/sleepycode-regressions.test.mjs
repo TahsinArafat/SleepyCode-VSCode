@@ -14,6 +14,7 @@ const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
 const types = read('src/types.ts');
+const iterationCore = read('src/iteration-core.ts');
 const pkg = JSON.parse(read('package.json'));
 
 test('SleepyCode rebrand removes the legacy product identity from primary surfaces', () => {
@@ -151,6 +152,23 @@ test('agent iterations default to 200 steps and expose a resumable max-step paus
   assert.match(agent, /message\.type === 'continueIteration'/);
   assert.match(types, /paused\?: boolean/);
   assert.match(runtime, /Continue iteration/);
+});
+
+test('previous thinking is persisted for later model requests and the budget is configurable', () => {
+  const reasoningSetting = pkg.contributes.configuration.properties['sleepycode.maxPersistedReasoning'];
+  assert.equal(reasoningSetting.default, 32000);
+  assert.equal(reasoningSetting.minimum, 3000);
+  assert.equal(reasoningSetting.maximum, 200000);
+  assert.match(types, /export const MAX_PERSISTED_REASONING = 32_000/);
+  assert.match(types, /maxPersistedReasoning: number/);
+  assert.match(agent, /attachReasoningToLatestAssistant\(runMessages/);
+  assert.match(agent, /attachReasoningToLatestAssistant\(subagentMessages, stepThinking\)/);
+  assert.match(agent, /backfillAssistantReasoning\(selected, reasoningTextsFromItems\(conversation\.items\)\)/);
+  assert.match(agent, /Your previous thinking/);
+  assert.match(agent, /rememberReasoningText\(reasoningBuffer/);
+  assert.match(runtime, /maxPersistedReasoning:Number\(maxPersistedReasoning/);
+  assert.match(webviewHtml, /Persisted thinking characters/);
+  assert.match(webviewHtml, /data-settings-pane="advanced"/);
 });
 
 test('sending during an active run queues without rendering a fake first send', () => {
@@ -388,14 +406,17 @@ test('structured model history persists across turns instead of flattening to te
   // Conversation stores the real model-visible message array alongside display items.
   assert.match(types, /messages\?: ModelMessage\[\]/);
   assert.match(types, /export const MAX_STORED_MESSAGES/);
-  // The run seeds the provider with real messages when structured history exists.
-  assert.match(agent, /const history = resume \? \[\] : this\.structuredHistory\(conversation\)/);
+  // The run seeds the provider with real messages when structured history exists,
+  // including the live tool-call slice of the current iteration.
+  assert.match(agent, /const history = this\.structuredHistory\(conversation\)/);
+  assert.match(agent, /iterationRequestMessages\(history, runMessages, streamPrompt\)/);
   assert.match(agent, /messages: agentMessages/);
   // Response messages (assistant tool calls + tool results) are captured and kept.
   assert.match(agent, /runMessages\.push\(\.\.\.\(responseMessages as ModelMessage\[\]\)\.filter\(message => message\.role !== 'system'\)\)/);
   assert.match(agent, /this\.appendConversationMessages\(conversation, userText, runMessages\)/);
   // History must never start with a tool result: strict providers reject it.
-  assert.match(agent, /let start = stored\.findIndex\(message => message\.role === 'user'\)/);
+  assert.match(iterationCore, /export function safeHistoryStart/);
+  assert.match(iterationCore, /export function selectStructuredHistory/);
   // Legacy conversations without structured history still use the text fallback.
   assert.match(agent, /const structured = this\.structuredHistory\(conversation\)/);
 });
@@ -419,7 +440,7 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   assert.match(agent, /conversation\.pending = undefined;/);
   // A reload/crash recovers the pending turn into structured history on load.
   assert.match(agent, /const pending = conversation\.pending;/);
-  assert.match(agent, /carried\.slice\(-MAX_STORED_MESSAGES\)/);
+  assert.match(agent, /recoverPendingHistory\(conversation\.messages, pending, MAX_STORED_MESSAGES\)/);
   // Exactly one declaration, in the outer run scope so catch/finally can reach it.
   assert.equal((agent.match(/let runMessages: ModelMessage\[\] = \[\];/g) || []).length, 1);
 });

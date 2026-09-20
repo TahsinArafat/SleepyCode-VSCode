@@ -119,7 +119,7 @@ The SleepyAI model menu includes **Auto**. Auto is only available on the first-p
 
 ### Reasoning models
 
-Reasoning models that emit their chain-of-thought as XML text blocks (tagged `think`) are handled automatically: the thinking is stripped from the answer content and shown in the activity's reasoning section instead, keeping the final response clean. Models that stream native `reasoning-delta` parts render the same way.
+Reasoning models that emit their chain-of-thought as XML text blocks (tagged `think`) are handled automatically: the thinking is stripped from the answer content and shown in the activity's reasoning section instead, keeping the final response clean. Models that stream native `reasoning-delta` parts render the same way. Previous thinking is also persisted onto later model requests — some reasoning models need to reread it. The default persist budget is 32,000 characters and can be changed from Settings → Advanced. Compaction still summarizes visible answers only.
 
 ### Project intelligence
 

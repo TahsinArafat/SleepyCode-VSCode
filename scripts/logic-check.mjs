@@ -117,6 +117,7 @@ check(/vsce package/.test(releaseWorkflow) && /upload-artifact@v4/.test(releaseW
 check(packageJson.version === JSON.parse(read('package-lock.json')).version, 'package and lockfile versions match');
 
 check(/fileChangeStats/.test(agent) && /additions: live\.additions/.test(agent) && /function changeStatHtml/.test(webviewRuntime) && /className='changed has-preview'/.test(webviewRuntime) && /changeStatHtml\(plus,minus,true\)/.test(webviewRuntime) && /\.change-plus\{/.test(webviewStyles) && /\.change-stat\.totals\{/.test(webviewStyles), 'file changes persist plus/minus counts and render expandable line previews with a completed-turn total');
+check(/DEFAULT_PERSISTED_REASONING = 32_000/.test(read('src/reasoning-core.ts')) && /attachReasoningToLatestAssistant\(runMessages/.test(agent) && /maxPersistedReasoning/.test(JSON.stringify(packageJson.contributes.configuration.properties)) && /Persisted thinking characters/.test(webview), 'previous thinking is persisted onto later model requests and the budget is configurable in Settings → Advanced');
 check(/type: 'changed', path: filePath, action: exists \? 'Modified' : 'Created', before, after: content/.test(read('src/tools.ts')) && /type: 'changed', path: filePath, action: 'Deleted', before, after: ''/.test(read('src/tools.ts')), 'create, edit, and delete tools post before/after text so line stats can be computed');
 
 check(/code\s*!==\s*['"]ENOENT['"]/.test(util), 'workspace path resolution uses filesystem error codes rather than localized messages');

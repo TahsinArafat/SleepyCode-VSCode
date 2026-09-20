@@ -139,6 +139,13 @@
           "maximum": 200,
           "description": "Maximum tool-loop steps per iteration. Defaults to 200. Set to 0 for unlimited tasks. When the limit pauses unfinished work, SleepyCode offers Continue iteration."
         },
+        "sleepycode.maxPersistedReasoning": {
+          "type": "number",
+          "default": 32000,
+          "minimum": 3000,
+          "maximum": 200000,
+          "description": "Maximum characters of previous thinking kept for later model requests. Some reasoning models need this history. Default 32000. Configurable from Settings → Advanced."
+        },
         "sleepycode.approvalMode": {
           "type": "string",
           "enum": [

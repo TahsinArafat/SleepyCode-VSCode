@@ -93,7 +93,7 @@ export function contextOccupancy(items: readonly CompactableItem[]): { tokens: n
  * chars/4 heuristic as the rest of the harness. Tool calls and their results are
  * counted from their serialized payload so a large observation is not undercounted.
  */
-export function estimateMessageTokens(message: { role: string; content?: unknown; toolCalls?: unknown }): number {
+export function estimateMessageTokens(message: { role?: string; content?: unknown; toolCalls?: unknown }): number {
   let chars = 0;
   const content = message.content;
   if (typeof content === 'string') chars += content.length;
