@@ -53,6 +53,23 @@ test('subagent results harvest leftover step text instead of returning empty', (
   assert.doesNotMatch(agent, /lastTextOnly/);
 });
 
+test('header keeps the conversation switcher first and a quiet action cluster', () => {
+  const header = webviewHtml.match(/<div class="top">[\s\S]*?<div class="login-banner"/)?.[0] ?? '';
+  assert.ok(header.includes('id="conversationButton"'), 'conversation switcher exists');
+  assert.ok(header.includes('class="chat-actions"'), 'secondary header actions are grouped');
+  assert.ok(header.indexOf('id="conversationButton"') < header.indexOf('class="chat-actions"'), 'title stays first');
+  assert.ok(header.indexOf('id="newConversation"') < header.indexOf('id="settingsButton"'), 'new chat stays before settings');
+  assert.match(header, /id="conversationButton"[^>]*aria-expanded="false"/);
+  assert.match(header, /id="newConversation"[\s\S]*<path d="M12 5v14"/);
+  assert.doesNotMatch(header, /settings-icon/);
+  assert.match(runtime, /function setConversationMenuOpen\(open\)/);
+  assert.match(runtime, /setAttribute\('aria-expanded',open\?'true':'false'\)/);
+  assert.match(styles, /\.chat-actions\{display:flex/);
+  assert.match(styles, /\.chat-actions\{[^}]*margin-left:auto/);
+  assert.match(styles, /\.conversation-title\{[^}]*font-size:12px/);
+  assert.match(styles, /\.chat-bar \.icon,|\.icon\{[^}]*width:26px/);
+});
+
 test('composer keeps the writing surface first and a quiet overflow-safe toolbar', () => {
   const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
   assert.ok(composer.includes('id="composerBox"'), 'composer box exists');
