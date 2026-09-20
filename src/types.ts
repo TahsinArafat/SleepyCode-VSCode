@@ -1,4 +1,5 @@
 import type { ModelMessage } from 'ai';
+import type { FileChangeLine } from './line-diff';
 import type { ProjectIntelligence } from './project-index-core';
 
 export type WebMessage =
@@ -106,6 +107,9 @@ export type FileChange = {
   action: 'Created' | 'Modified' | 'Deleted';
   staged?: boolean;
   reverted?: boolean;
+  additions?: number;
+  deletions?: number;
+  preview?: FileChangeLine[];
 };
 
 /** Content captured before the first time a turn touched a file, so undo works outside Git. */

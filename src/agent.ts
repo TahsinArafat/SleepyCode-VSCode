@@ -30,6 +30,7 @@ import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
 import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
+import { fileChangeStats } from './line-diff';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
 import { BrowserPreviewPanel } from './browser-preview';
@@ -65,13 +66,21 @@ function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: Abo
 }
 
 /** Capture a file's pre-edit content so undo can restore it outside Git. `before` avoids a disk read when the tool already supplied it. */
-function captureFileSnapshot(rootPath: string, relative: string, before?: unknown): FileSnapshot {
-  if (typeof before === 'string') return { path: relative, existed: true, content: before };
+function captureFileSnapshot(rootPath: string, relative: string, before?: unknown, existed?: boolean): FileSnapshot {
+  if (typeof before === 'string') return { path: relative, existed: existed ?? true, content: before };
   try {
     const absolute = path.join(rootPath, relative);
-    return { path: relative, existed: true, content: readFileSync(absolute, 'utf8') };
+    return { path: relative, existed: existed ?? true, content: readFileSync(absolute, 'utf8') };
   } catch {
     return { path: relative, existed: false, content: '' };
+  }
+}
+
+function readWorkspaceText(rootPath: string, relative: string): string {
+  try {
+    return readFileSync(path.join(rootPath, relative), 'utf8');
+  } catch {
+    return '';
   }
 }
 
@@ -2253,14 +2262,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (previous?.action === 'Created' && action === 'Deleted') {
             runChanges.delete(relative);
             snapshotByPath.delete(relative);
+            next = { ...next, path: relative, action, additions: 0, deletions: 0, preview: [] };
           } else {
             if (!snapshotByPath.has(relative)) {
-              snapshotByPath.set(relative, captureFileSnapshot(root.fsPath, relative, record.before));
+              snapshotByPath.set(relative, captureFileSnapshot(root.fsPath, relative, record.before, action !== 'Created'));
             }
+            const snapshot = snapshotByPath.get(relative);
+            const beforeText = typeof record.before === 'string'
+              ? record.before
+              : (snapshot?.existed ? snapshot.content : '');
+            const afterText = action === 'Deleted'
+              ? ''
+              : (typeof record.after === 'string' ? record.after : readWorkspaceText(root.fsPath, relative));
+            const live = fileChangeStats(beforeText, afterText);
+            const net = fileChangeStats(snapshot?.existed ? snapshot.content : '', afterText);
             const mergedAction: FileChange['action'] = previous?.action === 'Created' ? 'Created' : action;
-            runChanges.set(relative, { path: relative, action: mergedAction });
+            runChanges.set(relative, {
+              path: relative,
+              action: mergedAction,
+              staged: previous?.staged,
+              reverted: previous?.reverted,
+              additions: net.additions,
+              deletions: net.deletions,
+              preview: net.preview,
+            });
+            next = { ...next, path: relative, action, additions: live.additions, deletions: live.deletions, preview: live.preview };
           }
-          next = { ...next, path: relative, action };
         } catch {
           return;
         }

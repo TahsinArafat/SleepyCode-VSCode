@@ -131,7 +131,7 @@ export function assertNotSecret(filePath: string): void {
 export function summarizeInput(input: unknown): string {
   if (!input || typeof input !== 'object') return '';
   const record = input as Record<string, unknown>;
-  return String(record.path ?? record.query ?? record.glob ?? record.command ?? record.source ?? record.skill ?? record.skills ?? '').slice(0, 100);
+  return String(record.path ?? record.query ?? record.glob ?? record.command ?? record.source ?? record.skill ?? record.skills ?? record.name ?? '').slice(0, 100);
 }
 
 export function humanToolName(name: string): string {

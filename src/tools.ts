@@ -144,7 +144,7 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         }
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the edit.');
         await vscode.workspace.saveAll(false);
-        ctx.post({ type: 'changed', path: filePath, action: exists ? 'Modified' : 'Created' });
+        ctx.post({ type: 'changed', path: filePath, action: exists ? 'Modified' : 'Created', before, after: content });
         return `Wrote ${filePath} (${content.length} characters).`;
       },
     }),
@@ -167,7 +167,7 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         edit.replace(uri, new vscode.Range(document.positionAt(first), document.positionAt(first + oldText.length)), newText);
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the edit.');
         await document.save();
-        ctx.post({ type: 'changed', path: filePath, action: 'Modified' });
+        ctx.post({ type: 'changed', path: filePath, action: 'Modified', before: source, after: proposed });
         return `Updated ${filePath}.`;
       },
     }),
@@ -185,7 +185,7 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         const current = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
         if (current !== before) throw new Error(`${filePath} changed while its deletion was being reviewed. Read it again before deleting.`);
         await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false });
-        ctx.post({ type: 'changed', path: filePath, action: 'Deleted' });
+        ctx.post({ type: 'changed', path: filePath, action: 'Deleted', before, after: '' });
         return `Deleted ${filePath}.`;
       },
     }),
@@ -270,8 +270,10 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       description: 'Replace durable project memory after reading it. Preserve useful existing entries, keep it concise, and never store credentials or secrets.',
       inputSchema: z.object({ content: z.string().max(24_000), reason: z.string().optional() }),
       execute: async ({ content, reason }) => {
+        const before = await ctx.memory?.read() ?? '';
         await ctx.memory?.write(content, reason);
-        ctx.post({ type: 'changed', path: ctx.memory?.path });
+        const after = await ctx.memory?.read() ?? content;
+        ctx.post({ type: 'changed', path: ctx.memory?.path, action: 'Modified', before, after });
         return `Updated ${ctx.memory?.path}.`;
       },
     });

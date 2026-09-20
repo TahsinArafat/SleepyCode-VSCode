@@ -68,36 +68,54 @@ test('composer keeps the writing surface first and a quiet overflow-safe toolbar
 test('approval control stays a short text pill and send uses discrete idle/ready/stop states', () => {
   const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
   assert.match(composer, /id="safetyButton"[^>]*>Ask<\/button>/);
-  assert.doesNotMatch(composer, /id="safetyDropdown"[\s\S]*safety-icon/);
+  assert.match(composer, /id="safetyDropdown"[\s\S]*class="control-icon"/);
+  assert.match(composer, /id="safetyButton"[\s\S]*class="control-caret"/);
+  assert.doesNotMatch(styles, /\.safety-button\{[^}]*font-weight:600/);
+  assert.doesNotMatch(styles, /safety-button\[data-mode="autonomous"\]/);
+  assert.match(styles, /\.safety-button\{[^}]*font-weight:inherit/);
   assert.match(composer, /class="send idle"/);
   assert.match(composer, /class="send-svg"/);
   assert.match(composer, /class="stop-svg"/);
   assert.match(runtime, /function approvalShort\(id\)\{return id==='edits'\?'Auto':id==='autonomous'\?'Open':'Ask'\}/);
   assert.match(runtime, /setSendMode\(isRunning\(\)\?'loading':\(input\.value\.trim\(\)\|\|attachments\.length\?'ready':'idle'\)\)/);
+  assert.match(runtime, /if\(!edit&&!wasRunning\)runningSet\.add\(activeConversationId\);input\.value=''/);
+  assert.match(runtime, /sSvg\.style\.removeProperty\('display'\)/);
+  assert.doesNotMatch(runtime, /xSvg\.style\.display=r\?'block':'none'/);
   assert.match(styles, /\.send\.idle\{/);
   assert.match(styles, /\.send\.ready\{/);
   assert.match(styles, /\.send\.stop,\.send\.loading\{/);
+  assert.match(styles, /\.send\.stop \.stop-svg,\.send\.loading \.stop-svg\{display:block!important\}/);
 });
 
 test('selector popups clamp inside the viewport instead of overflowing the sidebar', () => {
   assert.match(runtime, /function placeAnchoredMenu\(menu,anchor\)/);
   assert.match(runtime, /function viewportBox\(\)/);
+  assert.match(runtime, /function headerSafeTop\(\)/);
+  assert.match(runtime, /const safeTop=Math\.max\(vp\.top\+pad,headerSafeTop\(\)\+gap\)/);
+  assert.match(runtime, /const preferred=Math\.min\(popupCap,Math\.round\(vh\*0\.5\),height\)/);
+  assert.match(runtime, /const top=Math\.max\(safeTop,ar\.top-gap-maxHeight\)/);
   assert.match(runtime, /if\(conversationMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(conversationMenu/);
   assert.match(runtime, /if\(mentionMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(mentionMenu/);
   assert.match(runtime, /if\(slashMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(slashMenu/);
   assert.match(styles, /\.dropdown-menu\{[^}]*position:fixed/);
+  assert.match(styles, /\.dropdown-menu\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
   assert.match(styles, /\.mention-menu,\.slash-menu\{[^}]*position:fixed/);
   assert.match(styles, /\.conversation-menu\{[^}]*position:fixed/);
+  assert.match(styles, /\.conversation-menu\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
   assert.match(styles, /\.context-panel\{[^}]*position:fixed/);
+  assert.match(styles, /\.context-panel\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
 });
 
 test('assistant replies show the used model under the message instead of above the composer', () => {
   assert.match(runtime, /modelEl\.className='message-model'/);
   assert.match(runtime, /const modelId=item\.model\|\|selectedModel\|\|''/);
+  assert.match(runtime, /actions\.appendChild\(modelEl\)/);
   assert.doesNotMatch(runtime, /updateActiveModelLine/);
   assert.doesNotMatch(webviewHtml, /active-model-line|session-info-model/);
   assert.match(runtime, /session-info-title/);
   assert.match(styles, /\.message-model\{/);
+  assert.match(styles, /\.assistant-footer\{align-items:center\}/);
+  assert.doesNotMatch(styles, /\.assistant-footer\{flex-direction:column/);
 });
 
 test('message history scrolls independently from a bounded composer', () => {
@@ -156,6 +174,11 @@ test('installed marketplace skills can be read and explicitly used', () => {
   assert.match(agent, /call skillsmp_read_installed/);
   assert.match(runtime, /data-use-skill/);
   assert.match(runtime, /Use the .* skill to/);
+});
+
+test('reading an installed skill shows the skill name on the tool card', () => {
+  assert.match(util, /record\.path \?\? record\.query \?\? record\.glob \?\? record\.command \?\? record\.source \?\? record\.skill \?\? record\.skills \?\? record\.name/);
+  assert.match(util, /skillsmp_read_installed: 'Reading installed skill'/);
 });
 
 test('composer slash commands expose extension actions and dynamic installed-skill invocation', () => {
@@ -414,4 +437,35 @@ test('no destructive truncation remains in tool output paths', () => {
   assert.match(git, /bytes elided from an earlier part of the output/);
   // Archival is the single non-destructive path.
   assert.match(tools, /import \{ capObservation, readObservationPage \} from '\.\/observations'/);
+});
+
+test('file changes persist plus/minus and render expandable line previews', () => {
+  const lineDiff = read('src/line-diff.ts');
+  assert.match(lineDiff, /export function fileChangeStats/);
+  assert.match(lineDiff, /export function compactLinePreview/);
+  assert.match(types, /additions\?: number/);
+  assert.match(types, /deletions\?: number/);
+  assert.match(types, /preview\?: FileChangeLine\[\]/);
+  assert.match(tools, /type: 'changed', path: filePath, action: exists \? 'Modified' : 'Created', before, after: content/);
+  assert.match(tools, /type: 'changed', path: filePath, action: 'Modified', before: source, after: proposed/);
+  assert.match(tools, /type: 'changed', path: filePath, action: 'Deleted', before, after: ''/);
+  assert.match(agent, /fileChangeStats\(beforeText, afterText\)/);
+  assert.match(agent, /additions: live\.additions, deletions: live\.deletions, preview: live\.preview/);
+  assert.match(agent, /additions: net\.additions/);
+  assert.match(runtime, /function changeStatHtml\(plus,minus,always\)/);
+  assert.match(runtime, /function liveChangedRow\(change,openPreview\)/);
+  assert.match(runtime, /className='changed has-preview'/);
+  assert.match(runtime, /d\.open=openPreview!==false/);
+  assert.match(runtime, /class="change-plus">\+'/);
+  assert.match(runtime, /class="change-minus">−'/);
+  assert.match(runtime, /details class="change-preview"/);
+  assert.match(runtime, /hasStats\?changeStatHtml\(plus,minus,true\):''/);
+  assert.match(runtime, /open\.onclick=e=>\{e\.preventDefault\(\);e\.stopPropagation\(\)/);
+  assert.match(runtime, /lastPreview/);
+  assert.match(styles, /\.change-plus\{/);
+  assert.match(styles, /\.change-minus\{/);
+  assert.match(styles, /\.change-hunk\{/);
+  assert.match(styles, /\.change-line\.ctx\{/);
+  assert.match(styles, /\.changes-head \.change-stat\{/);
+  assert.match(styles, /\.change-stat\.totals\{/);
 });
