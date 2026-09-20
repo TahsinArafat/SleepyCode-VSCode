@@ -2264,7 +2264,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const activeTasks = new Map<string, WorkItem>();
     const reasoningLimit = this.config().maxPersistedReasoning;
     let reasoningBuffer = '';
-    let reasoningTruncated = false;
     // Longest streamed text before an interruption; preserved on error items so
     // a manual retry can continue from the halfway point instead of restarting.
     let partialAnswer = '';
@@ -2836,21 +2835,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                   this.post({ type: 'delta', conversationId, text: content });
                 }
                 if (thinking) {
-                  const remembered = rememberReasoningText(reasoningBuffer, thinking, reasoningLimit);
-                  reasoningBuffer = remembered.text;
-                  reasoningTruncated = remembered.truncated;
+                  reasoningBuffer = rememberReasoningText(reasoningBuffer, thinking, reasoningLimit).text;
                   this.post({ type: 'reasoningDelta', conversationId, text: thinking });
                 }
               } else if (part.type === 'reasoning-delta') {
                 workStartedAt ||= Date.now();
-                const remembered = rememberReasoningText(reasoningBuffer, part.text, reasoningLimit);
-                reasoningBuffer = remembered.text;
-                reasoningTruncated = remembered.truncated;
+                reasoningBuffer = rememberReasoningText(reasoningBuffer, part.text, reasoningLimit).text;
                 this.post({ type: 'reasoningDelta', conversationId, text: part.text });
               } else if (part.type === 'reasoning-end') {
                 if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
                 reasoningBuffer = '';
-                reasoningTruncated = false;
                 this.post({ type: 'reasoningEnd' });
               } else if (part.type === 'start-step') {
                 workStartedAt ||= Date.now();
@@ -2981,7 +2975,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           planItem = undefined;
           activeTasks.clear();
           reasoningBuffer = '';
-          reasoningTruncated = false;
           workStartedAt = 0;
         }
       }
