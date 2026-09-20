@@ -226,6 +226,28 @@ test('composer slash commands expose extension actions and dynamic installed-ski
   assert.match(runtime, /vscode\.postMessage\(\{type:'requestMarketplaceInstalled'\}\)/);
 });
 
+test('typing /skill immediately opens the installed skill list', () => {
+  assert.match(runtime, /function skillPickerQuery\(value\)\{const match=String\(value\|\|''\)\.match\(\/\^\\\/skill\(\?:\\s\+\(\?:"\(\[\^"\]\*\)\|\(\[\^\\s\]\*\)\)\)\?\$\/i\)/);
+  assert.match(runtime, /if\(skillPickerQuery\(value\)!==null\)\{if\(!skillPickerOpen\)vscode\.postMessage\(\{type:'requestMarketplaceInstalled'\}\);skillPickerOpen=true;refreshSkillPicker\(\);return\}/);
+  assert.match(runtime, /else if\(item\.command==='\/skill'\)\{input\.value='\/skill ';input\.focus\(\);input\.setSelectionRange\(input\.value\.length,input\.value\.length\);resize\(\);updateSlashMenu\(\);return\}/);
+  assert.match(runtime, /case'marketplaceInstalled':installedSkills=m\.skills\|\|\[\];installedSkillsLoaded=true;renderInstalledSkills\(\);if\(marketplaceView\.classList\.contains\('visible'\)\)renderMarketplaceResults\(\);if\(skillPickerOpen\)refreshSkillPicker\(\);break;/);
+  assert.match(runtime, /if\(!installedSkillsLoaded\)return\[\{command:'\/skill',label:'Loading installed skills…'/);
+  assert.doesNotMatch(runtime, /skillMatch=value\.match\(\/\^\\\/skill\\s\+/);
+});
+
+test('slash palette groups Ask, Session, and Workspace and keeps keyboard selection', () => {
+  assert.match(runtime, /group:'Ask'/);
+  assert.match(runtime, /group:'Session'/);
+  assert.match(runtime, /group:'Workspace'/);
+  assert.match(runtime, /function groupedSlashHtml\(results\)/);
+  assert.match(runtime, /function renderSlashCommandsPalette\(\)\{if\(!slashMenu\)return;renderSlashMenu\(SLASH_COMMANDS\)\}/);
+  assert.match(runtime, /class="slash-group"/);
+  assert.match(styles, /\.slash-group\{/);
+  assert.match(styles, /\.slash-option\.selected\{box-shadow:inset 2px 0 0 var\(--vscode-focusBorder\)\}/);
+  assert.match(styles, /\.turn\{[^}]*margin:0 0 16px/);
+  assert.match(styles, /\.assistant p\{margin:0 0 8px\}/);
+});
+
 test('system instructions actively discover and load installed skills before use', () => {
   assert.match(agent, /skillsmp_list_installed \/ skillsmp_read_installed/);
   assert.match(agent, /inspect the Installed skills inventory included in your instructions/);
