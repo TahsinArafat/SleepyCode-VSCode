@@ -17,7 +17,7 @@ test('max-step pause only triggers when a bounded tool loop stops on tool calls 
   assert.equal(pausedByStepLimit(0, 500, 'tool-calls'), false);
 });
 
-test('recoverPendingHistory folds a crash checkpoint only when no stored history exists', () => {
+test('recoverPendingHistory folds a crash checkpoint onto existing history', () => {
   const pending = {
     userText: 'fix the bug',
     messages: [
@@ -32,8 +32,21 @@ test('recoverPendingHistory folds a crash checkpoint only when no stored history
     pending.messages[1],
   ]);
 
-  const existing = [{ role: 'user', content: 'older' }];
-  assert.equal(recoverPendingHistory(existing, pending, 400), existing);
+  const existing = [
+    { role: 'user', content: 'older' },
+    { role: 'assistant', content: 'old answer' },
+  ];
+  const folded = recoverPendingHistory(existing, pending, 400);
+  assert.equal(folded?.[0]?.content, 'older');
+  assert.equal(folded?.at(-1)?.content, 'file contents');
+  assert.equal(folded?.some(message => message.content === 'fix the bug'), true);
+
+  const alreadyFolded = recoverPendingHistory(folded, pending, 400);
+  assert.deepEqual(alreadyFolded, folded);
+  const reloaded = JSON.parse(JSON.stringify(folded));
+  const reloadedPending = JSON.parse(JSON.stringify(pending));
+  const afterReload = recoverPendingHistory(reloaded, reloadedPending, 400);
+  assert.deepEqual(afterReload, reloaded);
   assert.equal(recoverPendingHistory(undefined, undefined, 400), undefined);
   assert.deepEqual(recoverPendingHistory([], { userText: 'x', messages: [] }, 400), []);
 });
@@ -95,6 +108,19 @@ test('appendConversationMessages keeps the newest context under the hard bound',
     { role: 'user', content: 'new' },
     { role: 'assistant', content: 'new-answer' },
   ]);
+});
+
+test('appendConversationMessages does not insert a second user turn on resume', () => {
+  const existing = [
+    { role: 'user', content: 'implement undo' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 't1' }] },
+    { role: 'tool', content: 'file contents' },
+  ];
+  const produced = [{ role: 'assistant', content: 'finished the remaining work' }];
+  const next = appendConversationMessages(existing, 'implement undo', produced, 400, true);
+  assert.deepEqual(next.map(message => message.role), ['user', 'assistant', 'tool', 'assistant']);
+  assert.equal(next.filter(message => message.role === 'user').length, 1);
+  assert.equal(next.at(-1)?.content, 'finished the remaining work');
 });
 
 test('iterationRequestMessages keeps live tool context when a turn continues mid-iteration', () => {

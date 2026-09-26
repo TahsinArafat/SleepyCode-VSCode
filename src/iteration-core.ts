@@ -20,21 +20,44 @@ export type HistoryMessage = {
   toolCalls?: unknown;
 };
 
+function sameHistoryMessages(left: readonly HistoryMessage[] | undefined, right: readonly HistoryMessage[] | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Recover a crash/reload checkpoint into durable structured history.
  *
- * Only fold `pending` when the conversation has no stored messages yet. If
- * messages already exist, the pending turn is a duplicate of work that was
- * already appended (or is still live) and must not overwrite it.
+ * Fold `pending` onto the tail whenever it is newer work than the stored
+ * history. An earlier empty-history-only rule dropped in-progress turns after
+ * older messages already existed.
  */
 export function recoverPendingHistory<T extends HistoryMessage>(
   messages: T[] | undefined,
   pending: { userText?: string; messages?: T[] } | undefined,
   maxStored: number,
 ): T[] | undefined {
-  if (!pending?.messages?.length || messages?.length) return messages;
-  const userText = pending.userText ?? '';
-  const carried: T[] = [{ role: 'user', content: userText } as T, ...pending.messages];
+  if (!pending?.messages?.length) return messages;
+  const existing = messages ?? [];
+  const pendingTail = pending.messages;
+  if (existing.length) {
+    const existingTail = existing.slice(-pendingTail.length);
+    if (sameHistoryMessages(existingTail, pendingTail)) return existing;
+  }
+  let alreadyHasUser = false;
+  for (let cursor = existing.length - 1; cursor >= 0; cursor--) {
+    if (existing[cursor]?.role !== 'user') continue;
+    alreadyHasUser = existing[cursor]?.content === (pending.userText ?? '');
+    break;
+  }
+  const carried: T[] = alreadyHasUser
+    ? [...existing, ...pendingTail]
+    : [...existing, { role: 'user', content: pending.userText ?? '' } as T, ...pendingTail];
   return carried.length > maxStored ? carried.slice(-maxStored) : carried;
 }
 
@@ -110,9 +133,12 @@ export function appendConversationMessages<T extends HistoryMessage>(
   userText: string,
   produced: readonly T[],
   maxStored: number,
+  reuseUser = false,
 ): T[] {
-  const userTurn = { role: 'user', content: userText } as T;
-  const next = [...(existing ?? []), userTurn, ...produced];
+  const prior = existing ?? [];
+  const lastUser = lastUserStart(prior);
+  const alreadyHasUser = reuseUser && prior.length > 0 && prior[lastUser]?.role === 'user' && prior[lastUser]?.content === userText;
+  const next = alreadyHasUser ? [...prior, ...produced] : [...prior, { role: 'user', content: userText } as T, ...produced];
   return next.length > maxStored ? next.slice(-maxStored) : next;
 }
 

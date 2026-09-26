@@ -192,7 +192,23 @@ export type Conversation = {
    * model error, or VS Code reload can resume with the work already done instead
    * of losing it and re-reading everything.
    */
-  pending?: { userText: string; messages: ModelMessage[]; startedAt: number };
+  pending?: {
+    userText: string;
+    messages: ModelMessage[];
+    startedAt: number;
+    partialText?: string;
+    work?: WorkItem[];
+    changes?: FileChange[];
+    fileSnapshot?: FileSnapshot[];
+    gitTree?: string;
+  };
+  /**
+   * Durable undo/redo snapshots for this conversation. Kept on the conversation
+   * so a reload can restore the last few turns, including their model history
+   * and workspace snapshots.
+   */
+  turnUndo?: { items: TranscriptItem[]; messages: ModelMessage[]; redoFiles?: FileSnapshot[]; redoGitTree?: string }[];
+  turnRedo?: { items: TranscriptItem[]; messages: ModelMessage[]; redoFiles?: FileSnapshot[]; redoGitTree?: string }[];
   archived: boolean;
   pinned?: boolean;
   createdAt: number;

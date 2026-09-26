@@ -64,6 +64,7 @@ export function normalizeTranscriptItem(item: Partial<TranscriptItem>, fallbackT
     contextTokens: item.contextTokens,
     attachments: item.attachments,
     changes: item.changes,
+    fileSnapshot: item.fileSnapshot,
     errorInfo: item.errorInfo,
     commitHash: item.commitHash,
     commitMessage: item.commitMessage,

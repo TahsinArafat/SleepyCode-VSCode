@@ -149,7 +149,10 @@ test('run preflight failures still reach structured error handling and cleanup',
   // Chat preflight must not scan the workspace or enumerate skills before the request.
   assert.match(agent, /run\.fastlane\.ready/);
   assert.doesNotMatch(agent, /run\.skills\.start/);
-  assert.doesNotMatch(agent, /captureGitTree\(root\.fsPath/);
+  // Chat preflight must not capture a git tree. The only capture site is the
+  // undo handler, which records the post-turn tree so redo can restore files.
+  assert.equal((agent.match(/captureGitTree\(root\.fsPath\)/g) || []).length, 1);
+  assert.match(agent, /popped\.snapshot\.redoGitTree = await captureGitTree\(root\.fsPath\)/);
   assert.match(agent, /await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/);
   assert.match(agent, /if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/);
   assert.match(agent, /finally\s*\{[\s\S]*this\.runs\.delete\(conversationId\)/);
@@ -392,7 +395,9 @@ test('compaction is undoable and redoable via divider boundary snapshots', () =>
   assert.match(agent, /compactionRedoStacks = new Map/);
   assert.match(agent, /private undoCompaction\(conversation/);
   assert.match(agent, /private redoCompaction\(conversation/);
-  assert.match(agent, /before: before\.slice\(\), after: summarized\.items\.slice\(\)/);
+  assert.match(agent, /beforeItems: before\.slice\(\),[\s\S]{0,80}afterItems: summarized\.items\.slice\(\)/);
+  assert.match(agent, /beforeMessages: \(conversation\.messages \?\? \[\]\)\.slice\(\)/);
+  assert.match(agent, /restoreCompaction\(conversation, snapshot, 'before'\)/);
   assert.match(agent, /kind === 'divider'\) \{\s*if \(!this\.undoCompaction\(conversation\)\) return;/s);
   assert.match(agent, /if \(this\.redoCompaction\(conversation\)\)/);
   assert.match(agent, /compactionUndoable, compactionRedoable/);
@@ -415,9 +420,9 @@ test('error item preserves partial streamed text for retry continuation', () => 
   assert.match(agent, /let partialAnswer = '';/);
   assert.match(agent, /partialAnswer = answer/);
   // Error item stores the partial text
-  assert.match(agent, /errorItem\.partialText = partialAnswer/);
+  assert.match(agent, /errorItem\.partialText = fields\.partialText/);
   // Retry handler carries partialText in the resume payload
-  assert.match(agent, /partialText: last\.partialText/);
+  assert.match(agent, /partialText: resumeFrom\.resume\.partialText/);
   // Resume context includes partial text for the model
   assert.match(agent, /resume\?\.partialText \?/);
   assert.match(agent, /Continue it from exactly where it stops/);
@@ -452,7 +457,7 @@ test('structured model history persists across turns instead of flattening to te
   assert.match(agent, /messages: agentMessages/);
   // Response messages (assistant tool calls + tool results) are captured and kept.
   assert.match(agent, /runMessages\.push\(\.\.\.\(responseMessages as ModelMessage\[\]\)\.filter\(message => message\.role !== 'system'\)\)/);
-  assert.match(agent, /this\.appendConversationMessages\(conversation, userText, runMessages\)/);
+  assert.match(agent, /this\.appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
   // History must never start with a tool result: strict providers reject it.
   assert.match(iterationCore, /export function safeHistoryStart/);
   assert.match(iterationCore, /export function selectStructuredHistory/);
@@ -461,20 +466,41 @@ test('structured model history persists across turns instead of flattening to te
 });
 
 test('compaction and rollbacks keep structured history in sync with the transcript', () => {
+  const sessionCore = read('src/session-core.ts');
   // Compaction replaces the structured history with the summary, never replays it.
-  assert.match(agent, /conversation\.messages = \[/);
+  assert.match(agent, /afterMessages: ModelMessage\[\] = \[/);
   assert.match(agent, /summaryText: string/);
   assert.match(agent, /summaryText: summary\.text/);
-  // Undo/redo and checkpoint restores drop stale structured history.
-  assert.match(agent, /conversation\.messages = undefined;/);
+  // Undo/redo and checkpoint restores slice structured history with the transcript.
+  assert.match(agent, /sliceMessagesToItems\(conversation\.messages, conversation\.items\)/);
+  assert.doesNotMatch(agent, /conversation\.messages = undefined;/);
+  assert.match(sessionCore, /export function branchConversationState/);
+  assert.match(agent, /this\.createConversation\(slicedItems, sliced\.messages\)/);
+  assert.match(agent, /workspaceGitRestoreFromSnapshot\(snapshot, 'redo'\)/);
+  assert.match(agent, /checkpointConversation\(conversation, true\)/);
+  assert.match(agent, /takeTurnRedo\(conversation\)/);
+  // A stopped turn is retryable, never a 'Stopped.' dead end, and the streamed
+  // partial stays in partialText so the webview renders it exactly once.
+  assert.doesNotMatch(agent, /createTranscriptItem\('assistant', 'Stopped\.'/);
+  assert.match(agent, /createTranscriptItem\('assistant', INTERRUPTED_TURN_TEXT, 'error'/);
+  assert.match(runtime, /if\(next\.partialText\)\{[\s\S]{0,300}markdown\(next\.partialText\)/);
+  assert.match(sessionCore, /export const INTERRUPTED_TURN_TEXT/);
+  // A fresh send (no resume) is what invalidates undone/redone turns.
+  assert.match(agent, /if \(resume\) \{[\s\S]{0,400}\} else \{[\s\S]{0,200}clearForwardStacks\(conversation\)/);
+  // Checkpointing writes only the dirty project, not every project on flush.
+  assert.match(agent, /private persistProject\(/);
+  assert.match(agent, /checkpointConversation\(conversation: Conversation, force = false\)[\s\S]{0,600}this\.persistProject\(project\)/);
+  assert.doesNotMatch(agent, /checkpointConversation\(conversation: Conversation, force = false\)[\s\S]{0,600}this\.persistProjects\(\)/);
 });
 
 test('an interrupted run keeps its partial work instead of losing it', () => {
   // Partial structured messages are checkpointed after every completed iteration.
-  assert.match(agent, /conversation\.pending = \{ userText, messages: runMessages\.slice\(\), startedAt:/);
-  assert.match(types, /pending\?: \{ userText: string; messages: ModelMessage\[\]; startedAt: number \}/);
+  assert.match(agent, /conversation\.pending = \{\s*userText: historyUserText,\s*messages: runMessages\.slice\(\),\s*startedAt:/s);
+  assert.match(types, /pending\?: \{[\s\S]*userText: string;[\s\S]*messages: ModelMessage\[\];[\s\S]*startedAt: number;[\s\S]*partialText\?: string;/);
+  assert.match(agent, /checkpointConversation\(conversation\)/);
+  assert.match(agent, /workspaceRestoreFromSnapshot\(snapshot, 'redo'\)/);
   // The abort branch folds the partial turn into history and clears pending.
-  assert.match(agent, /if \(run\.controller\.signal\.aborted\) \{[\s\S]{0,400}appendConversationMessages\(conversation, userText, runMessages\)/);
+  assert.match(agent, /if \(run\.controller\.signal\.aborted\) \{[\s\S]{0,400}appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
   // The error branch does the same so a retry continues rather than re-reading.
   assert.match(agent, /conversation\.pending = undefined;/);
   // A reload/crash recovers the pending turn into structured history on load.
@@ -482,6 +508,10 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   assert.match(agent, /recoverPendingHistory\(conversation\.messages, pending, MAX_STORED_MESSAGES\)/);
   // Exactly one declaration, in the outer run scope so catch/finally can reach it.
   assert.equal((agent.match(/let runMessages: ModelMessage\[\] = \[\];/g) || []).length, 1);
+  // A mid-run checkpoint writes only the project that owns the dirty conversation.
+  assert.match(agent, /private persistProject\(/);
+  assert.match(agent, /checkpointConversation\(conversation: Conversation, force = false\)[\s\S]{0,600}this\.persistProject\(/);
+  assert.doesNotMatch(agent, /checkpointConversation\(conversation: Conversation, force = false\)[\s\S]{0,600}this\.persistProjects\(\)/);
 });
 
 test('no destructive truncation remains in tool output paths', () => {
