@@ -35,7 +35,7 @@ import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, ty
 import { fileChangeStats } from './line-diff';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
-import { CliClient, pickCliModel, type CliProviderCatalog } from './cli-client';
+import { CliClient, isPreferredCliModel, pickCliModel, type CliProviderCatalog } from './cli-client';
 import { CliChatSession, CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
 import type { CliServer } from './cli-server';
@@ -500,7 +500,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       catalog ?? { providers: [], defaults: {}, connected: [] },
       preferred,
     );
-    if (preferred && (!catalog || !model || model.providerID !== preferred.providerID || model.modelID !== preferred.modelID)) {
+    // `isPreferredCliModel` allows for the provider-id alias, so a send that
+    // really did use the requested model does not raise a false mismatch.
+    if (preferred && !isPreferredCliModel(preferred, model)) {
       this.log('warn', 'cli.model.unknown', `${preferred.providerID}/${preferred.modelID}`);
       // Say it once per conversation. The sidebar lists SleepyCode's providers
       // and models, which the CLI does not have, so the mismatch is permanent

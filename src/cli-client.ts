@@ -44,6 +44,30 @@ export type CliProviderCatalog = {
 };
 
 /**
+ * SleepyCode's built-in account provider is `sleepyai`; the Sleepy CLI
+ * registers that same first-party account as `sleepy`. The two sides name one
+ * provider differently, so matching ids exactly rejected a model the CLI
+ * really does have and every send fell back to the CLI default.
+ */
+export function cliProviderAlias(providerId: string): string | undefined {
+  return providerId === 'sleepyai' ? 'sleepy' : undefined;
+}
+
+/**
+ * True when `resolved` is the model the sidebar asked for. The provider id is
+ * compared through {@link cliProviderAlias}, so the account provider counts as
+ * a match under either name and a send that did honour the pick stays quiet.
+ */
+export function isPreferredCliModel(
+  preferred: { providerID: string; modelID: string },
+  resolved: { providerID: string; modelID: string } | undefined,
+): boolean {
+  if (!resolved || resolved.modelID !== preferred.modelID) return false;
+  return resolved.providerID === preferred.providerID
+    || cliProviderAlias(preferred.providerID) === resolved.providerID;
+}
+
+/**
  * Choose a model the CLI can really run.
  *
  * The CLI resolves an unspecified model from its own config, and on a fresh
@@ -67,8 +91,17 @@ export function pickCliModel(
     const entry = catalog.providers.find(candidate => candidate.id === providerId);
     return Boolean(entry?.models && Object.hasOwn(entry.models, modelId));
   };
-  if (preferred && has(preferred.providerID, preferred.modelID)) {
-    return { providerID: preferred.providerID, modelID: preferred.modelID };
+  if (preferred) {
+    if (has(preferred.providerID, preferred.modelID)) {
+      return { providerID: preferred.providerID, modelID: preferred.modelID };
+    }
+    // Same account, other name: the sidebar says `sleepyai`, the CLI says
+    // `sleepy`. Without this the user's real pick (e.g.
+    // `sleepy/gemini-3.5-flash-lite`) was discarded for the CLI default.
+    const aliased = cliProviderAlias(preferred.providerID);
+    if (aliased && has(aliased, preferred.modelID)) {
+      return { providerID: aliased, modelID: preferred.modelID };
+    }
   }
   for (const providerId of catalog.connected) {
     const preferredModel = catalog.defaults[providerId];
