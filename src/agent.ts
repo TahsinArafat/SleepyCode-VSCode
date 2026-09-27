@@ -35,6 +35,9 @@ import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, ty
 import { fileChangeStats } from './line-diff';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
+import { CliClient } from './cli-client';
+import { CliChatSession, CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
+import type { CliServer } from './cli-server';
 import { BrowserPreviewPanel } from './browser-preview';
 
 type PlanState = {
@@ -249,6 +252,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private compactionControllers = new Map<string, AbortController>();
   private lastAutoCompactAt = new Map<string, number>();
 
+  /**
+   * Which engine owns the run loop. The Sleepy CLI owns it whenever it is
+   * installed; the local `ToolLoopAgent` is the offline fallback. Resolved once
+   * at startup and never swapped for a conversation that has already run, so a
+   * chat cannot change engines mid-flight.
+   */
+  private engineStatus: EngineStatus = { mode: 'local', reason: 'Starting up.' };
+  private cliServer: CliServer | undefined;
+  private cliClient: CliClient | undefined;
+  private cliRegistry: CliSessionRegistry | undefined;
+  private readonly cliChats = new Map<string, CliChatSession>();
+  private engineReady: Promise<void> | undefined;
+
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
@@ -263,6 +279,150 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     );
     this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
+    context.subscriptions.push({ dispose: () => { void this.shutdownCli(); } });
+  }
+
+  /**
+   * Pick the engine once. Only the local loop writes VS Code globalState; in CLI
+   * mode the CLI process owns `sleepy.db` and we never open it.
+   */
+  private async ensureEngine(): Promise<EngineStatus> {
+    if (this.engineReady) {
+      await this.engineReady;
+      return this.engineStatus;
+    }
+    this.engineReady = (async () => {
+      const directory = this.workspaceRoot()?.fsPath;
+      if (!directory) {
+        this.engineStatus = { mode: 'local', reason: 'No folder is open, so this window uses the offline agent.' };
+        return;
+      }
+      this.engineStatus = await resolveEngine(directory);
+      if (this.engineStatus.mode === 'cli' && this.engineStatus.url) {
+        this.cliClient = new CliClient(this.engineStatus.url);
+        this.cliRegistry = new CliSessionRegistry({
+          get: key => this.context.globalState.get<string>(key),
+          set: (key, value) => { void this.context.globalState.update(key, value); },
+        });
+      }
+    })();
+    await this.engineReady;
+    return this.engineStatus;
+  }
+
+  private async shutdownCli(): Promise<void> {
+    for (const chat of this.cliChats.values()) chat.dispose();
+    this.cliChats.clear();
+    // Only stop a server this extension started; an attached one is not ours.
+    if (this.cliServer?.owned) this.cliServer.child?.kill();
+    this.cliServer = undefined;
+    this.cliClient = undefined;
+  }
+
+  /**
+   * Open (or rejoin) the CLI session backing this conversation, then hand the
+   * send to the CLI. The conversation keeps a mirror of the projected items for
+   * display only; the CLI's own rows stay authoritative for undo and resume.
+   */
+  private async cliChatFor(conversationId: string, root?: vscode.Uri): Promise<CliChatSession | undefined> {
+    const existing = this.cliChats.get(conversationId);
+    if (existing) return existing;
+    const client = this.cliClient;
+    const registry = this.cliRegistry;
+    if (!client || !registry) return undefined;
+
+    const directory = root?.fsPath ?? this.workspaceRoot()?.fsPath;
+    if (!directory) return undefined;
+
+    let sessionId = registry.sessionFor(conversationId);
+    if (!sessionId || !(await this.cliSessionExists(client, sessionId))) {
+      const session = await client.createSession(directory);
+      sessionId = session.id;
+      registry.bind(conversationId, sessionId);
+    }
+
+    const chat = new CliChatSession(
+      client,
+      sessionId,
+      (tool, input) => toolTask(tool, input),
+      (items, busy) => this.applyCliProjection(conversationId, items, busy),
+      detail => this.post({ type: 'error', conversationId, text: detail }),
+      permission => this.post({
+        type: 'permission',
+        conversationId,
+        permissionId: permission.id,
+        title: permission.title ?? 'The CLI is asking for permission.',
+      }),
+    );
+    this.cliChats.set(conversationId, chat);
+    await chat.open();
+    return chat;
+  }
+
+  private async cliSessionExists(client: CliClient, sessionId: string): Promise<boolean> {
+    try {
+      await client.messages(sessionId);
+      return true;
+    } catch {
+      // A remembered session the CLI no longer has is not reusable.
+      return false;
+    }
+  }
+
+  /**
+   * Render the CLI's rows. This replaces the display transcript only; the CLI
+   * still owns the real history, so nothing here is fed back as a prompt.
+   */
+  private applyCliProjection(conversationId: string, items: TranscriptItem[], busy: boolean): void {
+    const conversation = this.findConversation(conversationId);
+    if (!conversation) return;
+    conversation.items = items;
+    // These are display-only mirrors of CLI rows, not a second history. They are
+    // cleared on purpose because in CLI mode the authoritative record lives in
+    // `sleepy.db` and must never be replayed as model-visible history.
+    conversation.messages = undefined;
+    conversation.pending = undefined;
+    this.boundConversationItems(conversation);
+    this.post({ type: 'state', conversationId, running: busy, label: busy ? 'Working' : '' });
+    this.syncConversations();
+  }
+
+  private findConversation(conversationId: string): Conversation | undefined {
+    for (const project of this.projects) {
+      const found = project.conversations.find(conversation => conversation.id === conversationId);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private async sendViaCli(conversationId: string, text: string, root?: vscode.Uri): Promise<void> {
+    const chat = await this.cliChatFor(conversationId, root);
+    if (!chat) {
+      this.post({ type: 'error', conversationId, text: 'The Sleepy CLI is not reachable, so this message was not sent.' });
+      return;
+    }
+    this.post({ type: 'state', conversationId, running: true, label: 'Working' });
+    // prompt_async creates the real user message in the CLI; the client never
+    // writes a synthetic "Continue" turn.
+    await chat.send(text);
+  }
+
+  /** Continue the interrupted assistant the CLI still has, with no new user turn. */
+  private async continueViaCli(conversationId: string): Promise<boolean> {
+    const chat = this.cliChats.get(conversationId);
+    if (!chat) return false;
+    const resumed = await chat.continueTurn();
+    if (!resumed) {
+      this.post({ type: 'error', conversationId, text: 'There is no interrupted turn to continue.' });
+    }
+    return resumed;
+  }
+
+  private async stopViaCli(conversationId: string): Promise<boolean> {
+    const chat = this.cliChats.get(conversationId);
+    if (!chat) return false;
+    await chat.stop();
+    return true;
   }
 
   /** User-defined agents persisted in global state. Invalid entries are dropped rather than trusted. */
@@ -1114,6 +1274,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (message.type === 'stop') {
       const project = this.activeProject();
       const activeId = project?.activeConversationId ?? '';
+      // In CLI mode the run lives in the CLI process, so stop the CLI run rather
+      // than aborting a local controller that is not driving this conversation.
+      if (this.engineStatus.mode === 'cli' && await this.stopViaCli(activeId)) {
+        this.log('info', 'cli.stop.requested', activeId);
+        return;
+      }
       const activeRun = this.runs.get(activeId);
       if (activeRun) {
         this.log('info', 'run.stop.requested', activeId);
@@ -2171,6 +2337,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const editorContext = root ? await this.composerContextBlock(root, message.context) : '';
       const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
+
+      // The CLI owns the loop, tools, permissions, and history when it is
+      // available, so the local ToolLoopAgent must not also run this send.
+      const engine = await this.ensureEngine();
+      if (engine.mode === 'cli') {
+        void this.sendViaCli(conversationId, sendText, root).catch(error => {
+          const detail = errorMessage(error);
+          this.log('error', 'cli.send.unhandled', detail);
+          this.post({ type: 'error', conversationId, text: detail });
+        });
+        return;
+      }
+
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
         this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
         this.enqueue(sendText, conversationId, message.context, promptContext);
@@ -2190,6 +2369,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const project = this.activeProject();
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
+      // The CLI resumes the interrupted assistant by id. Retrying there must not
+      // pop a local item or resend text as a new user turn.
+      if (this.engineStatus.mode === 'cli' && this.cliChats.has(message.conversationId)) {
+        const resumed = await this.continueViaCli(message.conversationId);
+        this.log('info', 'cli.retry.requested', `conversation=${message.conversationId}; resumed=${resumed}`);
+        return;
+      }
       const resumeFrom = resumeFromLastAssistant(conversation.items);
       if (!resumeFrom) return;
       conversation.items.pop();

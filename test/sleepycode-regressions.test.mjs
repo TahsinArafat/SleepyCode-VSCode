@@ -13,6 +13,10 @@ const git = read('src/git.ts');
 const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
+const cliClient = read('src/cli-client.ts');
+const cliServer = read('src/cli-server.ts');
+const cliEngine = read('src/cli-engine.ts');
+const cliProjection = read('src/cli-projection.ts');
 const types = read('src/types.ts');
 const iterationCore = read('src/iteration-core.ts');
 const pkg = JSON.parse(read('package.json'));
@@ -473,7 +477,13 @@ test('compaction and rollbacks keep structured history in sync with the transcri
   assert.match(agent, /summaryText: summary\.text/);
   // Undo/redo and checkpoint restores slice structured history with the transcript.
   assert.match(agent, /sliceMessagesToItems\(conversation\.messages, conversation\.items\)/);
-  assert.doesNotMatch(agent, /conversation\.messages = undefined;/);
+  // Clearing model history anywhere except the CLI display projection would drop
+  // real turns. In CLI mode the authoritative record is the CLI's own rows.
+  const projectionStart = agent.indexOf('private applyCliProjection');
+  const projectionEnd = agent.indexOf('private findConversation');
+  assert.ok(projectionStart > 0 && projectionEnd > projectionStart, 'expected the CLI projection method');
+  const outsideCliProjection = agent.slice(0, projectionStart) + agent.slice(projectionEnd);
+  assert.doesNotMatch(outsideCliProjection, /conversation\.messages = undefined;/);
   assert.match(sessionCore, /export function branchConversationState/);
   assert.match(agent, /this\.createConversation\(slicedItems, sliced\.messages\)/);
   assert.match(agent, /workspaceGitRestoreFromSnapshot\(snapshot, 'redo'\)/);
@@ -558,4 +568,70 @@ test('file changes persist plus/minus and render expandable line previews', () =
   assert.match(styles, /\.change-line\.ctx\{/);
   assert.match(styles, /\.changes-head \.change-stat\{/);
   assert.match(styles, /\.change-stat\.totals\{/);
+});
+
+test('the extension is a client: it never opens the CLI database', () => {
+  // The CLI process owns sleepy.db. Opening it from the extension host would put
+  // two writers on one history.
+  for (const [name, source] of [['cli-client', cliClient], ['cli-server', cliServer], ['cli-engine', cliEngine], ['cli-projection', cliProjection], ['agent', agent]]) {
+    assert.doesNotMatch(source, /require\(['"]node:sqlite['"]\)|from ['"]node:sqlite['"]|drizzle|libsql/, `${name} must not open SQLite`);
+  }
+  assert.doesNotMatch(cliClient, /sleepy\.db/);
+});
+
+test('CLI mode routes the send path to the CLI instead of the local loop', () => {
+  assert.match(cliEngine, /export async function resolveEngine/);
+  assert.match(agent, /if \(engine\.mode === 'cli'\) \{[\s\S]{0,200}sendViaCli/);
+  // The local ToolLoopAgent must not also run the same send.
+  assert.match(agent, /private async sendViaCli\(/);
+});
+
+test('the engine is chosen once and never swapped mid-conversation', () => {
+  // Re-resolving per send would let a chat change engines while it is open.
+  assert.match(agent, /private engineReady: Promise<void> \| undefined/);
+  assert.match(agent, /if \(this\.engineReady\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/);
+});
+
+test('CLI sends create a real user turn, never a synthetic Continue', () => {
+  assert.match(cliClient, /prompt_async/);
+  assert.match(cliClient, /JSON\.stringify\(\{ parts: \[\{ type: 'text', text \}\] \}\)/);
+  // Continue resumes the interrupted assistant by id, with no new user message.
+  assert.match(cliEngine, /resumeTurn\(this\.id, String\(info\.id\)\)/);
+  assert.doesNotMatch(cliEngine, /run\('Continue'\)|text: 'Continue'/);
+});
+
+test('permission prompts are answered through the CLI so its deferred resolves', () => {
+  // The CLI blocks the tool until this lands; a local approval cache would leave
+  // the run waiting forever.
+  assert.match(cliClient, /permissions\/\$\{encodeURIComponent\(permissionId\)\}/);
+  // The CLI rejects `reply`; the accepted key is `response`.
+  assert.match(cliClient, /body: JSON\.stringify\(message \? \{ response, message \} : \{ response \}\)/);
+  assert.match(agent, /type: 'permission',[\s\S]{0,200}permissionId/);
+});
+
+test('CLI undo and redo go through the CLI revert endpoints', () => {
+  assert.match(cliClient, /async revert\(sessionId: string, messageId: string\)/);
+  assert.match(cliClient, /body: JSON\.stringify\(\{ messageID: messageId \}\)/);
+  assert.match(cliClient, /async unrevert\(/);
+});
+
+test('the projection keeps the existing card shapes and adds no second loop', () => {
+  // Parts map onto the cards the sidebar already draws.
+  assert.match(cliProjection, /kind: 'task'/);
+  assert.match(cliProjection, /kind: 'reasoning'/);
+  assert.match(cliProjection, /kind: 'divider'/);
+  // A compaction is a divider, never a synthetic assistant message.
+  assert.match(cliProjection, /case 'compaction':[\s\S]{0,400}kind: 'divider'/);
+  // No parallel model-visible history is built beside the CLI's rows.
+  assert.doesNotMatch(cliProjection, /ModelMessage|conversation\.messages/);
+});
+
+test('the CLI server is discovered or started on loopback and owned carefully', () => {
+  assert.match(cliServer, /export function parseListeningUrl/);
+  assert.match(cliServer, /serve', '--port', '0', '--hostname', '127\.0\.0\.1'/);
+  // Only a server this extension started may be killed on deactivate.
+  assert.match(agent, /if \(this\.cliServer\?\.owned\) this\.cliServer\.child\?\.kill\(\)/);
+  // A server this extension started is flagged owned; an attached one is not.
+  assert.match(cliServer, /return \{ url, child, owned: true \};/);
+  assert.match(cliServer, /return \{ url: `http:\/\/127\.0\.0\.1:\$\{port\}`, owned: false \};/);
 });
