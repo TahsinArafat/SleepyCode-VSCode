@@ -666,6 +666,32 @@ test('deleting a conversation releases its CLI session binding', () => {
   assert.doesNotMatch(body, /client\.deleteSession|session\.delete/, 'the CLI owns its rows; deleting a chat must not delete the session');
 });
 
+test('opening a CLI conversation attaches its stream instead of showing a stale mirror', () => {
+  // A reloaded window has an empty chat map. Without attaching on open, nothing
+  // would ever stream this conversation again and the sidebar would show a
+  // persisted mirror that drifts from sleepy.db the moment the CLI does anything.
+  const start = agent.indexOf("message.type === 'openConversation'");
+  const body = agent.slice(start, start + 1200);
+  assert.match(body, /this\.cliOwns\(opened, this\.engineStatus\)/);
+  assert.match(body, /this\.cliChatFor\(message\.id/);
+  // A failure to attach is logged, not thrown into the message handler.
+  assert.match(body, /catch\(error =>/);
+  // Local conversations must not be attached to the CLI on open.
+  assert.doesNotMatch(body, /cliChatFor\(message\.id[^)]*\)[^}]*\}\s*return;\s*\}\s*\n\s*if \(!project/);
+});
+
+test('continuing a paused iteration is refused on a CLI conversation', () => {
+  // The projection never sets `paused`, so this is unreachable in CLI mode
+  // today, but it pops the item and re-runs locally and must not stay that way.
+  const start = agent.indexOf("message.type === 'continueIteration'");
+  const body = agent.slice(start, start + 1600);
+  assert.match(body, /refuseIfCliOwned\(conversation, 'Continuing a paused iteration'\)/);
+  assert.ok(
+    body.indexOf('refuseIfCliOwned') < body.indexOf('this.run('),
+    'the refusal must come before the local re-run',
+  );
+});
+
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);

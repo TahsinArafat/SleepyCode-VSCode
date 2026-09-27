@@ -1418,11 +1418,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (message.type === 'newConversation') return this.newConversation();
     if (message.type === 'openConversation') {
       const project = this.activeProject();
-      if (project && project.conversations.some(item => item.id === message.id)) {
+      const opened = project?.conversations.find(item => item.id === message.id);
+      if (project && opened) {
         project.activeConversationId = message.id;
         project.updatedAt = Date.now();
         void this.persistProjects();
         this.syncConversations();
+        // A reloaded window has an empty chat map, so nothing would ever attach
+        // the CLI stream for this conversation. Its persisted items are only a
+        // mirror of sleepy.db and go stale the moment the CLI does anything
+        // else, so attach now and let the projection republish.
+        if (this.cliOwns(opened, this.engineStatus)) {
+          void this.cliChatFor(message.id, this.workspaceRoot()).then(chat => {
+            if (!chat) {
+              this.log('warn', 'cli.open.unavailable', `conversation=${message.id}`);
+              return;
+            }
+            this.log('info', 'cli.open.attached', `conversation=${message.id}`);
+          }).catch(error => {
+            this.log('error', 'cli.open.failed', `conversation=${message.id}; ${errorMessage(error)}`);
+          });
+        }
       }
       return;
     }
@@ -2521,6 +2537,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       const last = conversation.items[conversation.items.length - 1];
       if (!last?.paused || last.id !== message.itemId) return;
+      // Continuing a paused iteration pops the item and re-runs it with the
+      // local agent. The CLI projection never sets `paused`, so this is
+      // unreachable in CLI mode today, but it is one projection change away from
+      // resuming a CLI turn with the wrong engine.
+      if (this.refuseIfCliOwned(conversation, 'Continuing a paused iteration')) return;
       const resumeFrom = resumeFromLastAssistant(conversation.items);
       if (!resumeFrom) return;
       const pausePlaceholder = `Iteration paused after reaching the ${last.pauseLimit ?? this.config().maxSteps}-step limit.`;
