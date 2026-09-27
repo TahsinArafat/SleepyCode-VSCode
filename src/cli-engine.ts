@@ -14,7 +14,7 @@
  */
 
 import { findCliBinary, startOrAttach } from './cli-server.ts';
-import { cliErrorText, projectMessage, recoverableAssistant, type CliMessage, type ToolLabel } from './cli-projection.ts';
+import { cliErrorText, applyPausedProjection, projectMessage, recoverableAssistant, type CliMessage, type ToolLabel } from './cli-projection.ts';
 import type { CliClient } from './cli-client.ts';
 import type { TranscriptItem } from './types';
 
@@ -181,6 +181,7 @@ export class CliChatSession {
   private publish(messages: CliMessage[], busy: boolean): void {
     this.lastMessages = messages;
     const items = messages.flatMap(message => projectMessage(message, this.label));
+    applyPausedProjection(items, busy);
     this.onUpdate(items, busy);
   }
 

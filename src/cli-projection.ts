@@ -205,15 +205,65 @@ export function projectParts(parts: CliPart[], role: string, label: ToolLabel = 
   return items;
 }
 
+/**
+ * A projected CLI assistant item whose turn never finished. `recoverableAssistant`
+ * decides which message rows the CLI can resume; the sidebar shows its paused
+ * card for exactly those, so Continue is offered and handled by the same engine
+ * that owns the transcript. Local paused items keep their own flags, which this
+ * never sets.
+ */
+export function projectPausedAssistant(info: CliMessageInfo): { paused: true; pauseLimit?: number } | undefined {
+  if (!recoverableAssistant(info)) return undefined;
+  return { paused: true, pauseLimit: undefined };
+}
+
+/**
+ * Keep the paused card on exactly one row: the newest assistant item, and only
+ * while the session is idle.
+ *
+ * `projectMessage` flags every recoverable assistant row, because it sees one
+ * message at a time. Two of those flags are wrong in the full transcript: an
+ * older aborted turn stays recoverable forever but resuming it would fork the
+ * newest history, and a turn that is streaming right now has no `finish` yet so
+ * it looks recoverable while it is actually running. The projection consumer
+ * calls this after flattening, so only a genuinely idle, newest unfinished turn
+ * offers Continue.
+ */
+export function applyPausedProjection(items: TranscriptItem[], busy: boolean): void {
+  let lastAssistant = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.role === 'assistant' && item.kind !== 'divider') {
+      lastAssistant = index;
+      break;
+    }
+  }
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (!item?.paused) continue;
+    if (busy || index !== lastAssistant) {
+      item.paused = undefined;
+      item.pauseLimit = undefined;
+    }
+  }
+}
+
 /** Project one CLI message row into transcript items. */
 export function projectMessage(message: CliMessage, label: ToolLabel = defaultLabel): TranscriptItem[] {
   const info = message?.info ?? {};
   const items = projectParts(message?.parts ?? [], info.role === 'user' ? 'user' : 'assistant', label);
   const model = info.providerID && info.modelID ? `${info.providerID}/${info.modelID}` : undefined;
+  // An unfinished assistant turn gets the paused card so Continue is offered;
+  // the continueIteration handler routes that back to the CLI engine.
+  const paused = info.role !== 'user' ? projectPausedAssistant(info) : undefined;
   for (const item of items) {
     if (item.kind === 'divider') continue;
     if (model) item.model = model;
     if (info.time?.created) item.timestamp = info.time.created;
+    if (paused) {
+      item.paused = true;
+      item.pauseLimit = paused.pauseLimit;
+    }
   }
   return items;
 }

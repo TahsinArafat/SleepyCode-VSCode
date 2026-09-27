@@ -680,16 +680,18 @@ test('opening a CLI conversation attaches its stream instead of showing a stale 
   assert.doesNotMatch(body, /cliChatFor\(message\.id[^)]*\)[^}]*\}\s*return;\s*\}\s*\n\s*if \(!project/);
 });
 
-test('continuing a paused iteration is refused on a CLI conversation', () => {
-  // The projection never sets `paused`, so this is unreachable in CLI mode
-  // today, but it pops the item and re-runs locally and must not stay that way.
+test('continuing a paused iteration is routed to the engine that owns the conversation', () => {
+  // A CLI-owned paused card is a projection of an unfinished CLI row, so
+  // continuing must resume via the CLI; the local re-run stays the fallback.
   const start = agent.indexOf("message.type === 'continueIteration'");
   const body = agent.slice(start, start + 1600);
-  assert.match(body, /refuseIfCliOwned\(conversation, 'Continuing a paused iteration'\)/);
+  assert.match(body, /cliOwns\(conversation, this\.engineStatus\)/, 'the CLI-owned path comes first');
   assert.ok(
-    body.indexOf('refuseIfCliOwned') < body.indexOf('this.run('),
-    'the refusal must come before the local re-run',
+    body.indexOf('cliOwns') < body.indexOf('this.run('),
+    'the CLI route must come before the local re-run',
   );
+  assert.match(body, /continueViaCli\(message\.conversationId\)/, 'the CLI resumes its own turn');
+  assert.doesNotMatch(body, /refuseIfCliOwned/, 'continuing is no longer refused on CLI conversations');
 });
 
 test('a CLI error never renders as a bare category name', () => {
@@ -702,6 +704,20 @@ test('a CLI error never renders as a bare category name', () => {
   assert.match(cliEngine, /return cliErrorText\(error\) \?\?/);
   // The projection must not keep its own copy.
   assert.doesNotMatch(cliProjection, /return error\.message \?\?/);
+});
+
+test('a recoverable CLI turn is projected as paused exactly once', () => {
+  // The paused card is how Continue is offered; the projection must flag the
+  // recoverable rows and then trim to the newest idle one, or the sidebar would
+  // either hide the button or offer to resume an old turn and fork history.
+  assert.match(cliProjection, /export function projectPausedAssistant\(info: CliMessageInfo\)/);
+  assert.match(cliProjection, /export function applyPausedProjection\(items: TranscriptItem\[\], busy: boolean\)/);
+  assert.match(cliEngine, /applyPausedProjection\(items, busy\)/, 'every publish passes through the trim');
+  // The busy pass must actually clear flags, not just skip them, or a streaming
+  // turn would keep a stale card until its next refresh.
+  const start = cliProjection.indexOf('export function applyPausedProjection');
+  const body = cliProjection.slice(start, start + 1400);
+  assert.match(body, /if \(busy \|\| index !== lastAssistant\)/, 'busy and stale rows are cleared together');
 });
 
 test('a model the CLI does not have is never sent to it', () => {

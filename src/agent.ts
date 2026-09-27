@@ -2594,11 +2594,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       const last = conversation.items[conversation.items.length - 1];
       if (!last?.paused || last.id !== message.itemId) return;
+      // A paused card on a CLI-owned conversation is a projection of an
+      // unfinished CLI assistant row, so continuing belongs to the CLI too:
+      // resuming locally would replay the turn against a transcript the CLI
+      // still holds. The CLI resolves its own resume target from sleepy.db.
+      if (this.cliOwns(conversation, this.engineStatus)) {
+        const resumed = await this.continueViaCli(message.conversationId);
+        this.log('info', 'cli.continue.requested', `conversation=${message.conversationId}; resumed=${resumed}`);
+        return;
+      }
       // Continuing a paused iteration pops the item and re-runs it with the
-      // local agent. The CLI projection never sets `paused`, so this is
-      // unreachable in CLI mode today, but it is one projection change away from
-      // resuming a CLI turn with the wrong engine.
-      if (this.refuseIfCliOwned(conversation, 'Continuing a paused iteration')) return;
+      // local agent.
       const resumeFrom = resumeFromLastAssistant(conversation.items);
       if (!resumeFrom) return;
       const pausePlaceholder = `Iteration paused after reaching the ${last.pauseLimit ?? this.config().maxSteps}-step limit.`;

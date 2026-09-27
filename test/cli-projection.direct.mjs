@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import {
   cliErrorText,
+  applyPausedProjection,
   projectMessage,
   projectParts,
   recoverableAssistant,
@@ -124,4 +125,48 @@ test('projectMessage keeps a single assistant turn as one item with its work', (
   assert.equal(item.text, 'done');
   assert.equal(item.model, 'sleepy/deepseek');
   assert.equal(item.work?.length, 2);
+});
+
+test('an unfinished CLI assistant projects as paused so Continue is offered', () => {
+  // finish 'tool-calls' means the turn stopped mid-work; the CLI can resume it.
+  const [item] = projectMessage({
+    info: { id: 'msg_1', role: 'assistant', finish: 'tool-calls' },
+    parts: [{ id: 'prt_1', type: 'text', text: 'partial work' }],
+  });
+  assert.equal(item.paused, true, 'the recoverable row must show the paused card');
+  // A finished turn is never paused.
+  const [done] = projectMessage({
+    info: { id: 'msg_2', role: 'assistant', finish: 'stop' },
+    parts: [{ id: 'prt_1', type: 'text', text: 'all done' }],
+  });
+  assert.equal(done.paused, undefined);
+  // User rows are never paused, whatever their finish says.
+  const [user] = projectMessage({
+    info: { id: 'msg_3', role: 'user' },
+    parts: [{ id: 'prt_1', type: 'text', text: 'hello' }],
+  });
+  assert.equal(user.paused, undefined);
+});
+
+test('applyPausedProjection keeps the card only on the newest idle assistant', () => {
+  const older = { id: 'a1', role: 'assistant', text: 'old aborted turn', paused: true };
+  const newer = { id: 'a2', role: 'assistant', text: 'newest unfinished turn', paused: true };
+  const items = [older, newer];
+  applyPausedProjection(items, false);
+  // Resuming the older row would fork the newest history, so only the newest
+  // unfinished turn may offer Continue.
+  assert.equal(older.paused, undefined);
+  assert.equal(newer.paused, true);
+
+  // While the session is busy the newest assistant is streaming, not paused:
+  // a missing `finish` looks recoverable but the turn is still running.
+  const streaming = { id: 'a3', role: 'assistant', text: '', paused: true };
+  const busyItems = [streaming];
+  applyPausedProjection(busyItems, true);
+  assert.equal(streaming.paused, undefined);
+
+  // Nothing flagged means nothing to trim, and a busy pass never adds cards.
+  const untouched = [{ id: 'a4', role: 'assistant', text: 'done', finish: 'stop' }];
+  applyPausedProjection(untouched, false);
+  assert.equal(untouched[0].paused, undefined);
 });
