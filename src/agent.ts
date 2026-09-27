@@ -37,6 +37,7 @@ import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
 import { CliClient } from './cli-client';
 import { CliChatSession, CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
+import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
 import type { CliServer } from './cli-server';
 import { BrowserPreviewPanel } from './browser-preview';
 
@@ -324,6 +325,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * send to the CLI. The conversation keeps a mirror of the projected items for
    * display only; the CLI's own rows stay authoritative for undo and resume.
    */
+  /**
+   * Whether this conversation's next turn belongs to the CLI.
+   *
+   * A conversation carrying leftover local history stays local for good, so a
+   * CLI server starting up later never silently moves an existing chat. See
+   * `usesCliEngine` for why we do not migrate.
+   */
+  private cliOwns(conversation: Conversation, engine: EngineStatus): boolean {
+    return usesCliEngine({
+      engineAvailable: engine.mode === 'cli',
+      boundToSession: this.cliRegistry?.owns(conversation.id) ?? false,
+      hasLocalHistory: hasLocalHistory(conversation),
+    });
+  }
+
   private async cliChatFor(conversationId: string, root?: vscode.Uri): Promise<CliChatSession | undefined> {
     const existing = this.cliChats.get(conversationId);
     if (existing) return existing;
@@ -408,8 +424,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Continue the interrupted assistant the CLI still has, with no new user turn. */
-  private async continueViaCli(conversationId: string): Promise<boolean> {
-    const chat = this.cliChats.get(conversationId);
+  private async continueViaCli(conversationId: string, root?: vscode.Uri): Promise<boolean> {
+    // Open the chat if it is not in memory yet: a reloaded window has an empty
+    // map even though the conversation still lives in the CLI, and failing here
+    // would silently resume it with the local agent instead.
+    const chat = this.cliChats.get(conversationId) ?? (await this.cliChatFor(conversationId, root));
     if (!chat) return false;
     const resumed = await chat.continueTurn();
     if (!resumed) {
@@ -1276,7 +1295,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const activeId = project?.activeConversationId ?? '';
       // In CLI mode the run lives in the CLI process, so stop the CLI run rather
       // than aborting a local controller that is not driving this conversation.
-      if (this.engineStatus.mode === 'cli' && await this.stopViaCli(activeId)) {
+      const stopping = project?.conversations.find(conversation => conversation.id === activeId);
+      if (stopping && this.cliOwns(stopping, this.engineStatus) && await this.stopViaCli(activeId)) {
         this.log('info', 'cli.stop.requested', activeId);
         return;
       }
@@ -2338,10 +2358,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
 
-      // The CLI owns the loop, tools, permissions, and history when it is
-      // available, so the local ToolLoopAgent must not also run this send.
+      // The CLI owns the loop, tools, permissions, and history for a conversation
+      // that has none of its own yet, so the local ToolLoopAgent must not also
+      // run this send. A chat with leftover local history stays local instead.
       const engine = await this.ensureEngine();
-      if (engine.mode === 'cli') {
+      const sending = project.conversations.find(conversation => conversation.id === conversationId);
+      if (sending && this.cliOwns(sending, engine)) {
         void this.sendViaCli(conversationId, sendText, root).catch(error => {
           const detail = errorMessage(error);
           this.log('error', 'cli.send.unhandled', detail);
@@ -2371,7 +2393,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       // The CLI resumes the interrupted assistant by id. Retrying there must not
       // pop a local item or resend text as a new user turn.
-      if (this.engineStatus.mode === 'cli' && this.cliChats.has(message.conversationId)) {
+      if (this.cliOwns(conversation, this.engineStatus)) {
         const resumed = await this.continueViaCli(message.conversationId);
         this.log('info', 'cli.retry.requested', `conversation=${message.conversationId}; resumed=${resumed}`);
         return;

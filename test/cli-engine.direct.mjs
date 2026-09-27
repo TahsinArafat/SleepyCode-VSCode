@@ -15,7 +15,7 @@ function stubClient(history = HISTORY) {
   const updates = [];
   const permissions = [];
   const errors = [];
-  let emit = () => {};
+  let emit = () => { };
   return {
     updates,
     permissions,
@@ -123,10 +123,27 @@ test('the registry keeps one CLI session per conversation', () => {
   assert.equal(registry.sessionFor('conv_a'), 'ses_a');
   assert.equal(registry.sessionFor('conv_b'), 'ses_b');
 
-  // A reopened sidebar rejoins the conversation it was last showing.
+  // A conversation that never used the CLI must not inherit somebody else's
+  // session, or the next chat opens showing the previous chat's history.
+  assert.equal(registry.sessionFor('conv_new'), undefined);
+
+  // A reopened sidebar restores each conversation to its own session.
   const reopened = new CliSessionRegistry({
     get: key => store.get(key),
     set: (key, value) => store.set(key, value),
   });
-  assert.equal(reopened.sessionFor('conv_a'), 'ses_b');
+  assert.equal(reopened.sessionFor('conv_a'), 'ses_a');
+  assert.equal(reopened.sessionFor('conv_b'), 'ses_b');
+});
+
+test('a corrupt registry does not stop the extension from starting', () => {
+  const registry = new CliSessionRegistry({
+    get: () => '{not json',
+    set: () => { },
+  });
+
+  assert.equal(registry.sessionFor('conv_a'), undefined);
+  // Binding still works, so the conversation recovers on the next send.
+  registry.bind('conv_a', 'ses_a');
+  assert.equal(registry.sessionFor('conv_a'), 'ses_a');
 });

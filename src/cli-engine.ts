@@ -61,22 +61,46 @@ export class CliSessionRegistry {
   constructor(storage: { get(key: string): string | undefined; set(key: string, value: string): void }) {
     this.storage = storage;
     const remembered = storage.get(SESSION_KEY);
-    if (remembered) this.mapping.set('__last__', remembered);
+    if (!remembered) return;
+    try {
+      const parsed: unknown = JSON.parse(remembered);
+      // A corrupt or stale value must not stop the extension from starting; the
+      // conversation simply opens a fresh CLI session on its next send.
+      if (parsed && typeof parsed === 'object') {
+        for (const [conversationId, sessionId] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof sessionId === 'string' && sessionId) this.mapping.set(conversationId, sessionId);
+        }
+      }
+    } catch {
+      // Ignore anything that is not our own JSON.
+    }
   }
 
-  /** The CLI session backing this conversation, if one was already opened. */
+  /**
+   * The CLI session backing this conversation, if one was already opened.
+   *
+   * There is deliberately no "most recent session" fallback. One used to exist
+   * because only a single id was persisted, and it handed every conversation the
+   * newest session — so a second chat opened on the first chat's history, and two
+   * conversations shared one run. Each conversation now keeps its own id.
+   */
   sessionFor(conversationId: string): string | undefined {
-    return this.mapping.get(conversationId) ?? this.mapping.get('__last__');
+    return this.mapping.get(conversationId);
+  }
+
+  /** Whether this conversation already lives in the CLI. */
+  owns(conversationId: string): boolean {
+    return this.mapping.has(conversationId);
   }
 
   bind(conversationId: string, sessionId: string): void {
     this.mapping.set(conversationId, sessionId);
-    this.mapping.set('__last__', sessionId);
-    this.storage.set(SESSION_KEY, sessionId);
+    this.storage.set(SESSION_KEY, JSON.stringify(Object.fromEntries(this.mapping)));
   }
 
   forget(conversationId: string): void {
     this.mapping.delete(conversationId);
+    this.storage.set(SESSION_KEY, JSON.stringify(Object.fromEntries(this.mapping)));
   }
 }
 

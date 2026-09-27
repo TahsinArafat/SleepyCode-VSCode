@@ -182,17 +182,32 @@ These are the later-breakage cases. They are out of spec if they happen on a CLI
 
 Rule: if `sleepy` is available, only `SessionPrompt` executes tools for that workspace. The extension renders events and posts replies. Local `src/tools.ts` runs only in offline mode.
 
-## Phase 3 — one-time import, then CLI-only writes
+## Phase 3 — conversations with leftover history stay local (import not adopted)
 
-When CLI becomes available:
+**Decision: do not import.** The step above assumed the CLI could accept history
+we cannot hand-write. It cannot. Auditing every route in the CLI shows the only
+message-creating paths — `POST /session/{id}/message` and `prompt_async` — both
+call `SessionPrompt.prompt` and run the model, and `/import/run` only reads
+Claude Code, Codex, and opencode's own on-disk formats. There is no route that
+writes message rows without starting the loop.
 
-1. Export each leftover local conversation as CLI messages/parts.
-2. User text becomes a user message. Assistant text, reasoning, and work become assistant parts. `pending`, error, paused, and stopped become the last assistant with `error` or aborted tool state. File snapshots and changes become snapshot/patch parts when present.
-3. Create a session for this `directory` and insert those messages.
-4. Mark the local conversation imported. Do not import twice.
-5. After that, this workspace writes only through the CLI.
+The only way to "import" would be replaying each old turn as a fresh prompt.
+That re-runs the model on work the user already paid for, spends real tokens, and
+invents a transcript that never happened. Rejected. Adding a write route to the
+CLI is possible but is a change to a separate repository, and nothing else in
+this design depends on import.
 
-If import fails, keep the local chat and stay in local mode for that conversation. Do not half-write a CLI session.
+What ships instead, in `src/engine-routing-core.ts`:
+
+- A conversation with **no history yet** uses the CLI.
+- A conversation **already bound to a CLI session** stays there, and its items
+  are a display mirror of CLI rows rather than local history.
+- A conversation holding **leftover local history** stays local for good, so a
+  CLI server starting up later never silently moves an existing chat.
+
+This is still the hard rule the design turns on: never continue one engine's
+session with the other. A workspace simply holds both kinds of chat, and routing
+is decided per conversation rather than per workspace.
 
 ## Fallback rule
 
@@ -205,7 +220,7 @@ If import fails, keep the local chat and stay in local mode for that conversatio
 
 1. Phase 1 local session-state fixes and tests.
 2. Phase 2 CLI attach/serve client and part-to-UI projection.
-3. Phase 3 one-time import, then disable live `globalState` writes for imported workspaces.
+3. Phase 3 routing, so only conversations with no history of their own are handed to the CLI.
 
 ## Non-goals
 

@@ -581,7 +581,9 @@ test('the extension is a client: it never opens the CLI database', () => {
 
 test('CLI mode routes the send path to the CLI instead of the local loop', () => {
   assert.match(cliEngine, /export async function resolveEngine/);
-  assert.match(agent, /if \(engine\.mode === 'cli'\) \{[\s\S]{0,200}sendViaCli/);
+  // A conversation with no history of its own goes to the CLI, so the local
+  // ToolLoopAgent must not also run the same send.
+  assert.match(agent, /if \(sending && this\.cliOwns\(sending, engine\)\) \{[\s\S]{0,200}sendViaCli/);
   // The local ToolLoopAgent must not also run the same send.
   assert.match(agent, /private async sendViaCli\(/);
 });
@@ -640,4 +642,22 @@ test('the CLI server is discovered or started on loopback and owned carefully', 
   // The workspace is named per request, not by the spawn arguments.
   assert.match(cliClient, /\[DIRECTORY_HEADER\]: this\.directory/);
   assert.match(agent, /new CliClient\(this\.engineStatus\.url, directory\)/);
+});
+
+test('engine routing is decided per conversation, not per workspace', () => {
+  // A chat that already holds local history must not be handed to the CLI just
+  // because a server started up. Every entry point routes on the conversation.
+  assert.match(agent, /this\.cliOwns\(sending, engine\)/, 'sends route by conversation');
+  assert.match(agent, /this\.cliOwns\(conversation, this\.engineStatus\)/, 'retries route by conversation');
+  assert.match(agent, /this\.cliOwns\(stopping, this\.engineStatus\)/, 'stops route by conversation');
+  // The workspace-wide flag may only be read to decide whether a client exists.
+  const workspaceWideGates = agent.match(/this\.engineStatus\.mode === 'cli'/g) ?? [];
+  assert.equal(workspaceWideGates.length, 1, 'no path may gate a run on workspace mode alone');
+});
+
+test('one conversation never inherits another conversation\'s CLI session', () => {
+  // A shared "most recent session" hands every chat the newest session, so a
+  // second chat opens showing the first chat's history.
+  assert.doesNotMatch(cliEngine, /__last__/);
+  assert.match(cliEngine, /owns\(conversationId: string\): boolean/);
 });
