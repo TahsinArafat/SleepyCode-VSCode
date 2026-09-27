@@ -266,6 +266,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly cliChats = new Map<string, CliChatSession>();
   /** Memoised CLI provider catalog, so a send can name a model that exists. */
   private cliModels: { at: number; catalog: CliProviderCatalog } | undefined;
+  /** Conversations already told their sidebar model is not a CLI model. */
+  private readonly cliModelNotices = new Set<string>();
   private engineReady: Promise<void> | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -483,13 +485,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     );
     if (preferred && (!catalog || !model || model.providerID !== preferred.providerID || model.modelID !== preferred.modelID)) {
       this.log('warn', 'cli.model.unknown', `${preferred.providerID}/${preferred.modelID}`);
-      this.post({
-        type: 'error',
-        conversationId,
-        text: model
-          ? `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}". This message will use ${model.providerID}/${model.modelID} instead.`
-          : `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}", and no connected provider to fall back to.`,
-      });
+      // Say it once per conversation. The sidebar lists SleepyCode's providers
+      // and models, which the CLI does not have, so the mismatch is permanent
+      // rather than a one-off -- repeating the notice on every send buried the
+      // transcript under a wall of identical errors.
+      if (!this.cliModelNotices.has(conversationId)) {
+        this.cliModelNotices.add(conversationId);
+        this.post({
+          type: 'error',
+          conversationId,
+          text: model
+            ? `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}". This conversation will use ${model.providerID}/${model.modelID} instead.`
+            : `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}", and no connected provider to fall back to.`,
+        });
+      }
     }
     if (!model) this.log('warn', 'cli.model.none', 'no connected provider offers a model');
     // prompt_async creates the real user message in the CLI; the client never

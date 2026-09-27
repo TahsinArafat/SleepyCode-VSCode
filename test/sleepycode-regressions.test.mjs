@@ -803,3 +803,37 @@ test('one conversation never inherits another conversation\'s CLI session', () =
   assert.doesNotMatch(cliEngine, /__last__/);
   assert.match(cliEngine, /owns\(conversationId: string\): boolean/);
 });
+
+test('refreshes are ordered so a stale snapshot cannot win', () => {
+  // A streaming turn fires a burst of events and each starts its own request.
+  // Unordered, a slow early request resolves last and republishes an old
+  // snapshot on top of the finished one, freezing the sidebar on a partial
+  // transcript -- the turn looks stuck although the CLI holds the full answer.
+  assert.match(cliEngine, /const ticket = \+\+this\.refreshTicket/);
+  assert.match(cliEngine, /if \(ticket !== this\.refreshTicket\) return;/);
+  assert.match(cliEngine, /if \(ticket === this\.refreshTicket\) this\.onError/);
+  const body = cliEngine.slice(cliEngine.indexOf('async refresh()'), cliEngine.indexOf('private publish'));
+  assert.ok(
+    body.indexOf('if (ticket !== this.refreshTicket) return;') < body.indexOf('this.publish('),
+    'the stale guard must precede the publish it protects',
+  );
+});
+
+test('a CLI model mismatch is reported once, not on every send', () => {
+  // The sidebar lists SleepyCode providers the CLI has never heard of, so the
+  // mismatch is permanent. Repeating the notice on every send buried the
+  // transcript under a wall of identical errors and read as the turn breaking.
+  assert.match(agent, /private readonly cliModelNotices = new Set<string>\(\)/);
+  assert.match(agent, /if \(!this\.cliModelNotices\.has\(conversationId\)\) \{\s*this\.cliModelNotices\.add\(conversationId\)/);
+  const start = agent.indexOf('if (!this.cliModelNotices.has(conversationId)');
+  const guarded = agent.slice(start, start + 600);
+  assert.equal(
+    (guarded.match(/type: 'error'/g) ?? []).length,
+    1,
+    'the notice must be posted once, inside the guard',
+  );
+  assert.ok(
+    guarded.indexOf('this.post(') < guarded.indexOf('}'),
+    'the post must sit inside the has/add guard',
+  );
+});

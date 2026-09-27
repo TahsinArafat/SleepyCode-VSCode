@@ -129,6 +129,8 @@ export class CliChatSession {
   private readonly onPermission: (permission: { id: string; title?: string }) => void;
   /** Last rows the CLI returned, so a busy-state repaint keeps the transcript. */
   private lastMessages: CliMessage[] = [];
+  /** Monotonic id of the newest refresh; older replies are dropped. */
+  private refreshTicket = 0;
 
   constructor(
     client: CliClient,
@@ -155,12 +157,24 @@ export class CliChatSession {
   }
 
   /** Re-read the authoritative rows. The CLI owns them; we only project. */
+  /**
+   * Re-read the authoritative rows. The CLI owns them; we only project.
+   *
+   * A streaming turn fires a burst of events, and each one starts an
+   * independent request here. Without ordering, a slow early request resolves
+   * after a fast later one and republishes an old snapshot on top of the
+   * finished one. Nothing else arrives to correct it, so the sidebar freezes
+   * on a partial transcript and the turn looks stuck. Only the newest request
+   * is allowed to publish; an older reply is dropped.
+   */
   async refresh(): Promise<void> {
+    const ticket = ++this.refreshTicket;
     try {
       const messages = await this.client.messages(this.id);
+      if (ticket !== this.refreshTicket) return;
       this.publish(messages, false);
     } catch (error) {
-      this.onError(errorText(error));
+      if (ticket === this.refreshTicket) this.onError(errorText(error));
     }
   }
 

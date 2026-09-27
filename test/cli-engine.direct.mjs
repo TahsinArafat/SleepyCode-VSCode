@@ -184,6 +184,64 @@ test('the registry keeps one CLI session per conversation', () => {
   assert.equal(reopened.sessionFor('conv_b'), 'ses_b');
 });
 
+test('a slow refresh cannot overwrite the newer transcript it raced', async () => {
+  // Every CLI event fires `void this.refresh()`, and each refresh is its own
+  // async fetch. A run emits a burst of message.part.updated, so responses
+  // overlap. If they are not ordered, a slow EARLIER request resolves after a
+  // fast LATER one and republishes a stale snapshot. Nothing else arrives to
+  // correct it, so the sidebar freezes on an old transcript -- the turn looks
+  // stuck even though the CLI finished and holds the full answer.
+  const early = [{ info: { id: 'm1', role: 'user' }, parts: [{ id: 'p1', type: 'text', text: 'hi' }] }];
+  const late = [
+    ...early,
+    {
+      info: { id: 'm2', role: 'assistant' },
+      parts: [{ id: 'p2', type: 'text', text: 'the finished answer' }],
+    },
+  ];
+
+  let call = 0;
+  let hold = false;
+  const stub = stubClient(early);
+  const chat = new CliChatSession(
+    {
+      ...stub.client,
+      messages: async () => {
+        call += 1;
+        // A request already in flight when the run is still streaming: it will
+        // resolve AFTER the newer one below and republish an old snapshot.
+        if (hold) {
+          await new Promise(done => setTimeout(done, 60));
+          return early;
+        }
+        return late;
+      },
+    },
+    'ses_1',
+    tool => tool,
+    stub.onUpdate,
+    stub.onError,
+    stub.onPermission,
+  );
+  await chat.open();
+
+  // The streaming burst: this refresh is issued first but is slow, so it
+  // resolves last and lands on top of the fresher snapshot published after it.
+  hold = true;
+  stub.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_1' } });
+  await new Promise(done => setTimeout(done, 5));
+  hold = false;
+  stub.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_1' } });
+  await new Promise(done => setTimeout(done, 200));
+
+  const last = stub.updates.at(-1);
+  assert.equal(
+    last.at(-1)?.text,
+    'the finished answer',
+    `the newest snapshot must win, got ${JSON.stringify(last.at(-1))}`,
+  );
+});
+
 test('a corrupt registry does not stop the extension from starting', () => {
   const registry = new CliSessionRegistry({
     get: () => '{not json',
