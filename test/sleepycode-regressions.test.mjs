@@ -588,6 +588,28 @@ test('CLI mode routes the send path to the CLI instead of the local loop', () =>
   assert.match(agent, /private async sendViaCli\(/);
 });
 
+test('a failed CLI send hands the user their text back', () => {
+  // The composer clears itself the moment a send is posted, so if the send
+  // never reaches the CLI the typed prompt would vanish with nothing to retry.
+  assert.match(agent, /type: 'restoreDraft'/, 'the failure paths must restore the draft');
+  // Both the unreachable path and a rejected send must restore it. Bound the
+  // slice to the method body so later methods cannot satisfy or break it.
+  const start = agent.indexOf('private async sendViaCli');
+  const sendViaCli = agent.slice(start, agent.indexOf('private async continueViaCli'));
+  const unreachable = sendViaCli.slice(0, sendViaCli.indexOf("if (!chat) {") + 200);
+  assert.match(unreachable, /restoreDraft/, 'an unreachable CLI must restore the draft');
+  // The send itself is wrapped so a rejection is handled next to the restore.
+  assert.match(sendViaCli, /try \{[\s\S]*await chat\.send\(text\);[\s\S]*catch[\s\S]*restoreDraft/, 'a rejected send must restore the draft');
+  // The webview only restores into the matching conversation, and only when the
+  // user has not already typed something newer.
+  assert.match(runtime, /case'restoreDraft':/);
+  assert.match(runtime, /m\.conversationId===activeConversationId/);
+  assert.match(runtime, /!input\.value\.trim\(\)/);
+  // Crucially, a failed send must NOT write local history: that would pin a
+  // CLI-owned conversation to the local agent forever.
+  assert.doesNotMatch(sendViaCli, /conversation\.items\s*=|conversation\.messages\s*=/);
+});
+
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);

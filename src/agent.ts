@@ -412,15 +412,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendViaCli(conversationId: string, text: string, root?: vscode.Uri): Promise<void> {
+    // The composer has already cleared itself, so a send that never reached the
+    // CLI would take the user's prompt with it. Both failure paths hand the
+    // text back to the composer instead of dropping it.
     const chat = await this.cliChatFor(conversationId, root);
     if (!chat) {
       this.post({ type: 'error', conversationId, text: 'The Sleepy CLI is not reachable, so this message was not sent.' });
+      this.post({ type: 'restoreDraft', conversationId, text });
       return;
     }
     this.post({ type: 'state', conversationId, running: true, label: 'Working' });
     // prompt_async creates the real user message in the CLI; the client never
     // writes a synthetic "Continue" turn.
-    await chat.send(text);
+    try {
+      await chat.send(text);
+    } catch (error) {
+      const detail = errorMessage(error);
+      this.log('error', 'cli.send.failed', detail);
+      this.post({ type: 'error', conversationId, text: detail });
+      this.post({ type: 'restoreDraft', conversationId, text });
+    }
   }
 
   /** Continue the interrupted assistant the CLI still has, with no new user turn. */
