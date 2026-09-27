@@ -299,7 +299,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       this.engineStatus = await resolveEngine(directory);
       if (this.engineStatus.mode === 'cli' && this.engineStatus.url) {
-        this.cliClient = new CliClient(this.engineStatus.url);
+        this.cliClient = new CliClient(this.engineStatus.url, directory);
         this.cliRegistry = new CliSessionRegistry({
           get: key => this.context.globalState.get<string>(key),
           set: (key, value) => { void this.context.globalState.update(key, value); },

@@ -7,12 +7,28 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /** Ports tried when looking for an already-running server. 4096 is the CLI default. */
 export const CLI_PROBE_PORTS = [4096, 4097, 4098];
+
+/**
+ * Header the CLI reads to decide which project a request is about. Its
+ * `InstanceMiddleware` resolves the directory per request from this header, a
+ * `?directory=` query, or else the server's own cwd — so this is the only way to
+ * name a workspace the server was not started in. `sleepy serve` takes no
+ * directory argument (passing one makes it print help and exit 1).
+ */
+export const DIRECTORY_HEADER = 'x-sleepycode-directory';
+
+/**
+ * The CLI's stable code for "that directory is outside my cwd". It answers 403
+ * with this code, and the CLI's own guidance is to branch on `code` rather than
+ * the message prose, which can change.
+ */
+export const DIRECTORY_DENIED_CODE = 'directory_not_allowed';
 
 const LISTENING = /listening on\s+(https?:\/\/[^\s"']+)/i;
 
@@ -45,6 +61,52 @@ export function findCliBinary(env: NodeJS.ProcessEnv = process.env): string | un
   return undefined;
 }
 
+/** True when the CLI refused the workspace rather than failing in transport. */
+export function isDirectoryDenied(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && (body as { code?: unknown }).code === DIRECTORY_DENIED_CODE;
+}
+
+/** Same check for a raw response body. Unparseable text is not a denial. */
+export function parseDirectoryDenied(text: string): boolean {
+  try {
+    return isDirectoryDenied(JSON.parse(text));
+  } catch {
+    return false;
+  }
+}
+
+/** Absolute path with symlinks resolved, matching how the CLI reports it. */
+function canonical(directory: string): string {
+  try {
+    return realpathSync(directory);
+  } catch {
+    return directory;
+  }
+}
+
+/**
+ * Ask a running server which directory it would actually use for this workspace.
+ *
+ * Returns undefined when the server cannot serve it: it refused the directory
+ * because it sits outside the server's cwd, or it is unreachable. That is the
+ * signal to start our own server instead of silently writing into a stranger's
+ * project.
+ */
+export async function resolveServerDirectory(url: string, directory: string, timeoutMs = 2_000): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${url}/path`, {
+      headers: { [DIRECTORY_HEADER]: directory },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { directory?: unknown };
+    if (typeof body.directory !== 'string' || !body.directory) return undefined;
+    return body.directory;
+  } catch {
+    return undefined;
+  }
+}
+
 export type CliServer = {
   /** Base URL of the loopback server. */
   url: string;
@@ -69,19 +131,40 @@ export async function probePort(port: number, timeoutMs = 700): Promise<boolean>
 }
 
 /**
- * Attach to an already-running server, or start one and return its base URL.
+ * Attach to a server already serving this workspace, or start one.
  *
- * `sleepy serve` takes no directory argument — passing one makes it print help
- * and exit 1. The workspace is scoped by spawning the child with that `cwd`,
- * because the CLI assigns each session the server's working directory. So
- * `session.create` can omit the directory and still land in the right workspace.
+ * A healthy server on a probe port is not automatically ours. The CLI refuses any
+ * directory outside its own cwd, and adopts a session for whichever project it
+ * was started in, so adopting a stranger's server would file this workspace's
+ * conversations into someone else's project. Every candidate is therefore asked
+ * which directory it would use for us, and only a real match is reused.
+ *
+ * `sleepy serve` takes no directory argument, so the child is spawned with the
+ * workspace as its cwd, and the client names the workspace per request through
+ * the directory header.
  */
-export async function startOrAttach(opts: { directory?: string; env?: NodeJS.ProcessEnv; spawnFn?: typeof spawn } = {}): Promise<CliServer> {
+export async function startOrAttach(opts: {
+  directory?: string;
+  env?: NodeJS.ProcessEnv;
+  spawnFn?: typeof spawn;
+  probeFn?: (port: number) => Promise<boolean>;
+  directoryFn?: (url: string, directory: string) => Promise<string | undefined>;
+} = {}): Promise<CliServer> {
   const env = opts.env ?? process.env;
   const spawnProcess = opts.spawnFn ?? spawn;
+  const probe = opts.probeFn ?? probePort;
+  const askDirectory = opts.directoryFn ?? resolveServerDirectory;
+  const wanted = opts.directory ? canonical(opts.directory) : undefined;
 
-  for (const port of CLI_PROBE_PORTS) {
-    if (await probePort(port)) return { url: `http://127.0.0.1:${port}`, owned: false };
+  if (wanted) {
+    for (const port of CLI_PROBE_PORTS) {
+      if (!(await probe(port))) continue;
+      const url = `http://127.0.0.1:${port}`;
+      // Undefined means it cannot serve this workspace at all: skip it rather
+      // than letting our sessions land in whatever project it was started for.
+      const served = await askDirectory(url, wanted);
+      if (served && canonical(served) === wanted) return { url, owned: false };
+    }
   }
 
   const binary = findCliBinary(env);
@@ -90,7 +173,8 @@ export async function startOrAttach(opts: { directory?: string; env?: NodeJS.Pro
 
   const child = spawnProcess(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
     env,
-    // The CLI files each session under the server's working directory.
+    // The server's cwd is the outer bound on what it will serve, so a server we
+    // start can always reach this workspace.
     cwd: opts.directory,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,

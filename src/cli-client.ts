@@ -9,6 +9,7 @@
 
 import { realpathSync } from 'node:fs';
 
+import { DIRECTORY_HEADER, isDirectoryDenied } from './cli-server.ts';
 import type { CliMessage } from './cli-projection';
 
 export type CliSession = {
@@ -36,6 +37,15 @@ export class CliApiError extends Error {
   }
 }
 
+/** Parse a body without letting a non-JSON error page throw through. */
+function safeParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The CLI reports the fully resolved directory for a session, so a workspace
  * reached through a symlink (`/tmp` -> `/private/tmp`) must be compared the same
@@ -51,18 +61,41 @@ function resolveDirectory(directory: string): string {
 
 export class CliClient {
   private readonly baseUrl: string;
+  private readonly directory: string | undefined;
 
-  constructor(baseUrl: string) {
+  /**
+   * `directory` is the workspace this client speaks for. The CLI resolves the
+   * project per request from this header, so passing it every time is what keeps
+   * a session from being filed under whichever project the server was started in.
+   */
+  constructor(baseUrl: string, directory?: string) {
     this.baseUrl = baseUrl;
+    this.directory = directory;
+  }
+
+  private scopedHeaders(extra?: HeadersInit): Record<string, string> {
+    return {
+      'content-type': 'application/json',
+      ...(this.directory ? { [DIRECTORY_HEADER]: this.directory } : {}),
+      ...((extra ?? {}) as Record<string, string>),
+    };
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+      headers: this.scopedHeaders(init.headers),
     });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
+      // A refused workspace is a scoping problem, not a broken request. Say so,
+      // because the alternative is the user staring at an empty session list.
+      if (isDirectoryDenied(safeParse(body))) {
+        throw new CliApiError(
+          'The Sleepy server cannot serve this folder. It was started somewhere else, so this workspace needs its own server.',
+          response.status,
+        );
+      }
       throw new CliApiError(`sleepy ${init.method ?? 'GET'} ${path} failed (${response.status}): ${body.slice(0, 200)}`, response.status);
     }
     if (response.status === 204) return undefined as T;
@@ -153,7 +186,10 @@ export class CliClient {
       const run = async (): Promise<void> => {
         while (!signal?.aborted) {
           try {
-            const response = await fetch(`${this.baseUrl}/event`, { headers: { accept: 'text/event-stream' }, signal });
+            const response = await fetch(`${this.baseUrl}/event`, {
+              headers: this.scopedHeaders({ accept: 'text/event-stream' }),
+              signal,
+            });
             if (!response.ok || !response.body) {
               await new Promise(done => setTimeout(done, 1000));
               continue;

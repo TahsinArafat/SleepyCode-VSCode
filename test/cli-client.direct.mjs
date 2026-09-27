@@ -34,6 +34,43 @@ test('parseListeningUrl pulls the base URL out of serve output', () => {
   assert.equal(parseListeningUrl('nothing to see here'), undefined);
 });
 
+test('every request names the workspace, so the server cannot guess wrong', async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, headers: init?.headers ?? {} });
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const scoped = new CliClient('http://127.0.0.1:4096', '/tmp/workspace-a');
+    await scoped.listSessions('/tmp/workspace-a');
+    await scoped.listSessions();
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  assert.ok(seen.length >= 2, 'both calls should have been made');
+  for (const call of seen) {
+    // Without this the server falls back to its own cwd and files our sessions
+    // under whichever project it was started in.
+    assert.equal(call.headers['x-sleepycode-directory'], '/tmp/workspace-a');
+  }
+});
+
+test('a refused workspace is reported clearly, not as a generic failure', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ code: 'directory_not_allowed', error: 'Access denied: directory must be within the server\'s working directory' }),
+    { status: 403, headers: { 'content-type': 'application/json' } },
+  );
+  try {
+    const scoped = new CliClient('http://127.0.0.1:4096', '/tmp/elsewhere');
+    await assert.rejects(() => scoped.listSessions('/tmp/elsewhere'), /cannot serve this folder/i);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('startOrAttach fails clearly when the CLI is absent', async () => {
   if (binary) return;
   await assert.rejects(() => startOrAttach({ env: { PATH: '/nonexistent', HOME: '/nonexistent' } }), /not found/);

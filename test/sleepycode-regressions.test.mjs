@@ -633,5 +633,11 @@ test('the CLI server is discovered or started on loopback and owned carefully', 
   assert.match(agent, /if \(this\.cliServer\?\.owned\) this\.cliServer\.child\?\.kill\(\)/);
   // A server this extension started is flagged owned; an attached one is not.
   assert.match(cliServer, /return \{ url, child, owned: true \};/);
-  assert.match(cliServer, /return \{ url: `http:\/\/127\.0\.0\.1:\$\{port\}`, owned: false \};/);
+  // Attaching is conditional on the server actually serving this workspace. A
+  // healthy server belonging to another project must never be adopted, or our
+  // sessions get filed under their project.
+  assert.match(cliServer, /if \(served && canonical\(served\) === wanted\) return \{ url, owned: false \};/);
+  // The workspace is named per request, not by the spawn arguments.
+  assert.match(cliClient, /\[DIRECTORY_HEADER\]: this\.directory/);
+  assert.match(agent, /new CliClient\(this\.engineStatus\.url, directory\)/);
 });
