@@ -610,6 +610,29 @@ test('a failed CLI send hands the user their text back', () => {
   assert.doesNotMatch(sendViaCli, /conversation\.items\s*=|conversation\.messages\s*=/);
 });
 
+test('undo and redo follow the engine that owns the conversation', () => {
+  // A CLI conversation's items are only a display mirror. Popping one locally
+  // would rewrite a transcript the CLI still holds and leave reverted files
+  // unreverted, so both handlers must hand the turn back to the CLI first.
+  const undo = agent.slice(agent.indexOf("message.type === 'undoLastTurn'"), agent.indexOf("message.type === 'redoLastTurn'"));
+  assert.match(undo, /await this\.undoViaCli\(conversation/, 'undo must route through the CLI when it owns the conversation');
+  assert.match(undo, /return;\n\s*\}\n\s*\/\/ A compaction boundary/, 'a CLI undo must return before touching local items');
+  const redo = agent.slice(agent.indexOf("message.type === 'redoLastTurn'"), agent.indexOf("message.type === 'requestPanel'"));
+  assert.match(redo, /await this\.redoViaCli\(conversation/, 'redo must route through the CLI when it owns the conversation');
+  // Both wrappers must check ownership and fall through for local chats, or an
+  // offline conversation could never be undone at all.
+  assert.match(agent, /private async undoViaCli\([^)]*\): Promise<boolean> \{\s*if \(!this\.cliOwns\(conversation, this\.engineStatus\)\) return false;/);
+  assert.match(agent, /private async redoViaCli\([^)]*\): Promise<boolean> \{\s*if \(!this\.cliOwns\(conversation, this\.engineStatus\)\) return false;/);
+  // The CLI client already had revert/unrevert; they must actually be used now.
+  assert.match(cliClient, /\/revert`/);
+  assert.match(cliClient, /\/unrevert`/);
+  // The CLI session resolves its own revert target: message ids are the engine's
+  // private keys and must not leak into the shared transcript item type.
+  assert.match(cliEngine, /async undo\(\): Promise<boolean>/);
+  assert.match(cliEngine, /async redo\(\): Promise<void>/);
+  assert.doesNotMatch(types, /messageID/);
+});
+
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);

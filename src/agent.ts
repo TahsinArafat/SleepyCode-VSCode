@@ -455,6 +455,39 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
+  /**
+   * Undo and redo belong to whichever engine owns the conversation.
+   *
+   * A CLI conversation's items are only a display mirror, so popping one locally
+   * would rewrite a transcript the CLI still holds and would leave the files the
+   * CLI reverted untouched. CLI revert restores the snapshot/patch parts and the
+   * revert point together, then republishes, so the two stay consistent.
+   *
+   * Returns false when the conversation is not CLI-owned or the chat is gone, so
+   * the caller can fall through to the local undo stack.
+   */
+  private async undoViaCli(conversation: Conversation, root?: vscode.Uri): Promise<boolean> {
+    if (!this.cliOwns(conversation, this.engineStatus)) return false;
+    const chat = this.cliChats.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
+    if (!chat) return false;
+    // The CLI picks its own revert target, so it can also tell us when there is
+    // no finished assistant turn to rewind. Falling through to the local stack
+    // in that case would pop items the CLI still owns.
+    const reverted = await chat.undo();
+    if (!reverted) {
+      this.post({ type: 'error', conversationId: conversation.id, text: 'There is no turn to undo in this conversation yet.' });
+    }
+    return true;
+  }
+
+  private async redoViaCli(conversation: Conversation, root?: vscode.Uri): Promise<boolean> {
+    if (!this.cliOwns(conversation, this.engineStatus)) return false;
+    const chat = this.cliChats.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
+    if (!chat) return false;
+    await chat.redo();
+    return true;
+  }
+
   /** User-defined agents persisted in global state. Invalid entries are dropped rather than trusted. */
   private customAgents(): CustomAgentConfig[] {
     const stored = this.context.globalState.get<unknown[]>('sleepycode.customAgents', []);
@@ -1560,6 +1593,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       if (!conversation.items.length) return;
+      // A CLI conversation rewinds through CLI revert. Popping its items here
+      // would edit a transcript the CLI still holds and leave reverted files
+      // unreverted, so hand the whole turn back to the engine that owns it.
+      if (await this.undoViaCli(conversation, this.workspaceRoot())) {
+        this.log('info', 'cli.undo.requested', `conversation=${conversation.id}`);
+        return;
+      }
       // A compaction boundary (divider marker) undoes the whole compaction.
       if (conversation.items[conversation.items.length - 1]?.kind === 'divider') {
         if (!this.undoCompaction(conversation)) return;
@@ -1608,6 +1648,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const project = this.activeProject();
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
+      // Mirror of undo: a CLI conversation un-reverts through the CLI, which
+      // restores the turn it rewound. The local stack is a different record and
+      // would put the two engines out of step.
+      if (await this.redoViaCli(conversation, this.workspaceRoot())) {
+        this.log('info', 'cli.redo.requested', `conversation=${conversation.id}`);
+        return;
+      }
       // Redo a compaction first when one is pending at this boundary.
       if (this.redoCompaction(conversation)) {
         conversation.updatedAt = Date.now();

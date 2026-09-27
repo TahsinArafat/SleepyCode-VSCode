@@ -221,10 +221,25 @@ export class CliChatSession {
     return false;
   }
 
-  /** Undo and redo go through the CLI so files come back with the transcript. */
-  async undo(messageId: string): Promise<void> {
-    await this.client.revert(this.id, messageId);
-    await this.refresh();
+  /**
+   * Undo the most recent assistant turn, so files come back with the transcript.
+   *
+   * The message id is resolved here rather than taken from the caller. CLI
+   * message ids stay inside this session: the sidebar only ever holds projected
+   * items, and letting one of them name a row would tie the display mirror to
+   * the engine's private key space.
+   */
+  async undo(): Promise<boolean> {
+    const messages = await this.client.messages(this.id);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const info = messages[index]?.info;
+      if (info?.role === 'assistant' && info.id) {
+        await this.client.revert(this.id, String(info.id));
+        await this.refresh();
+        return true;
+      }
+    }
+    return false;
   }
 
   async redo(): Promise<void> {
