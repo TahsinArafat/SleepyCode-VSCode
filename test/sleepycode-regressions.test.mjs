@@ -671,7 +671,9 @@ test('opening a CLI conversation attaches its stream instead of showing a stale 
   // would ever stream this conversation again and the sidebar would show a
   // persisted mirror that drifts from sleepy.db the moment the CLI does anything.
   const start = agent.indexOf("message.type === 'openConversation'");
-  const body = agent.slice(start, start + 1200);
+  // Wide enough to cover the handler's comments and the model pre-flight that
+  // precede the attach, so a later comment edit cannot hide the `.catch` again.
+  const body = agent.slice(start, start + 1600);
   assert.match(body, /this\.cliOwns\(opened, this\.engineStatus\)/);
   assert.match(body, /this\.cliChatFor\(message\.id/);
   // A failure to attach is logged, not thrown into the message handler.
@@ -745,7 +747,16 @@ test('a model the CLI does not have is never sent to it', () => {
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);
-  assert.match(agent, /if \(this\.engineReady\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/);
+  // The guard also compares the setting it resolved under: a useCli flip has to
+  // re-resolve rather than hand back the engine cached under the old toggle.
+  assert.match(
+    agent,
+    /if \(this\.engineReady(?: &&[^{]*)?\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/,
+  );
+  // When the toggle did change, the resolve already in flight is awaited first
+  // so two resolutions never spawn side by side.
+  assert.match(agent, /private engineUseCli: boolean \| undefined/);
+  assert.match(agent, /if \(this\.engineReady\) await this\.engineReady\.catch\(\(\) => undefined\);/);
 });
 
 test('CLI sends create a real user turn, never a synthetic Continue', () => {

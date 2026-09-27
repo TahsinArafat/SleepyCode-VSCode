@@ -30,10 +30,17 @@ export type EngineStatus = {
 const SESSION_KEY = 'sleepycode.cliSessionId';
 
 /**
- * Decide the engine for a workspace. The CLI wins whenever it is installed and
- * can serve; otherwise the local loop stays in charge.
+ * Decide the engine for a workspace.
+ *
+ * The CLI is an experimental, opt-in feature: it only wins when the user has
+ * ticked Settings → Advanced → "Use SleepyCode CLI when available". Off (the
+ * default) the local agent stays in charge and the CLI is not even probed for,
+ * so the stable path has no dependency on the CLI being installed.
  */
-export async function resolveEngine(directory: string): Promise<EngineStatus> {
+export async function resolveEngine(directory: string, useCli: boolean): Promise<EngineStatus> {
+  if (!useCli) {
+    return { mode: 'local', reason: 'The SleepyCode CLI is an experimental option and is turned off in Settings → Advanced, so this window uses the stable local agent.' };
+  }
   if (!findCliBinary()) {
     return { mode: 'local', reason: 'The Sleepy CLI is not installed, so this window uses the offline agent.' };
   }
