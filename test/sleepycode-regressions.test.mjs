@@ -633,6 +633,39 @@ test('undo and redo follow the engine that owns the conversation', () => {
   assert.doesNotMatch(types, /messageID/);
 });
 
+test('local-only history commands refuse to run on a CLI conversation', () => {
+  // Every command that rewinds, forks, or summarises `items` is local-only. On a
+  // CLI conversation `items` is a display mirror and `messages` is deliberately
+  // undefined, so doing any of them edits a transcript the CLI still holds.
+  const guard = (handler, label) => {
+    const start = agent.indexOf(`message.type === '${handler}'`);
+    assert.ok(start > 0, `${handler} handler must exist`);
+    const body = agent.slice(start, start + 1600);
+    assert.match(body, /refuseIfCliOwned\(conversation, '/, `${label} must be refused on a CLI conversation`);
+  };
+  guard('editUserMessage', 'editing a past message');
+  guard('branchConversation', 'branching');
+  guard('restoreCheckpoint', 'restoring a checkpoint');
+  // Compaction is the worst of these: the local model would invent a summary
+  // that is stored nowhere the CLI can see, so the two disagree about one session.
+  assert.match(agent, /refuseIfCliOwned\(conversation, 'Compacting'\)/);
+  // The refusal must key off the same routing rule as every other path.
+  assert.match(agent, /private refuseIfCliOwned\(conversation: Conversation, action: string\): boolean \{\s*if \(!this\.cliOwns\(conversation, this\.engineStatus\)\) return false;/);
+});
+
+test('deleting a conversation releases its CLI session binding', () => {
+  // A stale binding would let a later conversation that reuses this id adopt
+  // the deleted one's session, and the sidebar would show someone else's chat.
+  const start = agent.indexOf("message.type === 'deleteConversation'");
+  const body = agent.slice(start, start + 2000);
+  assert.match(body, /this\.cliRegistry\?\.forget\(message\.id\)/);
+  // The live stream for that session must be torn down too, or a deleted
+  // conversation keeps posting projections into the sidebar.
+  assert.match(body, /this\.cliChats\.get\(message\.id\)\?\.dispose\(\)/);
+  assert.match(body, /this\.cliChats\.delete\(message\.id\)/);
+  assert.doesNotMatch(body, /client\.deleteSession|session\.delete/, 'the CLI owns its rows; deleting a chat must not delete the session');
+});
+
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);

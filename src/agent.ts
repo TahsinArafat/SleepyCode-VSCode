@@ -340,6 +340,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * Refuse a local-history operation on a conversation the CLI owns.
+   *
+   * Commands that rewind, fork, or summarise `items` are all local-only
+   * operations. On a CLI conversation `items` is a display mirror and `messages`
+   * is deliberately undefined, so editing one rewrites a transcript the CLI
+   * still holds, and compacting fabricates a summary the CLI never made. The
+   * UI cannot be trusted to hide these buttons on its own, so the extension
+   * refuses them here and says why.
+   *
+   * Returns true when the caller should stop.
+   */
+  private refuseIfCliOwned(conversation: Conversation, action: string): boolean {
+    if (!this.cliOwns(conversation, this.engineStatus)) return false;
+    this.post({
+      type: 'error',
+      conversationId: conversation.id,
+      text: `${action} is not available in a CLI conversation. Its history lives in the Sleepy CLI, not in this window.`,
+    });
+    return true;
+  }
+
   private async cliChatFor(conversationId: string, root?: vscode.Uri): Promise<CliChatSession | undefined> {
     const existing = this.cliChats.get(conversationId);
     if (existing) return existing;
@@ -1473,6 +1495,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.queue = this.queue.filter(entry => entry.conversationId !== message.id);
       this.compactionUndoStacks.delete(message.id);
       this.compactionRedoStacks.delete(message.id);
+      // Drop the CLI session binding too. The conversation's rows in sleepy.db
+      // are untouched and stay reachable from the CLI, but leaving the binding
+      // here would let a later conversation that reuses this id silently adopt
+      // the deleted one's session.
+      this.cliRegistry?.forget(message.id);
+      this.cliChats.get(message.id)?.dispose();
+      this.cliChats.delete(message.id);
       void this.context.globalState.update(`sleepycode.compactionSnapshots.${message.id}`, undefined);
       project.conversations = project.conversations.filter(item => item.id !== message.id);
       project.updatedAt = Date.now();
@@ -1497,6 +1526,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const conversation = project.conversations.find(item => item.id === message.conversationId);
       const targetIndex = conversation?.items.findIndex(item => item.id === message.itemId && item.role === 'assistant') ?? -1;
       if (!conversation || targetIndex < 0) return;
+      // Restore rewinds items and structured history together. A CLI
+      // conversation has no local restore point and no structured history to
+      // keep in step, so there is nothing here it can honestly rewind.
+      if (this.refuseIfCliOwned(conversation, 'Restoring a checkpoint')) return;
       const target = conversation.items[targetIndex];
       if (!target?.gitTree) {
         void vscode.window.showInformationMessage('This message does not have a Git restore point. Restore points are created for newer SleepyCode responses.');
@@ -1526,6 +1559,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation) return;
       const targetIndex = conversation.items.findIndex(item => item.id === message.itemId);
       if (targetIndex < 0) return;
+      // Branching copies a prefix of items into a brand-new local conversation.
+      // From a CLI conversation that copy is a display mirror with no
+      // structured history, so the new chat would claim context the model never
+      // saw. The CLI owns forking here, and we have no route for it.
+      if (this.refuseIfCliOwned(conversation, 'Branching')) return;
       const sliced = branchConversationState(conversation, targetIndex);
       if (!sliced) return;
       const slicedItems = sliced.items.map((item, idx) => ({
@@ -1548,6 +1586,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       const targetIndex = conversation.items.findIndex(item => item.id === message.itemId && item.role === 'user');
       if (targetIndex < 0) return;
+      // Editing rewinds the transcript and re-runs the turn. On a CLI
+      // conversation that truncates a mirror the CLI still holds and then
+      // resumes it with the local agent, mixing the two histories.
+      if (this.refuseIfCliOwned(conversation, 'Editing a past message')) return;
       const root = this.workspaceRoot();
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
       // Ask before reverting workspace files: editing a past message can either
@@ -3463,6 +3505,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (this.runs.has(targetId ?? '')) {
       progress('error', { text: 'Wait until the current run finishes.', auto: options?.auto === true });
+      return;
+    }
+    // Compaction summarises with the local model and rewrites items plus
+    // structured history. On a CLI conversation the summary would be invented
+    // here and stored nowhere the CLI can see, so the two would disagree about
+    // the same session. The CLI runs its own compaction; the sidebar is a
+    // projector and must not summarise on its behalf.
+    if (conversation && this.refuseIfCliOwned(conversation, 'Compacting')) {
+      progress('error', { text: 'The Sleepy CLI manages context for this conversation.', auto: options?.auto === true });
       return;
     }
     if (this.compactionControllers.has(targetId ?? '')) return; // already compacting
