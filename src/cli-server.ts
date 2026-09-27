@@ -41,11 +41,39 @@ export function parseListeningUrl(output: string): string | undefined {
 /** Candidate paths for the `sleepy` binary, in priority order. */
 export function candidateBinaries(env: NodeJS.ProcessEnv = process.env): string[] {
   const candidates: string[] = [];
+
+  // 1. PATH entries (covers system install, Homebrew on Linux, manually added dirs).
   const pathEnv = env.PATH ?? '';
-  for (const dir of pathEnv.split(':')) {
-    if (dir) candidates.push(join(dir, 'sleepy'));
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  for (const dir of pathEnv.split(sep)) {
+    if (dir) candidates.push(join(dir, `sleepy${ext}`));
   }
-  candidates.push(join(homedir(), '.local', 'bin', 'sleepy'));
+
+  const home = homedir();
+
+  // 2. Common per-user install locations (Linux/macOS).
+  if (process.platform !== 'win32') {
+    candidates.push(join(home, '.local', 'bin', 'sleepy'));
+    candidates.push(join(home, 'bin', 'sleepy'));
+    // Homebrew (Apple Silicon and Intel).
+    candidates.push('/opt/homebrew/bin/sleepy');
+    candidates.push('/usr/local/bin/sleepy');
+    // Cargo installs.
+    candidates.push(join(home, '.cargo', 'bin', 'sleepy'));
+  }
+
+  // 3. Windows-specific: Scoop and per-user installs.
+  if (process.platform === 'win32') {
+    const appData = env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    candidates.push(join(appData, 'sleepy', 'sleepy.exe'));
+    const localAppData = env.LOCALAPPDATA ?? join(home, 'AppData', 'Local');
+    candidates.push(join(localAppData, 'sleepy', 'sleepy.exe'));
+    // Scoop installs to %USERPROFILE%\scoop\shims.
+    const userProfile = env.USERPROFILE ?? home;
+    candidates.push(join(userProfile, 'scoop', 'shims', 'sleepy.exe'));
+  }
+
   return candidates;
 }
 
@@ -114,6 +142,12 @@ export type CliServer = {
   child?: ChildProcess;
   /** True when this extension owns the process and should stop it on deactivate. */
   owned: boolean;
+  /**
+   * Stderr lines captured from the server process for diagnostics. Only
+   * populated for servers this extension itself started. Empty when attaching
+   * to an already-running server (we do not own its stream).
+   */
+  stderrLines: string[];
 };
 
 /** True when something healthy is already listening on this port. */
@@ -163,7 +197,7 @@ export async function startOrAttach(opts: {
       // Undefined means it cannot serve this workspace at all: skip it rather
       // than letting our sessions land in whatever project it was started for.
       const served = await askDirectory(url, wanted);
-      if (served && canonical(served) === wanted) return { url, owned: false };
+      if (served && canonical(served) === wanted) return { url, owned: false, stderrLines: [] };
     }
   }
 
@@ -178,6 +212,19 @@ export async function startOrAttach(opts: {
     cwd: opts.directory,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
+  });
+
+  // Capture stderr lines for diagnostics (binary crashes, auth errors, etc.).
+  // Kept in memory so the extension can surface them when the server fails.
+  const stderrLines: string[] = [];
+  child.stderr?.on('data', (chunk: Buffer) => {
+    const text = chunk.toString();
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed) stderrLines.push(trimmed);
+    }
+    // Cap at 100 lines so the buffer does not grow unbounded during a long run.
+    if (stderrLines.length > 100) stderrLines.splice(0, stderrLines.length - 100);
   });
 
   const url = await new Promise<string>((resolve, reject) => {
@@ -198,12 +245,12 @@ export async function startOrAttach(opts: {
     });
     child.once('exit', code => {
       clearTimeout(timer);
-      reject(new Error(`The sleepy server exited with code ${code ?? 'unknown'} before listening.`));
+      const detail = stderrLines.length ? ` Last stderr: ${stderrLines.slice(-3).join(' | ')}` : '';
+      reject(new Error(`The sleepy server exited with code ${code ?? 'unknown'} before listening.${detail}`));
     });
   });
 
-  // Keep draining stdout/stderr so a chatty server cannot fill the pipe buffer.
+  // Keep draining stdout so a chatty server cannot fill the pipe buffer.
   child.stdout?.resume();
-  child.stderr?.resume();
-  return { url, child, owned: true };
+  return { url, child, owned: true, stderrLines };
 }

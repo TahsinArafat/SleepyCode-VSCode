@@ -130,6 +130,27 @@ export function recoverableAssistant(info: CliMessageInfo): boolean {
 }
 
 /**
+ * Project token and cost counters from a CLI message onto a TranscriptItem.
+ *
+ * The CLI tracks token usage per assistant message: input, output, reasoning,
+ * and cache read/write tokens. These are the same fields the local agent
+ * populates; mapping them here means the usage view and per-turn token display
+ * work identically for CLI and local sessions.
+ */
+function projectTokens(info: CliMessageInfo, item: TranscriptItem): void {
+  const t = info.tokens;
+  if (!t) return;
+  if (t.input != null) item.inputTokens = t.input;
+  if (t.output != null) item.outputTokens = t.output;
+  if (t.cache?.read != null) item.cacheReadTokens = t.cache.read;
+  if (t.cache?.write != null) item.cacheWriteTokens = t.cache.write;
+  // Approximate the context window size from the tokens the model saw.
+  if (t.input != null) item.contextTokens = t.input;
+  // Cost in USD as reported by the CLI; stored for session-level aggregation.
+  if (info.cost != null) item.costUsd = info.cost;
+}
+
+/**
  * Project one message's parts into transcript items. A user turn becomes a user
  * item; an assistant turn becomes one assistant item whose `work` carries
  * reasoning and tool rows, so the cards stay the ones the sidebar already draws.
@@ -264,6 +285,9 @@ export function projectMessage(message: CliMessage, label: ToolLabel = defaultLa
       item.paused = true;
       item.pauseLimit = paused.pauseLimit;
     }
+    // Project token/cost counters so the usage view and turn-level display
+    // work identically for CLI and local sessions.
+    if (info.role !== 'user') projectTokens(info, item);
   }
   return items;
 }

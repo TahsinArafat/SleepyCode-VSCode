@@ -3,22 +3,27 @@ import type { Conversation } from './types';
 /**
  * Decide which engine runs a conversation's next turn.
  *
- * The rule is deliberately one-sided. A conversation with no history yet is free
- * to go to the CLI, and one that already lives there stays there, because the
- * CLI's rows are the real record for it. But a conversation carrying leftover
- * local history is pinned to the local agent for good.
+ * The rule is now fully CLI-first: when the engine is available (CLI installed
+ * and reachable), every conversation goes to it — whether it is brand new,
+ * already bound to a CLI session, or even carrying items that were projected
+ * from a previous CLI turn.
  *
- * We are not migrating those. The CLI exposes no route that accepts a history we
- * cannot hand-write: `POST /session/{id}/message` and `prompt_async` both run
- * the model, and `/import/run` only reads other tools' own on-disk formats. The
- * only way to "import" would be replaying each old turn as a fresh prompt, which
- * re-runs the model on work the user already paid for and fabricates a
- * transcript that never happened. Staying local keeps the record honest, which
- * matters more than moving it.
+ * We no longer pin a conversation to the local agent just because it has
+ * transcript items. Items in a CLI conversation are a *display mirror* of CLI
+ * rows; they carry no model history the local agent could actually continue —
+ * the local agent would have to restart from scratch, not resume. Treating them
+ * as "local history" that blocks the CLI caused every conversation that had
+ * received at least one CLI response to quietly fall back to the local agent on
+ * the next send, silently forking the session into a parallel history the user
+ * never chose.
  *
- * `boundToSession` is checked before `hasLocalHistory` on purpose: a CLI
- * conversation's items are a display mirror of CLI rows, so they look like local
- * history and would otherwise be demoted in the middle of a conversation.
+ * The only true local history is `messages` (the structured model input from
+ * the local `ToolLoopAgent`) and `pending` (an interrupted local run). These do
+ * not exist on CLI conversations; the CLI owns its own SQLite-backed history.
+ *
+ * `boundToSession` is checked first: a conversation already tied to a CLI
+ * session stays there regardless of the engine status field, because its history
+ * lives inside `sleepy.db` with no import path back to the local agent.
  */
 export function usesCliEngine(input: {
   engineAvailable: boolean;
@@ -26,20 +31,27 @@ export function usesCliEngine(input: {
   hasLocalHistory: boolean;
 }): boolean {
   if (!input.engineAvailable) return false;
+  // Once a conversation is bound to a CLI session its history lives in
+  // sleepy.db; always use the CLI regardless of local history state.
   if (input.boundToSession) return true;
+  // New conversation with no real local history → go to the CLI.
+  // "Local history" means the local ToolLoopAgent has written model messages or
+  // has an interrupted run in progress; transcript items alone do not count
+  // because they are populated by the CLI projection too.
   return !input.hasLocalHistory;
 }
 
 /**
- * Whether a conversation holds work the local agent owns.
+ * Whether a conversation holds work the **local agent** owns.
  *
- * `items` counts because a user turn that was never answered is still history the
- * user can see, and `pending` counts because an interrupted run is unfinished
- * work that must be resumed locally rather than restarted under the CLI.
+ * `messages` counts because those are the model-visible structured turns written
+ * by `ToolLoopAgent`. `pending` counts because an interrupted local run must be
+ * resumed locally. Plain transcript `items` and `turnUndo`/`turnRedo` snapshots
+ * are NOT counted: in a CLI conversation those are display mirrors projected
+ * from the CLI's rows, not evidence of local ownership.
  */
 export function hasLocalHistory(conversation: Pick<Conversation, 'items' | 'messages' | 'pending'>): boolean {
   return (
-    (conversation.items?.length ?? 0) > 0 ||
     (conversation.messages?.length ?? 0) > 0 ||
     conversation.pending !== undefined
   );

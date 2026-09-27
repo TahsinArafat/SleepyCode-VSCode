@@ -1,16 +1,21 @@
 /**
  * Engine selection.
  *
- * One conversation belongs to one engine. If the Sleepy CLI is available it owns
- * the run loop, tools, permissions, compaction, and `sleepy.db`; the extension
- * only renders its events. The local `ToolLoopAgent` stays as the offline
- * fallback for machines without the CLI, and it is never a second source of
- * truth for a CLI session.
+ * One conversation belongs to one engine. When the Sleepy CLI is installed it
+ * owns the run loop, tools, permissions, compaction, and `sleepy.db`; the
+ * extension only renders its events. The local `ToolLoopAgent` stays as the
+ * offline fallback for machines without the CLI.
  *
- * The mode is resolved once per conversation and pinned. Swapping engines while
- * a chat is open would mix tool ids, permission rules, and compaction
- * watermarks, so a mode change only applies to conversations that have not run
- * yet.
+ * The CLI is now the primary engine, not an opt-in experiment. Any conversation
+ * that has not accumulated local history yet goes to the CLI when the binary is
+ * reachable. Conversations that already hold local turns stay local because the
+ * CLI has no import path for them (there is no route that accepts pre-written
+ * history without re-running the model, which would re-spend the user's credits
+ * and fabricate a transcript that never happened).
+ *
+ * The engine is resolved once per conversation and pinned. Swapping engines mid-
+ * conversation would mix tool ids, permission rules, and compaction watermarks,
+ * so a mode change only applies to conversations that have not run yet.
  */
 
 import { findCliBinary, startOrAttach } from './cli-server.ts';
@@ -32,17 +37,12 @@ const SESSION_KEY = 'sleepycode.cliSessionId';
 /**
  * Decide the engine for a workspace.
  *
- * The CLI is an experimental, opt-in feature: it only wins when the user has
- * ticked Settings → Advanced → "Use SleepyCode CLI when available". Off (the
- * default) the local agent stays in charge and the CLI is not even probed for,
- * so the stable path has no dependency on the CLI being installed.
+ * The CLI wins whenever it is installed and can serve. The local loop is the
+ * fallback for machines without the CLI or when the server cannot start.
  */
-export async function resolveEngine(directory: string, useCli: boolean): Promise<EngineStatus> {
-  if (!useCli) {
-    return { mode: 'local', reason: 'The SleepyCode CLI is an experimental option and is turned off in Settings → Advanced, so this window uses the stable local agent.' };
-  }
+export async function resolveEngine(directory: string): Promise<EngineStatus> {
   if (!findCliBinary()) {
-    return { mode: 'local', reason: 'The Sleepy CLI is not installed, so this window uses the offline agent.' };
+    return { mode: 'local', reason: 'The Sleepy CLI is not installed. Install it to use the full agentic experience; the local agent is running as a fallback.' };
   }
   try {
     const server = await startOrAttach({ directory });
@@ -138,6 +138,8 @@ export class CliChatSession {
   private lastMessages: CliMessage[] = [];
   /** Monotonic id of the newest refresh; older replies are dropped. */
   private refreshTicket = 0;
+  /** True while a permission prompt is blocking the run. */
+  private busy = false;
 
   constructor(
     client: CliClient,
@@ -163,7 +165,6 @@ export class CliChatSession {
     }
   }
 
-  /** Re-read the authoritative rows. The CLI owns them; we only project. */
   /**
    * Re-read the authoritative rows. The CLI owns them; we only project.
    *
@@ -173,14 +174,36 @@ export class CliChatSession {
    * finished one. Nothing else arrives to correct it, so the sidebar freezes
    * on a partial transcript and the turn looks stuck. Only the newest request
    * is allowed to publish; an older reply is dropped.
+   *
+   * On transient HTTP errors the refresh is retried once after a short delay
+   * so a brief server hiccup (e.g. during restart) does not permanently error
+   * out a turn that the CLI is still handling.
    */
   async refresh(): Promise<void> {
     const ticket = ++this.refreshTicket;
     try {
       const messages = await this.client.messages(this.id);
       if (ticket !== this.refreshTicket) return;
-      this.publish(messages, false);
+      this.publish(messages, this.busy);
     } catch (error) {
+      if (ticket !== this.refreshTicket) return;
+      // One automatic retry on transient failures before surfacing the error.
+      // A 404 or auth failure is not transient and should surface immediately.
+      const isTransient = !(error instanceof Error && error.name === 'CliApiError' &&
+        (error as { status?: number }).status != null &&
+        ((error as { status?: number }).status ?? 0) < 500);
+      if (isTransient) {
+        await new Promise(done => setTimeout(done, 800));
+        if (ticket !== this.refreshTicket) return;
+        try {
+          const messages = await this.client.messages(this.id);
+          if (ticket !== this.refreshTicket) return;
+          this.publish(messages, this.busy);
+          return;
+        } catch {
+          // Fall through to error.
+        }
+      }
       if (ticket === this.refreshTicket) this.onError(errorText(error));
     }
   }
@@ -207,6 +230,7 @@ export class CliChatSession {
         void this.refresh();
         break;
       case 'permission.asked':
+        this.busy = true;
         this.onPermission({
           id: String(properties.permissionID ?? properties.id ?? ''),
           // The CLI publishes `permission` plus `patterns`, not a title.
@@ -218,12 +242,15 @@ export class CliChatSession {
         this.publish(this.lastMessages, true);
         break;
       case 'permission.replied':
+        this.busy = false;
         void this.refresh();
         break;
       case 'session.idle':
+        this.busy = false;
         void this.refresh();
         break;
       case 'session.error':
+        this.busy = false;
         this.onError(sessionErrorText(properties.error));
         void this.refresh();
         break;
@@ -285,5 +312,6 @@ export class CliChatSession {
   dispose(): void {
     this.controller.abort();
     this.stream = undefined;
+    this.busy = false;
   }
 }

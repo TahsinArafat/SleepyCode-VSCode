@@ -205,11 +205,6 @@
           "type": "boolean",
           "default": true,
           "description": "Enable custom agent definitions with per-agent model, prompt, and tool routing."
-        },
-        "sleepycode.useCli": {
-          "type": "boolean",
-          "default": false,
-          "description": "Experimental: run chats on the SleepyCode CLI when it is installed and can serve this workspace, and list the CLI's own models in the composer. Off by default so the stable local agent stays in charge. Configure from Settings → Advanced."
         }
       }
     }

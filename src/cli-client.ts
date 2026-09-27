@@ -148,9 +148,23 @@ function resolveDirectory(directory: string): string {
   }
 }
 
+/**
+ * Default timeout for individual HTTP requests (10 seconds). Long enough for a
+ * slow server boot, short enough that a hung server does not block the send path
+ * indefinitely. SSE streams use their own signal from the caller.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export class CliClient {
   private readonly baseUrl: string;
   private readonly directory: string | undefined;
+
+  /**
+   * In-flight `messages()` fetch, keyed by session id. A burst of SSE events
+   * fires many parallel requests; deduplicate so one fetch serves them all
+   * rather than N fetches racing each other for a stale-write win.
+   */
+  private readonly messagesInFlight = new Map<string, Promise<CliMessage[]>>();
 
   /**
    * `directory` is the workspace this client speaks for. The CLI resolves the
@@ -170,10 +184,11 @@ export class CliClient {
     };
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: this.scopedHeaders(init.headers),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
@@ -213,8 +228,22 @@ export class CliClient {
     return this.request<CliSession>('/session', { method: 'POST', body: JSON.stringify(title ? { directory, title } : { directory }) });
   }
 
+  /**
+   * Fetch the authoritative message list for a session.
+   *
+   * Deduplicated: if a request for `sessionId` is already in flight, that same
+   * Promise is returned so a burst of SSE events does not fire N parallel
+   * fetches that race each other. The in-flight entry is removed once settled
+   * (success or failure), so the next caller after settlement gets a fresh fetch.
+   */
   async messages(sessionId: string): Promise<CliMessage[]> {
-    return this.request<CliMessage[]>(`/session/${encodeURIComponent(sessionId)}/message`);
+    const existing = this.messagesInFlight.get(sessionId);
+    if (existing) return existing;
+    const request = this.request<CliMessage[]>(`/session/${encodeURIComponent(sessionId)}/message`).finally(() => {
+      this.messagesInFlight.delete(sessionId);
+    });
+    this.messagesInFlight.set(sessionId, request);
+    return request;
   }
 
   /**
@@ -288,26 +317,48 @@ export class CliClient {
   }
 
   /**
-   * Stream server events. Reconnects on drop so a long session survives a
-   * server restart; the caller decides what each event means.
+   * Stream server events. Reconnects on drop with exponential backoff so a long
+   * session survives a server restart; the caller decides what each event means.
+   *
+   * Backoff starts at 500 ms and doubles on each reconnect up to 16 seconds,
+   * then stays flat. A successful connection resets the backoff to zero so a
+   * brief restart does not permanently slow down a long-running session.
    */
   events(onEvent: (event: CliEvent) => void, signal?: AbortSignal): Promise<void> {
     return new Promise<void>(resolve => {
       const run = async (): Promise<void> => {
+        let backoffMs = 0;
+        const MIN_BACKOFF_MS = 500;
+        const MAX_BACKOFF_MS = 16_000;
+
         while (!signal?.aborted) {
+          // Wait out the backoff before the next attempt (skipped on first try).
+          if (backoffMs > 0) {
+            await new Promise(done => setTimeout(done, backoffMs));
+            if (signal?.aborted) return;
+          }
+
           try {
             const response = await fetch(`${this.baseUrl}/event`, {
               headers: this.scopedHeaders({ accept: 'text/event-stream' }),
               signal,
+              // keepalive lets the browser (or Node fetch) hold the connection
+              // open across navigations; harmless on a long-lived extension host.
+              keepalive: true,
             });
             if (!response.ok || !response.body) {
-              await new Promise(done => setTimeout(done, 1000));
+              // Bad response: start / continue backoff.
+              backoffMs = backoffMs === 0 ? MIN_BACKOFF_MS : Math.min(backoffMs * 2, MAX_BACKOFF_MS);
               continue;
             }
+
+            // Successful connection: reset backoff so a later drop restarts fast.
+            backoffMs = 0;
+
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
-            for (; ;) {
+            for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
               buffer += decoder.decode(value, { stream: true });
@@ -326,11 +377,13 @@ export class CliClient {
                 }
               }
             }
+            // Stream closed cleanly; use the minimum backoff for the reconnect.
+            backoffMs = MIN_BACKOFF_MS;
           } catch (error) {
             if (signal?.aborted) return;
+            // Transport error: grow the backoff.
+            backoffMs = backoffMs === 0 ? MIN_BACKOFF_MS : Math.min(backoffMs * 2, MAX_BACKOFF_MS);
           }
-          if (signal?.aborted) return;
-          await new Promise(done => setTimeout(done, 1000));
         }
       };
       void run().then(resolve);

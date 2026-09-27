@@ -28,7 +28,7 @@ export type WebMessage =
   | { type: 'requestExtensionLogs' }
   | { type: 'clearExtensionLogs' }
   | { type: 'extensionLogs'; logs: string[] }
-  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number; useCli?: boolean }
+  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number }
   | { type: 'fetchProviderModels'; id?: string; name?: string; baseURL: string; apiKey?: string; customHeaders?: Record<string, string> }
   | { type: 'providerModels'; id?: string; ok: boolean; text: string; models?: string[] }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }
@@ -170,6 +170,8 @@ export type TranscriptItem = {
   errorInfo?: AgentErrorPresentation;
   commitHash?: string;
   commitMessage?: string;
+  /** Turn cost in USD as reported by the CLI or local usage tracker. */
+  costUsd?: number;
   paused?: boolean;
   pauseReason?: 'max_steps';
   pauseLimit?: number;
@@ -360,8 +362,6 @@ export interface AppConfig {
   compactionModel: string;
   /** Characters of chain-of-thought kept on later model requests. */
   maxPersistedReasoning: number;
-  /** Experimental opt-in: hand runs to the Sleepy CLI when it is available. */
-  useCli: boolean;
 }
 
 export type { ProjectIntelligence };

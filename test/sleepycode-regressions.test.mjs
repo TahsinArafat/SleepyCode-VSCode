@@ -747,16 +747,14 @@ test('a model the CLI does not have is never sent to it', () => {
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);
-  // The guard also compares the setting it resolved under: a useCli flip has to
-  // re-resolve rather than hand back the engine cached under the old toggle.
+  // The guard returns the memoised engine when it has already resolved.
   assert.match(
     agent,
-    /if \(this\.engineReady(?: &&[^{]*)?\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/,
+    /if \(this\.engineReady\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/,
   );
-  // When the toggle did change, the resolve already in flight is awaited first
-  // so two resolutions never spawn side by side.
-  assert.match(agent, /private engineUseCli: boolean \| undefined/);
-  assert.match(agent, /if \(this\.engineReady\) await this\.engineReady\.catch\(\(\) => undefined\);/);
+  // The CLI is the primary engine — there is no experimental toggle to re-read.
+  assert.doesNotMatch(agent, /private engineUseCli: boolean \| undefined/);
+  assert.doesNotMatch(agent, /get<boolean>\('useCli'/);
 });
 
 test('CLI sends create a real user turn, never a synthetic Continue', () => {
@@ -803,11 +801,13 @@ test('the CLI server is discovered or started on loopback and owned carefully', 
   // Only a server this extension started may be killed on deactivate.
   assert.match(agent, /if \(this\.cliServer\?\.owned\) this\.cliServer\.child\?\.kill\(\)/);
   // A server this extension started is flagged owned; an attached one is not.
-  assert.match(cliServer, /return \{ url, child, owned: true \};/);
+  assert.match(cliServer, /return \{ url, child, owned: true, stderrLines \};/);
+  // Stderr is captured so crash reasons are not lost when the server exits before printing a URL.
+  assert.match(cliServer, /stderrLines/);
   // Attaching is conditional on the server actually serving this workspace. A
   // healthy server belonging to another project must never be adopted, or our
   // sessions get filed under their project.
-  assert.match(cliServer, /if \(served && canonical\(served\) === wanted\) return \{ url, owned: false \};/);
+  assert.match(cliServer, /if \(served && canonical\(served\) === wanted\) return \{ url, owned: false, stderrLines: \[\] \};/);
   // The workspace is named per request, not by the spawn arguments.
   assert.match(cliClient, /\[DIRECTORY_HEADER\]: this\.directory/);
   assert.match(agent, /new CliClient\(this\.engineStatus\.url, directory\)/);

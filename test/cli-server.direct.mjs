@@ -19,6 +19,7 @@ function fakeChild(banner = BANNER) {
   child.stdout.resume = () => { };
   child.stderr = new EventEmitter();
   child.stderr.resume = () => { };
+  child.stderr.on = () => { }; // stderrLines capture; stubbed for tests
   child.kill = () => { };
   queueMicrotask(() => child.stdout.emit('data', Buffer.from(banner)));
   return child;

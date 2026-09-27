@@ -269,8 +269,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Conversations already told their sidebar model is not a CLI model. */
   private readonly cliModelNotices = new Set<string>();
   private engineReady: Promise<void> | undefined;
-  /** Which setting `engineReady` resolved under, so a toggle can re-resolve without racing the resolve in flight. */
-  private engineUseCli: boolean | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
@@ -294,26 +292,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * mode the CLI process owns `sleepy.db` and we never open it.
    */
   private async ensureEngine(): Promise<EngineStatus> {
-    // Re-read the experimental toggle on every call: a flip in either the
-    // sidebar settings or settings.json must take effect on the next send, not
-    // only after a window reload.
-    const useCli = vscode.workspace.getConfiguration('sleepycode').get<boolean>('useCli', false);
-    if (this.engineReady && this.engineUseCli === useCli) {
+    if (this.engineReady) {
       await this.engineReady;
       return this.engineStatus;
     }
-    // The toggle changed. Waiting out the resolve in flight first keeps two
-    // resolutions from spawning side by side; only then do we resolve again
-    // under the new setting.
-    if (this.engineReady) await this.engineReady.catch(() => undefined);
-    this.engineUseCli = useCli;
     this.engineReady = (async () => {
       const directory = this.workspaceRoot()?.fsPath;
       if (!directory) {
         this.engineStatus = { mode: 'local', reason: 'No folder is open, so this window uses the offline agent.' };
         return;
       }
-      this.engineStatus = await resolveEngine(directory, useCli);
+      this.engineStatus = await resolveEngine(directory);
       if (this.engineStatus.mode === 'cli' && this.engineStatus.url) {
         this.cliClient = new CliClient(this.engineStatus.url, directory);
         this.cliRegistry = new CliSessionRegistry({
@@ -350,11 +339,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private cliOwns(conversation: Conversation, engine: EngineStatus): boolean {
     const boundToSession = this.cliRegistry?.owns(conversation.id) ?? false;
     return usesCliEngine({
-      // Turning the experimental toggle off stops routing NEW conversations to
-      // the CLI, but a conversation already bound to a CLI session keeps its
-      // client: its history lives in sleepy.db with no import path back, so
-      // dropping it mid-flight would strand a transcript the local agent cannot
-      // resume honestly.
       engineAvailable: engine.mode === 'cli' || (boundToSession && Boolean(this.cliClient)),
       boundToSession,
       hasLocalHistory: hasLocalHistory(conversation),
@@ -1019,7 +1003,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       confirmDelete: this.confirmDeleteConversations(),
       compactionModel: config.compactionModel,
       maxPersistedReasoning: config.maxPersistedReasoning,
-      useCli: config.useCli,
       initialSetup,
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
       subagentModels: this.subagentModels(),
@@ -1224,8 +1207,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     project.updatedAt = Date.now();
     void this.persistProjects();
     this.syncConversations();
-    // A fresh conversation on the experimental CLI starts on a model the CLI
-    // actually has, so the composer shows the model that will really run.
+    // A new CLI conversation starts on a model the CLI actually has, so
+    // the composer shows the model that will really run.
     void this.ensureCliSelection(conversation);
   }
 
@@ -1420,9 +1403,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'ready') {
-      // Settle the engine before anything reads it: the model picker and the
-      // sidebar's conversation routing both depend on whether the experimental
-      // CLI is on. Off, this returns immediately without probing for a binary.
+      // Settle the engine before anything reads it: the model picker and
+      // routing depend on whether the CLI is available.
       await this.ensureEngine();
       this.syncConversations();
       await this.loadApiKeys();
@@ -1996,9 +1978,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await config.update('maxSteps', maxSteps, vscode.ConfigurationTarget.Global);
         await config.update('maxPersistedReasoning', maxPersistedReasoning, vscode.ConfigurationTarget.Global);
         await config.update('extraFreeModels', message.extraFreeModels ?? '', vscode.ConfigurationTarget.Global);
-        // The experimental CLI toggle. Persisting it re-resolves the engine on
-        // the next ensureEngine, so the picker below lists the right models.
-        await config.update('useCli', Boolean(message.useCli), vscode.ConfigurationTarget.Global);
         await this.context.globalState.update('sleepycode.providers', providers);
         await this.context.globalState.update('sleepycode.activeProvider', activeProvider);
         const currentProviderIds = new Set(providers.map(provider => provider.id));
@@ -2025,9 +2004,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           this.apiKeys[activeProvider] = message.apiKey.trim();
         }
         this.post({ type: 'settingsResult', ok: true, text: 'Settings saved.' });
-        // Re-resolve under the freshly saved toggle before the picker refreshes,
-        // so switching the CLI on shows its models immediately.
-        await this.ensureEngine();
         await this.refreshModels();
       } catch (error) {
         this.post({ type: 'settingsResult', ok: false, text: errorMessage(error) });
@@ -2222,7 +2198,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await config.update('maxPersistedReasoning', DEFAULT_PERSISTED_REASONING, vscode.ConfigurationTarget.Global);
       await config.update('extraFreeModels', '', vscode.ConfigurationTarget.Global);
       await config.update('model', '', vscode.ConfigurationTarget.Global);
-      await config.update('useCli', false, vscode.ConfigurationTarget.Global);
       await this.context.globalState.update('sleepycode.providers', defaults);
       await this.context.globalState.update('sleepycode.activeProvider', defaults[0]?.id ?? '');
       await this.context.globalState.update('sleepycode.approvalMode', 'ask');
@@ -4269,7 +4244,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt', ''),
       mcpServers: this.context.globalState.get<string>('sleepycode.mcpServers', '{}'),
       extraFreeModels: (config.get<string>('extraFreeModels', '') ?? '').split(',').map(item => item.trim()).filter(Boolean),
-      useCli: config.get<boolean>('useCli', false),
       onlyDefaultModels: this.context.globalState.get<boolean>('sleepycode.onlyDefaultModels', true),
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
       compactionModel: this.context.globalState.get<string>('sleepycode.compactionModel', ''),
@@ -4345,8 +4319,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async refreshModels(): Promise<void> {
-    // Memoised: this only blocks the first refresh while the engine resolves,
-    // and with the experimental CLI off it returns without probing anything.
+    // Memoised: this only blocks the first refresh while the engine resolves.
     await this.ensureEngine();
     const config = this.config();
     const providers = this.getProviders();
