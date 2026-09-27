@@ -83,6 +83,54 @@ test('session errors surface without clearing the transcript', async () => {
   assert.ok(stub.updates.at(-1).length > 0, 'a session error must not blank the history');
 });
 
+test('a session error surfaces the CLI message instead of a generic placeholder', async () => {
+  // Observed against sleepy 0.1.19: the payload nests the detail under
+  // data.message, so a `typeof === 'string'` check hides the real reason and
+  // the user is left with "The CLI reported a session error."
+  const { stub } = await openChat();
+
+  stub.emit({
+    type: 'session.error',
+    properties: {
+      sessionID: 'ses_1',
+      error: { name: 'UnknownError', data: { message: 'Model not found: sleepy/auto-best-coding.' } },
+    },
+  });
+
+  assert.ok(
+    stub.errors.includes('Model not found: sleepy/auto-best-coding.'),
+    `expected the real CLI message, got ${JSON.stringify(stub.errors)}`,
+  );
+});
+
+test('an unrecognised session error shape still produces a readable message', async () => {
+  const { stub } = await openChat();
+
+  stub.emit({ type: 'session.error', properties: { sessionID: 'ses_1', error: { name: 'ProviderModelNotFoundError' } } });
+  assert.ok(stub.errors.at(-1), 'a name-only payload must still say something');
+
+  stub.emit({ type: 'session.error', properties: { sessionID: 'ses_1', error: undefined } });
+  const fallback = stub.errors.at(-1);
+  assert.equal(typeof fallback, 'string');
+  assert.ok(fallback.length > 0, 'an empty payload must not produce an empty error');
+  assert.ok(stub.updates.at(-1).length > 0, 'a session error must never blank the history');
+});
+
+test('a send carries the selected model so the CLI does not fall back to its own default', async () => {
+  // Without a model the CLI resolves one from its own config, which on a fresh
+  // install is `sleepy/auto-best-coding` -- a model that does not exist, so
+  // every prompt fails with "Model not found".
+  const sent = [];
+  const { chat } = await openChat({
+    prompt: async (id, text, model) => { sent.push({ id, text, model }); },
+  });
+
+  await chat.send('hi', { providerID: 'sleepy', modelID: 'claude-sonnet-4.6-thinking' });
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].model, { providerID: 'sleepy', modelID: 'claude-sonnet-4.6-thinking' });
+});
+
 test('continuing an unfinished assistant resumes that turn with no new user message', async () => {
   const resumed = [];
   const { chat } = await openChat({

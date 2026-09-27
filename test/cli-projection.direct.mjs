@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  cliErrorText,
   projectMessage,
   projectParts,
   recoverableAssistant,
@@ -57,11 +58,37 @@ test('a compaction part becomes a divider, never a synthetic message', () => {
 });
 
 test('an assistant error part becomes a retryable error card', () => {
-  const items = projectParts([{ id: 'prt_1', type: 'error', error: { message: 'model refused' } }], 'assistant');
+  // The wire shape is `{ name, data: { message } }`, NOT `{ message }`. An older
+  // version of this test passed `{ message }`, which is why the real shape went
+  // unnoticed and a failed turn rendered the bare name "UnknownError".
+  const items = projectParts([{ id: 'prt_1', type: 'error', error: { name: 'UnknownError', data: { message: 'model refused' } } }], 'assistant');
   const error = items[0];
   assert.equal(error.kind, 'error');
   assert.equal(error.text, 'model refused');
   assert.equal(error.errorInfo?.retryable, true);
+});
+
+test('the captured ProviderModelNotFound payload shows the real reason', () => {
+  // Recorded verbatim from a live `sleepy serve` on a first send.
+  const captured = { name: 'UnknownError', data: { message: 'Model not found: sleepy/auto-best-coding.' } };
+  assert.equal(cliErrorText(captured), 'Model not found: sleepy/auto-best-coding.');
+
+  const items = projectParts([{ id: 'prt_1', type: 'error', error: captured }], 'assistant');
+  assert.equal(items[0].text, 'Model not found: sleepy/auto-best-coding.');
+  assert.notEqual(items[0].text, 'UnknownError', 'the bare name is not a reason');
+});
+
+test('cliErrorText prefers the message and only falls back to the name', () => {
+  for (const name of ['UnknownError', 'ProviderAuthError', 'APIError', 'MessageAbortedError']) {
+    assert.equal(cliErrorText({ name, data: { message: 'the real reason' } }), 'the real reason');
+  }
+  // Every variant the CLI declares carries data.message; name is a last resort.
+  assert.equal(cliErrorText({ name: 'APIError', data: {} }), 'APIError');
+  assert.equal(cliErrorText('plain string'), 'plain string');
+  assert.equal(cliErrorText(undefined), undefined);
+  assert.equal(cliErrorText(null), undefined);
+  assert.equal(cliErrorText({}), undefined);
+  assert.equal(cliErrorText('   '), undefined, 'whitespace is not a reason');
 });
 
 test('incomplete assistants stay recoverable so Continue is offered', () => {

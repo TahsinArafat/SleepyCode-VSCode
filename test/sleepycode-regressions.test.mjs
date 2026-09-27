@@ -599,7 +599,7 @@ test('a failed CLI send hands the user their text back', () => {
   const unreachable = sendViaCli.slice(0, sendViaCli.indexOf("if (!chat) {") + 200);
   assert.match(unreachable, /restoreDraft/, 'an unreachable CLI must restore the draft');
   // The send itself is wrapped so a rejection is handled next to the restore.
-  assert.match(sendViaCli, /try \{[\s\S]*await chat\.send\(text\);[\s\S]*catch[\s\S]*restoreDraft/, 'a rejected send must restore the draft');
+  assert.match(sendViaCli, /try \{[\s\S]*await chat\.send\(text, model\);[\s\S]*catch[\s\S]*restoreDraft/, 'a rejected send must restore the draft');
   // The webview only restores into the matching conversation, and only when the
   // user has not already typed something newer.
   assert.match(runtime, /case'restoreDraft':/);
@@ -692,6 +692,40 @@ test('continuing a paused iteration is refused on a CLI conversation', () => {
   );
 });
 
+test('a CLI error never renders as a bare category name', () => {
+  // One unwrap, used by both the toast and the transcript card. The two copies
+  // that drifted are what hid "Model not found: sleepy/auto-best-coding." behind
+  // a generic message and a bare "UnknownError".
+  assert.match(cliProjection, /export function cliErrorText\(error: unknown\): string \| undefined/);
+  assert.match(cliProjection, /data\.message/, 'the unwrap must read data.message, the real field');
+  assert.match(cliEngine, /import \{ cliErrorText,/);
+  assert.match(cliEngine, /return cliErrorText\(error\) \?\?/);
+  // The projection must not keep its own copy.
+  assert.doesNotMatch(cliProjection, /return error\.message \?\?/);
+});
+
+test('a model the CLI does not have is never sent to it', () => {
+  // The CLI keeps its own provider registry; the sidebar's ids are SleepyCode's.
+  // Passing one the CLI has never heard of fails the turn with
+  // ProviderModelNotFoundError, so the send path checks first.
+  assert.match(agent, /private async cliProviderCatalog\(\): Promise<CliProviderCatalog \| undefined>/);
+  const start = agent.indexOf('private async cliProviderCatalog');
+  const body = agent.slice(start, start + 1200);
+  assert.match(body, /this\.cliClient\?\.providerCatalog\(\)/, 'the check must ask the CLI what it has');
+  assert.match(body, /return undefined;/, 'a failed lookup must not block the send');
+
+  const send = agent.indexOf('private async sendViaCli');
+  const sendBody = agent.slice(send, send + 3200);
+  assert.match(sendBody, /pickCliModel\(/, 'the send must choose from the catalog');
+  // Unvalidated pass-through is exactly what this replaces: the sidebar's pick
+  // may become `preferred`, but the model actually sent must be the chosen one.
+  assert.doesNotMatch(sendBody, /chat\.send\(text, preferred\)/);
+  assert.match(sendBody, /chat\.send\(text, model\)/);
+  // The chooser must be the single source of the decision, and it must run
+  // before the send rather than after a failure.
+  assert.ok(sendBody.indexOf('pickCliModel(') < sendBody.indexOf('chat.send(text, model)'));
+});
+
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);
@@ -700,7 +734,11 @@ test('the engine is chosen once and never swapped mid-conversation', () => {
 
 test('CLI sends create a real user turn, never a synthetic Continue', () => {
   assert.match(cliClient, /prompt_async/);
-  assert.match(cliClient, /JSON\.stringify\(\{ parts: \[\{ type: 'text', text \}\] \}\)/);
+  // The body carries a real text part and, separately, the model. The model
+  // used to be omitted, which left the CLI resolving its own configured
+  // default -- a placeholder that exists in no provider, so every send failed.
+  assert.match(cliClient, /\{ parts: \[\{ type: 'text', text \}\]/);
+  assert.match(cliClient, /model \? \{ model, providerID: model\.providerID \}/);
   // Continue resumes the interrupted assistant by id, with no new user message.
   assert.match(cliEngine, /resumeTurn\(this\.id, String\(info\.id\)\)/);
   assert.doesNotMatch(cliEngine, /run\('Continue'\)|text: 'Continue'/);

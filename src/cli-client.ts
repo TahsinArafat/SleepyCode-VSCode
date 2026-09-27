@@ -27,6 +27,62 @@ export type CliEvent = { type: string; properties?: Record<string, unknown> };
 /** Permission replies the CLI accepts. Sent as `response`, not `reply`. */
 export type CliPermissionReply = 'once' | 'always' | 'reject';
 
+/** One provider from `GET /provider`, with the models it can currently run. */
+export type CliProvider = {
+  id: string;
+  name?: string;
+  models?: Record<string, { id?: string; name?: string } | undefined>;
+};
+
+/** `GET /provider`, reduced to what choosing a model actually needs. */
+export type CliProviderCatalog = {
+  providers: CliProvider[];
+  /** providerID -> the model the CLI prefers for it. */
+  defaults: Record<string, string>;
+  /** Providers with working credentials. Only these can actually run a turn. */
+  connected: string[];
+};
+
+/**
+ * Choose a model the CLI can really run.
+ *
+ * The CLI resolves an unspecified model from its own config, and on a fresh
+ * install that default is a placeholder (`sleepy/auto-best-coding`) which is in
+ * no provider's model list -- so every send failed with "Model not found". The
+ * prompt route takes no model filter, so the only way to avoid that is to send
+ * a concrete model. Preference order: the sidebar's own pick when the CLI has
+ * it, then the CLI's preferred model for a connected provider, then that
+ * provider's first model.
+ */
+export function pickCliModel(
+  catalog: CliProviderCatalog,
+  preferred?: { providerID: string; modelID: string },
+): { providerID: string; modelID: string } | undefined {
+  // A model only counts if its provider has working credentials. A preferred id
+  // on a provider the user never connected would fail the turn on auth, which
+  // is strictly worse than picking a model that can actually run.
+  const connected = new Set(catalog.connected);
+  const has = (providerId: string, modelId: string): boolean => {
+    if (!connected.has(providerId)) return false;
+    const entry = catalog.providers.find(candidate => candidate.id === providerId);
+    return Boolean(entry?.models && Object.hasOwn(entry.models, modelId));
+  };
+  if (preferred && has(preferred.providerID, preferred.modelID)) {
+    return { providerID: preferred.providerID, modelID: preferred.modelID };
+  }
+  for (const providerId of catalog.connected) {
+    const preferredModel = catalog.defaults[providerId];
+    if (preferredModel && has(providerId, preferredModel)) {
+      return { providerID: providerId, modelID: preferredModel };
+    }
+  }
+  for (const providerId of catalog.connected) {
+    const first = Object.keys(catalog.providers.find(entry => entry.id === providerId)?.models ?? {})[0];
+    if (first) return { providerID: providerId, modelID: first };
+  }
+  return undefined;
+}
+
 export class CliApiError extends Error {
   readonly status: number;
 
@@ -129,13 +185,34 @@ export class CliClient {
   }
 
   /**
+   * The providers and models this CLI can actually run.
+   *
+   * Needed because the CLI keeps its own registry: the sidebar's picker lists
+   * SleepyCode's models, and those ids mean nothing to the CLI. Passing one
+   * straight through fails the turn with `ProviderModelNotFoundError`.
+   */
+  async providerCatalog(): Promise<CliProviderCatalog> {
+    type Wire = { all?: CliProvider[]; default?: Record<string, string>; connected?: string[] };
+    const body = await this.request<Wire | CliProvider[]>('/provider');
+    const list: Wire = Array.isArray(body) ? { all: body } : body;
+    return {
+      providers: list.all ?? [],
+      defaults: list.default ?? {},
+      connected: list.connected ?? [],
+    };
+  }
+
+  /**
    * Create a real user message and start the loop. The CLI creates the user
    * message itself, so the client never writes a synthetic "Continue" turn.
    */
-  async prompt(sessionId: string, text: string): Promise<void> {
+  async prompt(sessionId: string, text: string, model?: { providerID: string; modelID: string }): Promise<void> {
     await this.request<void>(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       method: 'POST',
-      body: JSON.stringify({ parts: [{ type: 'text', text }] }),
+      // The model must travel with the prompt. Left out, the CLI resolves one
+      // from its own config, which on a fresh install is a placeholder that
+      // does not exist and every send fails with "Model not found".
+      body: JSON.stringify({ parts: [{ type: 'text', text }], ...(model ? { model, providerID: model.providerID } : {}) }),
     });
   }
 

@@ -35,7 +35,7 @@ import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, ty
 import { fileChangeStats } from './line-diff';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
-import { CliClient } from './cli-client';
+import { CliClient, pickCliModel, type CliProviderCatalog } from './cli-client';
 import { CliChatSession, CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
 import type { CliServer } from './cli-server';
@@ -264,6 +264,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private cliClient: CliClient | undefined;
   private cliRegistry: CliSessionRegistry | undefined;
   private readonly cliChats = new Map<string, CliChatSession>();
+  /** Memoised CLI provider catalog, so a send can name a model that exists. */
+  private cliModels: { at: number; catalog: CliProviderCatalog } | undefined;
   private engineReady: Promise<void> | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -433,6 +435,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return undefined;
   }
 
+  /**
+   * The CLI's provider catalog, memoised briefly.
+   *
+   * Only used to pick a model that exists. A failed lookup returns undefined so
+   * the caller can fall back to the CLI's own resolution rather than blocking
+   * every send on a lookup that is currently down.
+   */
+  private async cliProviderCatalog(): Promise<CliProviderCatalog | undefined> {
+    const now = Date.now();
+    if (!this.cliModels || now - this.cliModels.at > 60_000) {
+      try {
+        this.cliModels = { at: now, catalog: (await this.cliClient?.providerCatalog()) ?? { providers: [], defaults: {}, connected: [] } };
+      } catch (error) {
+        this.log('warn', 'cli.models.unavailable', errorMessage(error));
+        return undefined;
+      }
+    }
+    return this.cliModels.catalog;
+  }
+
   private async sendViaCli(conversationId: string, text: string, root?: vscode.Uri): Promise<void> {
     // The composer has already cleared itself, so a send that never reached the
     // CLI would take the user's prompt with it. Both failure paths hand the
@@ -444,10 +466,36 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.post({ type: 'state', conversationId, running: true, label: 'Working' });
+    // Always name a concrete model. The CLI resolves an unspecified one from its
+    // own config, and that default is a placeholder that exists in no provider
+    // (`sleepy/auto-best-coding`), so omitting it fails every send with "Model
+    // not found". The sidebar's pick wins when the CLI actually has it -- the
+    // sidebar lists SleepyCode's models, which the CLI has never heard of.
+    const sending = this.findConversation(conversationId);
+    const selection = sending ? this.selectionFor(sending) : undefined;
+    const preferred = selection?.provider && selection.model
+      ? { providerID: selection.provider, modelID: selection.model }
+      : undefined;
+    const catalog = await this.cliProviderCatalog();
+    const model = pickCliModel(
+      catalog ?? { providers: [], defaults: {}, connected: [] },
+      preferred,
+    );
+    if (preferred && (!catalog || !model || model.providerID !== preferred.providerID || model.modelID !== preferred.modelID)) {
+      this.log('warn', 'cli.model.unknown', `${preferred.providerID}/${preferred.modelID}`);
+      this.post({
+        type: 'error',
+        conversationId,
+        text: model
+          ? `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}". This message will use ${model.providerID}/${model.modelID} instead.`
+          : `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}", and no connected provider to fall back to.`,
+      });
+    }
+    if (!model) this.log('warn', 'cli.model.none', 'no connected provider offers a model');
     // prompt_async creates the real user message in the CLI; the client never
     // writes a synthetic "Continue" turn.
     try {
-      await chat.send(text);
+      await chat.send(text, model);
     } catch (error) {
       const detail = errorMessage(error);
       this.log('error', 'cli.send.failed', detail);

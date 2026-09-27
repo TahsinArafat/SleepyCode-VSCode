@@ -14,7 +14,7 @@
  */
 
 import { findCliBinary, startOrAttach } from './cli-server.ts';
-import { projectMessage, recoverableAssistant, type CliMessage, type ToolLabel } from './cli-projection.ts';
+import { cliErrorText, projectMessage, recoverableAssistant, type CliMessage, type ToolLabel } from './cli-projection.ts';
 import type { CliClient } from './cli-client.ts';
 import type { TranscriptItem } from './types';
 
@@ -47,6 +47,19 @@ export async function resolveEngine(directory: string): Promise<EngineStatus> {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Unwrap a `session.error` payload into something worth showing.
+ *
+ * Shares `cliErrorText` with the projection so a failure reads the same in the
+ * toast and in the transcript card. The old local copy fell back to a vague
+ * "reported a session error with no detail." while a separate copy in the
+ * projection read `error.message`, which the wire format does not have -- so
+ * the reason was lost two different ways depending on which path fired.
+ */
+function sessionErrorText(error: unknown): string {
+  return cliErrorText(error) ?? 'The Sleepy CLI reported a session error with no detail.';
 }
 
 /**
@@ -189,7 +202,7 @@ export class CliChatSession {
         void this.refresh();
         break;
       case 'session.error':
-        this.onError(typeof properties.error === 'string' ? properties.error : 'The CLI reported a session error.');
+        this.onError(sessionErrorText(properties.error));
         void this.refresh();
         break;
       default:
@@ -198,8 +211,8 @@ export class CliChatSession {
   }
 
   /** Create a real user message in the CLI and let the CLI run the loop. */
-  async send(text: string): Promise<void> {
-    await this.client.prompt(this.id, text);
+  async send(text: string, model?: { providerID: string; modelID: string }): Promise<void> {
+    await this.client.prompt(this.id, text, model);
     await this.refresh();
   }
 

@@ -14,6 +14,30 @@
 import type { TranscriptItem, WorkItem } from './types';
 
 /**
+ * Pull a human-readable reason out of a CLI error value.
+ *
+ * The wire shape is a union of `{ name, data: { message } }` variants
+ * (`UnknownError`, `ProviderAuthError`, `APIError`, ...) plus the optional bare
+ * string, verified against sleepy 0.1.19. Reading `error.message` is wrong --
+ * there is no top-level `message`, only `data.message` -- so a failed turn
+ * rendered the bare name ("UnknownError") and hid the actual cause, which is
+ * the one thing the reader needed ("Model not found: sleepy/auto-best-coding").
+ *
+ * `name` is a deliberate last resort, never the first: a category name tells
+ * the reader nothing about what went wrong.
+ */
+export function cliErrorText(error: unknown): string | undefined {
+  if (error === undefined || error === null) return undefined;
+  if (typeof error === 'string') return error.trim() || undefined;
+  if (typeof error !== 'object') return String(error);
+  const { data, message, name } = error as { data?: { message?: unknown }; message?: unknown; name?: unknown };
+  if (data && typeof data.message === 'string' && data.message.trim()) return data.message;
+  if (typeof message === 'string' && message.trim()) return message;
+  if (typeof name === 'string' && name.trim()) return name;
+  return undefined;
+}
+
+/**
  * Maps a CLI tool name and its input to the sidebar's row label ("Reading
  * file"). The caller injects `toolTask` from ./util; keeping it injected means
  * this module stays import-free and unit-testable without a bundler resolving
@@ -62,9 +86,7 @@ export type CliMessageInfo = {
 export type CliMessage = { info: CliMessageInfo; parts?: CliPart[] };
 
 function errorText(error: CliPart['error']): string | undefined {
-  if (!error) return undefined;
-  if (typeof error === 'string') return error;
-  return error.message ?? (error.name ? String(error.name) : undefined);
+  return cliErrorText(error);
 }
 
 function isDone(state: CliPart['state']): boolean {
