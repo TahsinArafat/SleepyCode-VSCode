@@ -16,6 +16,11 @@ test('Git checkpoints record every turn change and restore modified, created, an
   await git(root, ['init', '-q']);
   await git(root, ['config', 'user.email', 'sleepycode@example.invalid']);
   await git(root, ['config', 'user.name', 'SleepyCode Test']);
+  // Git defaults core.autocrlf to true on Windows, which would rewrite the
+  // restored files with CRLF endings. Line-ending conversion is an
+  // environment concern, not the behaviour under test, so pin it here the
+  // same way the identity above is pinned.
+  await git(root, ['config', 'core.autocrlf', 'false']);
   await mkdir(path.join(root, 'nested'));
   await writeFile(path.join(root, 'modified.txt'), 'before\n');
   await writeFile(path.join(root, 'deleted.txt'), 'remove me\n');
@@ -38,12 +43,14 @@ test('Git checkpoints record every turn change and restore modified, created, an
   assert.equal(changes.find(change => change.path === 'modified.txt')?.deletions, 1);
 
   await restoreGitTree(root, before);
-  assert.equal(await readFile(path.join(root, 'modified.txt'), 'utf8'), 'before\n');
-  assert.equal(await readFile(path.join(root, 'deleted.txt'), 'utf8'), 'remove me\n');
+  // Compare raw bytes, not decoded text: this proves the checkout restored the
+  // file exactly, with no line-ending or BOM rewriting.
+  assert.deepEqual(await readFile(path.join(root, 'modified.txt')), Buffer.from('before\n'));
+  assert.deepEqual(await readFile(path.join(root, 'deleted.txt')), Buffer.from('remove me\n'));
   await assert.rejects(readFile(path.join(root, 'nested', 'created.txt'), 'utf8'));
 
   await restoreGitTree(root, after);
-  assert.equal(await readFile(path.join(root, 'modified.txt'), 'utf8'), 'after\nmore\n');
-  assert.equal(await readFile(path.join(root, 'nested', 'created.txt'), 'utf8'), 'new\n');
+  assert.deepEqual(await readFile(path.join(root, 'modified.txt')), Buffer.from('after\nmore\n'));
+  assert.deepEqual(await readFile(path.join(root, 'nested', 'created.txt')), Buffer.from('new\n'));
   await assert.rejects(readFile(path.join(root, 'deleted.txt'), 'utf8'));
 });
