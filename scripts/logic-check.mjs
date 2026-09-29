@@ -113,7 +113,7 @@ check(/renameConversation/.test(agent) && /togglePinConversation/.test(agent) &&
 check(/getWebviewRuntime/.test(webview) && /\.\/webview\/runtime/.test(webview), 'webview runtime is extracted from the HTML renderer');
 check(packageJson.scripts['test:core']?.includes('test/*.direct.mjs') && /model-routing-core\.ts/.test(modelRoutingCoreTest) && /project-index-core\.ts/.test(read('test/project-index-core.direct.mjs')), 'check suite directly tests production project-index and model-routing core modules');
 check(/ubuntu-latest/.test(ci) && /windows-latest/.test(ci) && /macos-latest/.test(ci) && /npm run check/.test(ci) && /npm run build/.test(ci), 'CI validates check and build on Linux, Windows, and macOS');
-check(/vsce package/.test(releaseWorkflow) && /upload-artifact@v4/.test(releaseWorkflow) && /verify:release/.test(releaseWorkflow), 'release workflow validates metadata and packages a VSIX artifact');
+check(/vsce package/.test(releaseWorkflow) && /upload-artifact@v\d+/.test(releaseWorkflow) && /verify:release/.test(releaseWorkflow), 'release workflow validates metadata and packages a VSIX artifact');
 check(packageJson.version === JSON.parse(read('package-lock.json')).version, 'package and lockfile versions match');
 
 check(/fileChangeStats/.test(agent) && /additions: live\.additions/.test(agent) && /function changeStatHtml/.test(webviewRuntime) && /className='changed has-preview'/.test(webviewRuntime) && /changeStatHtml\(plus,minus,true\)/.test(webviewRuntime) && /\.change-plus\{/.test(webviewStyles) && /\.change-stat\.totals\{/.test(webviewStyles), 'file changes persist plus/minus counts and render expandable line previews with a completed-turn total');
