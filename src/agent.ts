@@ -38,6 +38,13 @@ import { BrowserController } from './browser';
 import { CliClient, isPreferredCliModel, pickCliModel, type CliProviderCatalog } from './cli-client';
 import { CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
 import { CliSessionManager } from './cli-session-manager';
+import {
+  DEFAULT_REASONING_EFFORT,
+  normalizeReasoningEffort,
+  reasoningEffortBody,
+  supportsReasoningControl,
+  type ReasoningEffort,
+} from './reasoning-effort';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
 import type { CliServer } from './cli-server';
 import { BrowserPreviewPanel } from './browser-preview';
@@ -205,6 +212,14 @@ type ActiveRun = {
   conversationId: string;
   controller: AbortController;
   steering: boolean;
+};
+
+/** Everything a turn needs to pick its model and its thinking budget. */
+type Selection = {
+  model: string;
+  provider: string;
+  agentId: string;
+  reasoningEffort: ReasoningEffort;
 };
 
 type ProjectMetaEntry = { id?: unknown; name?: unknown; path?: unknown; createdAt?: unknown; updatedAt?: unknown };
@@ -1379,7 +1394,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const selection = this.selectionFor(active);
         const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
         const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
-        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, compactionUndoable, compactionRedoable });
+        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, reasoningSupported: !this.cliOwns(active, this.engineStatus) && supportsReasoningControl(selection.model), compactionUndoable, compactionRedoable });
       }
     }
   }
@@ -2234,6 +2249,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       this.postConfig();
       void this.refreshModels();
+      return;
+    }
+    if (message.type === 'selectReasoningEffort') {
+      // Per-conversation, not global: two chats can legitimately want
+      // different budgets. Unknown values coerce to the default.
+      const effort = normalizeReasoningEffort(message.effort);
+      const conversation = this.activeConversation();
+      if (conversation) {
+        conversation.reasoningEffort = effort;
+        conversation.updatedAt = Date.now();
+        const project = this.activeProject();
+        if (project) project.updatedAt = Date.now();
+        await this.persistProjects();
+      }
+      this.postConfig();
       return;
     }
     if (message.type === 'selectAgent') {
@@ -3144,12 +3174,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         ...mcpConnection.tools,
       }, conversationAgent?.tools);
 
+      // Reasoning effort rides along as provider options so it reaches the
+      // wire only for models that accept it; an unsupported model gets `{}`
+      // and therefore no unexpected 400.
+      const effortBody = reasoningEffortBody(selection.reasoningEffort, model);
       const agent = new ToolLoopAgent({
         model: provider(model),
         maxRetries: 4,
         instructions,
         tools: agentTools,
         stopWhen: maxSteps === 0 ? isLoopFinished() : isStepCount(maxSteps),
+        ...(Object.keys(effortBody).length ? { providerOptions: { [providerConfig.id]: effortBody } } : {}),
       });
 
       let streamPrompt: string;
@@ -4273,12 +4308,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.postConfig();
   }
 
-  private selectionFor(conversation: Conversation): { model: string; provider: string; agentId: string } {
+  private selectionFor(conversation: Conversation): Selection {
     const base = this.config();
     return {
       model: conversation.model ?? base.model,
       provider: conversation.provider ?? base.activeProvider,
       agentId: conversation.agentId ?? base.agentId,
+      reasoningEffort: conversation.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
     };
   }
 
@@ -4293,16 +4329,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return this.context.globalState.get<SubagentModelMap>('sleepycode.subagentModels', {}) ?? {};
   }
 
-  private activeSelection(): { model: string; provider: string; agentId: string } {
+  private activeSelection(): Selection {
     const active = this.activeConversation();
     if (active) return this.selectionFor(active);
     const base = this.config();
-    return { model: base.model, provider: base.activeProvider, agentId: base.agentId };
+    return { model: base.model, provider: base.activeProvider, agentId: base.agentId, reasoningEffort: DEFAULT_REASONING_EFFORT };
   }
 
   private postConfig(): void {
-    const selection = this.activeSelection();
-    this.post({ type: 'config', model: selection.model, provider: selection.provider, approvalMode: this.config().approvalMode, agentId: selection.agentId });
+    const active = this.activeConversation();
+    const selection = active ? this.selectionFor(active) : this.activeSelection();
+    this.post({
+      type: 'config',
+      model: selection.model,
+      provider: selection.provider,
+      approvalMode: this.config().approvalMode,
+      agentId: selection.agentId,
+      reasoningEffort: selection.reasoningEffort,
+      reasoningSupported: (!active || !this.cliOwns(active, this.engineStatus)) && supportsReasoningControl(selection.model),
+    });
   }
 
   private providerConfigured(provider: Provider): boolean {

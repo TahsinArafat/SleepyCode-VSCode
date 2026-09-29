@@ -1,6 +1,7 @@
 import type { ModelMessage } from 'ai';
 import type { FileChangeLine } from './line-diff';
 import type { ProjectIntelligence } from './project-index-core';
+import type { ReasoningEffort } from './reasoning-effort';
 
 export type WebMessage =
   | { type: 'ready' }
@@ -24,6 +25,7 @@ export type WebMessage =
   | { type: 'removeQueued'; conversationId: string; id?: string }
   | { type: 'setKey' }
   | { type: 'selectModel'; model: string; provider?: string }
+  | { type: 'selectReasoningEffort'; effort: string }
   | { type: 'requestSettings' }
   | { type: 'requestExtensionLogs' }
   | { type: 'clearExtensionLogs' }
@@ -218,6 +220,11 @@ export type Conversation = {
   model?: string;
   provider?: string;
   agentId?: string;
+  /**
+   * Per-conversation reasoning effort. Absent means the default ('none'),
+   * which sends no reasoning parameter at all.
+   */
+  reasoningEffort?: ReasoningEffort;
 };
 
 /** User-defined agent that extends the built-in roster with its own model, tool policy, and skills. */
