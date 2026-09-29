@@ -59,9 +59,12 @@ check(/mode:'Build'/.test(webviewCode) && /mode:'Debug'/.test(webviewCode) && /m
 check(/function modelMeta\(/.test(webviewCode) && /per 1M in\/out/.test(webviewCode), 'model picker surfaces context and SleepyAI pricing metadata');
 check(/function changesCard\(/.test(webviewCode) && /Source Control/.test(webviewCode) && /Stage all/.test(webviewCode), 'completed responses expose a workspace changes review card');
 check(/message\.type === 'reviewChanges'/.test(agent) && /workbench\.view\.scm/.test(agent), 'changes review action opens VS Code Source Control');
-check(/const runChanges = new Map/.test(agent) && /assistantItem\.changes = \[\.\.\.runChanges\.values\(\)\]/.test(agent), 'agent persists per-response workspace changes');
+check(/const runChanges = new Map/.test(agent) && /const finalChanges = await completeRunChanges\(\)/.test(agent) && /assistantItem\.changes = finalChanges/.test(agent) && /gitTreeChanges/.test(agent), 'agent persists authoritative per-response workspace changes');
 check(/attachments: item\.attachments/.test(util) && /changes: item\.changes/.test(util) && /errorInfo: item\.errorInfo/.test(util) && /commitHash: item\.commitHash/.test(util) && /commitMessage: item\.commitMessage/.test(util), 'transcript normalization preserves attachments, response changes, structured errors, and Git commit state');
 check(/classifyAgentError/.test(util) && /action_denied/.test(util) && /auth_required/.test(util) && /credits_exhausted/.test(util) && /context_too_large/.test(util), 'agent errors are classified into actionable SleepyAI states');
+check(/const message = providerErrorMessage\(error\)/.test(agent) && /errorInfo\.message = message/.test(agent), 'generation failures persist the exact provider or server interruption message');
+check(/updatePending\(true\)/.test(agent) && /onStepFinish: step =>/.test(agent) && /partialAnswer \|\| resume\?\.partialText/.test(agent), 'partial text, tool activity, and completed tool messages are checkpointed during a local run');
+check(/const editedItem = createTranscriptItem\('user', message\.text\.trim\(\)\)/.test(agent) && /promptContext, true\)/.test(agent), 'edited user messages are persisted before their replacement run starts');
 check(/errorItem\.errorInfo = errorInfo/.test(agent) && /structuredErrorCard/.test(webviewCode), 'generation failures persist and render structured error actions');
 check(/openSleepyDashboard/.test(agent) && /SLEEPY_ACCOUNT_URL/.test(agent), 'billing and error actions can open the first-party SleepyAI account');
 check(/Usage &amp; Billing/.test(webviewCode) && /server-authoritative/.test(webviewCode), 'usage view prioritizes SleepyAI account and billing state over local token counts');
@@ -71,6 +74,7 @@ check(/sessionAutoApproveEditRoots/.test(agent) && /Allow edits for session/.tes
 check(/risk: destructive \? 'high' : 'medium'/.test(agent) && /notify-risk/.test(webviewStyles), 'approval prompts surface a risk level');
 check(/for \(let attempt = 0; ; attempt\+\+\)/.test(agent) && /waitForRetry\(backoffMs, run\.controller\.signal\)/.test(agent) && /throw part\.error/.test(agent), 'retry UI is backed by real abort-aware HTTP retries without discarding structured provider errors');
 check(/MAX_RUN_RETRIES/.test(agent) && /Math\.pow\(2, runAttempt - 1\)/.test(agent) && /attemptInfo\.retryable/.test(agent) && /attemptInfo\.code === 'action_denied'/.test(agent), 'failed or unexpectedly stopped requests auto-retry with exponential backoff and skip non-transient failures');
+check(webviewCode.indexOf('Reasoning history') < webviewCode.indexOf('SleepyCode CLI') && webviewCode.indexOf('SleepyCode CLI') < webviewCode.indexOf('Danger zone'), 'CLI opt-in is placed at the bottom of Advanced settings above the danger zone');
 check(/WEBVIEW_STYLES/.test(webviewCode) && /\.\/webview\/styles/.test(webviewCode), 'webview stylesheet is extracted from the monolithic renderer');
 
 

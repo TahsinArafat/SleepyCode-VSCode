@@ -224,7 +224,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     return {
       code: 'action_denied',
       title: 'Action was not approved',
-      message: 'The task stopped because a requested edit or command was not approved.',
+      message: raw,
       retryable: true,
       primaryAction: 'retry',
       primaryLabel: 'Retry task',
@@ -240,7 +240,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
       ? {
         code: 'auth_required',
         title: 'SleepyAI session expired',
-        message: 'Your SleepyAI session is no longer valid. Sign in again to continue.',
+        message: raw,
         retryable: false,
         primaryAction: 'signin',
         primaryLabel: 'Sign in again',
@@ -263,7 +263,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     return {
       code: 'context_too_large',
       title: 'Context is too large',
-      message: 'This request exceeds the selected model’s context window. Remove some context or choose a model with a larger context window.',
+      message: raw,
       retryable: false,
       primaryAction: 'context',
       primaryLabel: 'Manage context',
@@ -280,7 +280,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
       ? {
         code: 'credits_exhausted',
         title: 'SleepyAI credits unavailable',
-        message: 'Your SleepyAI account does not currently have enough available credit for this request.',
+        message: raw,
         retryable: false,
         primaryAction: 'account',
         primaryLabel: 'Manage plan',
@@ -302,7 +302,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
       ? {
         code: 'account_limit',
         title: 'SleepyAI usage limit reached',
-        message: 'This request is blocked by your current SleepyAI usage allowance or spending limit.',
+        message: raw,
         retryable: false,
         primaryAction: 'account',
         primaryLabel: 'View usage & plan',
@@ -321,7 +321,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     return {
       code: 'rate_limited',
       title: sleepy ? 'SleepyAI is rate limiting requests' : `${providerName} is rate limiting requests`,
-      message: 'Too many requests were sent in a short period. Retry after a short delay.',
+      message: raw,
       retryable: true,
       primaryAction: 'retry',
       primaryLabel: 'Retry',
@@ -336,9 +336,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     return {
       code: 'model_unavailable',
       title: 'Selected model is unavailable',
-      message: sleepy
-        ? 'The selected SleepyAI model is unavailable for this account or request. Choose another model and retry.'
-        : friendlyError(error, provider),
+      message: raw,
       retryable: false,
       primaryAction: 'models',
       primaryLabel: 'Choose model',
@@ -360,7 +358,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     return {
       code: 'service_unavailable',
       title: sleepy ? 'SleepyAI is temporarily unavailable' : `${providerName} is temporarily unavailable`,
-      message: 'The service returned a temporary server error. Retry in a moment.',
+      message: raw,
       retryable: true,
       primaryAction: 'retry',
       primaryLabel: 'Retry',

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
 import { executeTool } from '@ai-sdk/provider-utils';
-import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
+import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, gitTreeChanges, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
@@ -14,7 +14,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
-import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
+import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
@@ -814,13 +814,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async restoreFileSnapshots(rootPath: string, snapshots: FileSnapshot[]): Promise<void> {
+    const failures: string[] = [];
     for (const snap of snapshots) {
       const uri = vscode.Uri.file(path.join(rootPath, snap.path));
       try {
-        if (snap.existed) await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(snap.content));
-        else await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false });
-      } catch { }
+        if (snap.existed) {
+          await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
+          await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(snap.content));
+        } else {
+          try { await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false }); } catch (error) {
+            if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) throw error;
+          }
+        }
+      } catch (error) {
+        failures.push(`${snap.path}: ${errorMessage(error)}`);
+      }
     }
+    if (failures.length) throw new Error(`Could not restore ${failures.length} file${failures.length === 1 ? '' : 's'}:\n${failures.join('\n')}`);
   }
 
   openUsage(): void {
@@ -1714,6 +1724,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.messages = sliceMessagesToItems(conversation.messages, conversation.items);
       conversation.pending = undefined;
       clearForwardStacks(conversation);
+      const editedItem = createTranscriptItem('user', message.text.trim());
+      editedItem.attachments = message.context?.attachments;
+      conversation.items.push(editedItem);
+      if (conversation.items.length === 1) conversation.title = conversationTitle(message.text.trim());
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
@@ -1721,7 +1735,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const editorContext = root ? await this.composerContextBlock(root, message.context) : '';
       const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, message.text.trim()) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
-      void this.run(message.text.trim(), conversation.id, undefined, undefined, message.context, promptContext);
+      void this.run(message.text.trim(), conversation.id, undefined, undefined, message.context, promptContext, true);
       return;
     }
     if (message.type === 'undoLastTurn') {
@@ -1745,12 +1759,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.syncConversations();
         return;
       }
-      const lastItem = conversation.items[conversation.items.length - 1];
       const popped = popLastTurn(conversation);
       if (!popped) return;
       const root = this.workspaceRoot();
-      if (root && lastItem?.fileSnapshot?.length) {
-        popped.snapshot.redoFiles = lastItem.fileSnapshot.map(snap => {
+      const assistantItem = [...popped.popped].reverse().find(item => item.role === 'assistant');
+      if (root && assistantItem?.fileSnapshot?.length) {
+        popped.snapshot.redoFiles = assistantItem.fileSnapshot.map(snap => {
           try {
             return { path: snap.path, existed: true, content: readFileSync(path.join(root.fsPath, snap.path), 'utf8') };
           } catch {
@@ -1762,18 +1776,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (gitTracked && root) {
         try { popped.snapshot.redoGitTree = await captureGitTree(root.fsPath); } catch { }
       }
-      conversation.turnUndo = [...(conversation.turnUndo ?? []), popped.snapshot].slice(-5);
-      conversation.turnRedo = [];
-      if (lastItem?.role === 'assistant') {
+      if (assistantItem) {
         const undoTree = workspaceGitRestoreFromSnapshot(popped.snapshot, 'undo');
-        if (gitTracked && undoTree) {
-          try {
+        try {
+          if (gitTracked && root && undoTree) {
             await restoreGitTree(root.fsPath, undoTree);
-          } catch { }
-        } else if (root && lastItem.fileSnapshot?.length) {
-          await this.restoreFileSnapshots(root.fsPath, lastItem.fileSnapshot);
+          } else if (root && assistantItem.fileSnapshot?.length) {
+            await this.restoreFileSnapshots(root.fsPath, assistantItem.fileSnapshot);
+          }
+        } catch (error) {
+          // Do not claim the turn was undone when its files could not be
+          // restored. Put the transcript and model history back exactly as-is.
+          applyTurnSnapshot(conversation, popped.snapshot as SessionTurnSnapshot<TranscriptItem, ModelMessage>);
+          void vscode.window.showErrorMessage(`Could not restore turn files: ${errorMessage(error)}`);
+          return;
         }
       }
+      conversation.turnUndo = [...(conversation.turnUndo ?? []), popped.snapshot].slice(-5);
+      conversation.turnRedo = [];
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProjects();
@@ -1804,11 +1824,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       applyTurnSnapshot(conversation, snapshot as SessionTurnSnapshot<TranscriptItem, ModelMessage>);
       const root = this.workspaceRoot();
       const redoTree = workspaceGitRestoreFromSnapshot(snapshot, 'redo');
-      if (root && redoTree && isGitTrackedWorkspace(root.fsPath)) {
-        try { await restoreGitTree(root.fsPath, redoTree); } catch { }
-      } else {
-        const redoFiles = workspaceRestoreFromSnapshot(snapshot, 'redo') as FileSnapshot[] | undefined;
-        if (root && redoFiles?.length) await this.restoreFileSnapshots(root.fsPath, redoFiles);
+      try {
+        if (root && redoTree && isGitTrackedWorkspace(root.fsPath)) {
+          await restoreGitTree(root.fsPath, redoTree);
+        } else {
+          const redoFiles = workspaceRestoreFromSnapshot(snapshot, 'redo') as FileSnapshot[] | undefined;
+          if (root && redoFiles?.length) await this.restoreFileSnapshots(root.fsPath, redoFiles);
+        }
+      } catch (error) {
+        // `takeTurnRedo` moved the snapshot to turnRedo and `applyTurnSnapshot`
+        // restored the transcript. Reverse both if workspace restoration fails.
+        popLastTurn(conversation);
+        conversation.turnRedo = conversation.turnRedo?.slice(0, -1) ?? [];
+        conversation.turnUndo = [...(conversation.turnUndo ?? []), snapshot].slice(-5);
+        void vscode.window.showErrorMessage(`Could not redo turn files: ${errorMessage(error)}`);
+        return;
       }
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
@@ -2675,7 +2705,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'queuedPrompt', conversationId, prompts: entries.map(entry => entry.text), ids: entries.map(entry => entry.id) });
   }
 
-  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string; originalUserText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string): Promise<void> {
+  private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string; originalUserText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string, userAlreadyPersisted = false): Promise<void> {
     this.log('info', 'run.enter', `conversation=${conversationId}; chars=${userText.length}`);
     const root = this.workspaceRoot();
     if (!root) {
@@ -2700,17 +2730,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const run: ActiveRun = { conversationId, controller: new AbortController(), steering: false };
     this.runs.set(conversationId, run);
     this.log('info', 'run.registered', conversationId);
+    // A pre-turn Git tree captures every workspace mutation, including files
+    // changed by shell commands that do not emit the edit tools' `changed`
+    // event. This is the authoritative undo checkpoint for tracked projects.
     let runGitTree = gitTracked ? carryTree : undefined;
-    let carriedGitTree = carryTree;
+    if (gitTracked && !runGitTree) {
+      try {
+        runGitTree = await captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 });
+      } catch (error) {
+        this.log('warn', 'run.checkpoint.unavailable', errorMessage(error));
+      }
+    }
+    // Only steering carries this turn's original checkpoint into the replacement
+    // prompt. Ordinary queued follow-ups are new turns and must capture the
+    // workspace as it exists after this one.
+    let carriedGitTree: string | undefined;
     if (resume) {
       this.post({ type: 'resume', conversationId, partialText: resume.partialText ?? '' });
-    } else {
+    } else if (!userAlreadyPersisted) {
       clearForwardStacks(conversation);
       const userItem = createTranscriptItem('user', userText);
       userItem.attachments = composerContext?.attachments;
       conversation.items.push(userItem);
       if (conversation.items.length === 1) conversation.title = conversationTitle(userText);
       this.post({ type: 'user', conversationId, item: userItem });
+      this.notifyHooks('onMessage', { text: userText });
+    } else {
       this.notifyHooks('onMessage', { text: userText });
     }
     conversation.updatedAt = Date.now();
@@ -2772,6 +2817,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
       this.post(next);
+      if (record.type === 'changed') updatePending(true);
     };
     const activeTasks = new Map<string, WorkItem>();
     const reasoningLimit = this.config().maxPersistedReasoning;
@@ -2783,6 +2829,35 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let planItem: WorkItem | undefined;
     let planState: PlanState | undefined;
     let mcpConnection: McpConnection | undefined;
+    // Keep the in-progress record durable while text is streaming and whenever
+    // a tool starts/finishes or changes a file. Completed SDK response messages
+    // are merged by onStepFinish below, so tool calls/results survive a later
+    // server interruption as model-visible history too.
+    const updatePending = (force = false): void => {
+      conversation.pending = {
+        userText: historyUserText,
+        messages: runMessages.slice(),
+        startedAt: workStartedAt || Date.now(),
+        partialText: (partialAnswer || resume?.partialText) || undefined,
+        work: work.slice(-80),
+        changes: [...runChanges.values()],
+        fileSnapshot: [...snapshotByPath.values()],
+        gitTree: runGitTree,
+      };
+      void this.checkpointConversation(conversation, force);
+    };
+    const completeRunChanges = async (): Promise<FileChange[]> => {
+      if (gitTracked && runGitTree) {
+        try {
+          const postTree = await captureGitTree(root.fsPath, { timeoutMs: 15_000 });
+          const treeChanges = await gitTreeChanges(root.fsPath, runGitTree, postTree);
+          if (treeChanges.length) return treeChanges.map(change => ({ ...change, preview: runChanges.get(change.path)?.preview }));
+        } catch (error) {
+          this.log('warn', 'run.changes.unavailable', errorMessage(error));
+        }
+      }
+      return [...runChanges.values()];
+    };
     const describePlan = (): string => {
       const current = planState;
       if (!current) return 'No plan yet: call the plan tool with title and steps to create one.';
@@ -3332,6 +3407,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 workStartedAt ||= Date.now();
                 this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text });
                 this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
+                updatePending(true);
               },
               onToolExecutionEnd: ({ toolCall }) => {
                 this.notifyHooks('afterTool', { tool: toolCall.toolName });
@@ -3339,6 +3415,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 const taskEntry = activeTasks.get(toolCall.toolCallId);
                 if (taskEntry) taskEntry.done = true;
                 this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
+                updatePending(true);
+              },
+              onStepFinish: step => {
+                const completed = (step.response.messages ?? []) as ModelMessage[];
+                if (completed.length) runMessages.push(...completed.filter(message => message.role !== 'system'));
+                updatePending(true);
               },
             });
 
@@ -3350,6 +3432,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                   answer += content;
                   if (answer.length > partialAnswer.length) partialAnswer = answer;
                   this.post({ type: 'delta', conversationId, text: content });
+                  updatePending();
                 }
                 if (thinking) {
                   reasoningBuffer = rememberReasoningText(reasoningBuffer, thinking, reasoningLimit).text;
@@ -3400,8 +3483,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Capture the structured turn (assistant message with tool calls + the
             // tool results) so it can be persisted for the next user turn.
             if (!run.controller.signal.aborted) {
-              const responseMessages = (await result.responseMessages) ?? [];
-              runMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              // onStepFinish already checkpoints each completed step. Keep the
+              // aggregate result only as a compatibility fallback for providers
+              // that do not emit step callbacks; otherwise it would duplicate
+              // tool calls and results in the next request.
+              if (!runMessages.length) {
+                const responseMessages = (await result.responseMessages) ?? [];
+                runMessages.push(...(responseMessages as ModelMessage[]).filter(message => message.role !== 'system'));
+              }
               // Some reasoning models must reread their previous thinking. Keep the
               // live buffer (native deltas + XML <think>) on the latest assistant
               // message so the next step/continue/resume still has it.
@@ -3409,19 +3498,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               // Checkpoint after every completed iteration. If VS Code reloads, the
               // connection drops, or the model errors mid-run, this partial turn is
               // recoverable instead of being lost and re-read from scratch.
-              conversation.pending = {
-                userText: historyUserText,
-                messages: runMessages.slice(),
-                startedAt: workStartedAt || Date.now(),
-                partialText: (partialAnswer.trim() || resume?.partialText) || undefined,
-                work: work.slice(-80),
-                changes: [...runChanges.values()],
-                fileSnapshot: [...snapshotByPath.values()],
-                gitTree: runGitTree,
-              };
-              // Coalesced: a long run must not rewrite storage on every tool
-              // iteration. Stop, error, and done force their own flush below.
-              void this.checkpointConversation(conversation);
+              // Coalesced: a long run must not rewrite storage on every token;
+              // tools and terminal outcomes force their own flushes.
+              updatePending();
             }
             const usage = await result.usage;
             if (usage?.inputTokens || usage?.outputTokens) {
@@ -3466,7 +3545,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             assistantItem.pauseReason = 'max_steps';
             assistantItem.pauseLimit = maxSteps;
           }
-          if (runChanges.size) assistantItem.changes = [...runChanges.values()];
+          const finalChanges = await completeRunChanges();
+          if (finalChanges.length) assistantItem.changes = finalChanges;
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           // Persist the structured model history so the next turn keeps prior tool
           // calls and their results in context instead of re-reading files.
@@ -3525,18 +3605,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // the transcript shows it once instead of twice.
           const stoppedItem = createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
           if (model) stoppedItem.model = model;
+          const stoppedChanges = await completeRunChanges();
           const fields = interruptedAssistantFields({
             userText: historyUserText,
             reason: 'stop',
             message: INTERRUPTED_TURN_TEXT,
             work,
-            changes: [...runChanges.values()],
+            changes: stoppedChanges,
             fileSnapshot: [...snapshotByPath.values()],
             gitTree: runGitTree,
             partialText: partialAnswer.trim() || resume?.partialText,
           });
           stoppedItem.partialText = fields.partialText;
-          if (runChanges.size) stoppedItem.changes = fields.changes as FileChange[];
+          if (stoppedChanges.length) stoppedItem.changes = fields.changes as FileChange[];
           if (snapshotByPath.size) stoppedItem.fileSnapshot = fields.fileSnapshot as FileSnapshot[];
           conversation.items.push(stoppedItem);
           this.boundConversationItems(conversation);
@@ -3548,23 +3629,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       } else {
         if (reconnectAttempt) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: reconnectAttempt, max: 5 });
         const errorInfo = classifyAgentError(error, providerConfig);
-        const message = errorInfo.message;
+        // Never replace an interruption with a generated wrap-up. The transcript
+        // must show the exact provider/tool/server error that terminated the run.
+        const message = providerErrorMessage(error);
+        errorInfo.message = message;
         if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
         if (model) errorItem.model = model;
         errorItem.errorInfo = errorInfo;
+        const failedChanges = await completeRunChanges();
         const fields = interruptedAssistantFields({
           userText: historyUserText,
           reason: 'error',
           message,
           work,
-          changes: [...runChanges.values()],
+          changes: failedChanges,
           fileSnapshot: [...snapshotByPath.values()],
           gitTree: runGitTree,
           partialText: partialAnswer.trim() || undefined,
         });
         errorItem.partialText = fields.partialText;
-        if (runChanges.size) errorItem.changes = fields.changes as FileChange[];
+        if (failedChanges.length) errorItem.changes = fields.changes as FileChange[];
         if (snapshotByPath.size) errorItem.fileSnapshot = fields.fileSnapshot as FileSnapshot[];
         // Keep the work already done: merge the partial turn's tool calls and
         // results into the structured history so a retry continues instead of

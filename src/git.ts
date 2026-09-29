@@ -2,7 +2,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { MAX_TOOL_OUTPUT } from './types';
+// Kept local so this filesystem-only module remains dependency-free and can be
+// exercised directly by the strip-types test runner.
+const MAX_TOOL_OUTPUT = 40_000;
 
 export function isGitTrackedWorkspace(rootPath?: string): boolean {
   if (!rootPath) return false;
@@ -184,6 +186,44 @@ export async function gitChangedPathsBetween(rootPath: string, fromTree: string,
   if (!paths.length) return [];
   const output = await runGit(['diff', '--name-only', fromTree, toTree, '--', ...paths], rootPath);
   return output.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+}
+
+export type GitTreeChange = {
+  path: string;
+  action: 'Created' | 'Modified' | 'Deleted';
+  additions: number;
+  deletions: number;
+};
+
+/** Summarize every workspace change between two checkpoint trees. */
+export async function gitTreeChanges(rootPath: string, fromTree: string, toTree: string): Promise<GitTreeChange[]> {
+  if (!fromTree || !toTree || fromTree === toTree) return [];
+  const [statuses, stats] = await Promise.all([
+    runGit(['diff', '--name-status', '--no-renames', fromTree, toTree, '--', '.'], rootPath),
+    runGit(['diff', '--numstat', '--no-renames', fromTree, toTree, '--', '.'], rootPath),
+  ]);
+  const statByPath = new Map<string, { additions: number; deletions: number }>();
+  for (const line of stats.split(/\r?\n/)) {
+    const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+    if (!match) continue;
+    statByPath.set(match[3]!, {
+      additions: match[1] === '-' ? 0 : Number(match[1]),
+      deletions: match[2] === '-' ? 0 : Number(match[2]),
+    });
+  }
+  const changes: GitTreeChange[] = [];
+  for (const line of statuses.split(/\r?\n/)) {
+    const match = line.match(/^([AMD])\t(.+)$/);
+    if (!match) continue;
+    const filePath = match[2]!;
+    const stat = statByPath.get(filePath) ?? { additions: 0, deletions: 0 };
+    changes.push({
+      path: filePath,
+      action: match[1] === 'A' ? 'Created' : match[1] === 'D' ? 'Deleted' : 'Modified',
+      ...stat,
+    });
+  }
+  return changes;
 }
 
 export async function commitGit(rootPath: string, message: string): Promise<string> {

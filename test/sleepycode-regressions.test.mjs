@@ -496,7 +496,7 @@ test('compaction and rollbacks keep structured history in sync with the transcri
   assert.match(runtime, /if\(next\.partialText\)\{[\s\S]{0,300}markdown\(next\.partialText\)/);
   assert.match(sessionCore, /export const INTERRUPTED_TURN_TEXT/);
   // A fresh send (no resume) is what invalidates undone/redone turns.
-  assert.match(agent, /if \(resume\) \{[\s\S]{0,400}\} else \{[\s\S]{0,200}clearForwardStacks\(conversation\)/);
+  assert.match(agent, /if \(resume\) \{[\s\S]{0,400}\} else if \(!userAlreadyPersisted\) \{[\s\S]{0,200}clearForwardStacks\(conversation\)/);
   // Checkpointing writes only the dirty project, not every project on flush.
   assert.match(agent, /private persistProject\(/);
   assert.match(agent, /checkpointConversation\(conversation: Conversation, force = false\)[\s\S]{0,600}this\.persistProject\(project\)/);
@@ -507,7 +507,7 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   // Partial structured messages are checkpointed after every completed iteration.
   assert.match(agent, /conversation\.pending = \{\s*userText: historyUserText,\s*messages: runMessages\.slice\(\),\s*startedAt:/s);
   assert.match(types, /pending\?: \{[\s\S]*userText: string;[\s\S]*messages: ModelMessage\[\];[\s\S]*startedAt: number;[\s\S]*partialText\?: string;/);
-  assert.match(agent, /checkpointConversation\(conversation\)/);
+  assert.match(agent, /updatePending\(\)/);
   assert.match(agent, /workspaceRestoreFromSnapshot\(snapshot, 'redo'\)/);
   // The abort branch folds the partial turn into history and clears pending.
   assert.match(agent, /if \(run\.controller\.signal\.aborted\) \{[\s\S]{0,400}appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
