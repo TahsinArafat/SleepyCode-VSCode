@@ -36,7 +36,8 @@ import { fileChangeStats } from './line-diff';
 import { listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
 import { CliClient, isPreferredCliModel, pickCliModel, type CliProviderCatalog } from './cli-client';
-import { CliChatSession, CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
+import { CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
+import { CliSessionManager } from './cli-session-manager';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
 import type { CliServer } from './cli-server';
 import { BrowserPreviewPanel } from './browser-preview';
@@ -263,12 +264,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private cliServer: CliServer | undefined;
   private cliClient: CliClient | undefined;
   private cliRegistry: CliSessionRegistry | undefined;
-  private readonly cliChats = new Map<string, CliChatSession>();
+  private cliSessions: CliSessionManager | undefined;
   /** Memoised CLI provider catalog, so a send can name a model that exists. */
   private cliModels: { at: number; catalog: CliProviderCatalog } | undefined;
   /** Conversations already told their sidebar model is not a CLI model. */
   private readonly cliModelNotices = new Set<string>();
   private engineReady: Promise<void> | undefined;
+  /** Which setting `engineReady` resolved under, so a toggle can re-resolve without racing the resolve in flight. */
+  private engineUseCli: boolean | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
@@ -292,23 +295,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * mode the CLI process owns `sleepy.db` and we never open it.
    */
   private async ensureEngine(): Promise<EngineStatus> {
-    if (this.engineReady) {
+    const useCli = vscode.workspace.getConfiguration('sleepycode').get<boolean>('useCli', false);
+    if (this.engineReady && this.engineUseCli === useCli) {
       await this.engineReady;
       return this.engineStatus;
     }
+    if (this.engineReady) await this.engineReady.catch(() => undefined);
+    this.engineUseCli = useCli;
     this.engineReady = (async () => {
       const directory = this.workspaceRoot()?.fsPath;
       if (!directory) {
         this.engineStatus = { mode: 'local', reason: 'No folder is open, so this window uses the offline agent.' };
         return;
       }
-      this.engineStatus = await resolveEngine(directory);
+      this.engineStatus = await resolveEngine(directory, useCli);
       if (this.engineStatus.mode === 'cli' && this.engineStatus.url) {
         this.cliClient = new CliClient(this.engineStatus.url, directory);
         this.cliRegistry = new CliSessionRegistry({
           get: key => this.context.globalState.get<string>(key),
           set: (key, value) => { void this.context.globalState.update(key, value); },
         });
+        this.cliSessions = new CliSessionManager(this.cliClient, this.cliRegistry, directory, conversationId => ({
+          label: (tool, input) => toolTask(tool, input),
+          update: (items, busy) => this.applyCliProjection(conversationId, items, busy),
+          error: detail => this.post({ type: 'error', conversationId, text: detail }),
+          permission: permission => this.post({
+            type: 'permission',
+            conversationId,
+            permissionId: permission.id,
+            title: permission.title ?? 'The CLI is asking for permission.',
+          }),
+          live: event => this.applyCliLiveEvent(conversationId, event),
+        }));
       }
     })();
     await this.engineReady;
@@ -316,11 +334,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async shutdownCli(): Promise<void> {
-    for (const chat of this.cliChats.values()) chat.dispose();
-    this.cliChats.clear();
+    this.cliSessions?.dispose();
     // Only stop a server this extension started; an attached one is not ours.
     if (this.cliServer?.owned) this.cliServer.child?.kill();
     this.cliServer = undefined;
+    this.cliSessions = undefined;
     this.cliClient = undefined;
   }
 
@@ -367,49 +385,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
-  private async cliChatFor(conversationId: string, root?: vscode.Uri): Promise<CliChatSession | undefined> {
-    const existing = this.cliChats.get(conversationId);
-    if (existing) return existing;
-    const client = this.cliClient;
-    const registry = this.cliRegistry;
-    if (!client || !registry) return undefined;
-
-    const directory = root?.fsPath ?? this.workspaceRoot()?.fsPath;
-    if (!directory) return undefined;
-
-    let sessionId = registry.sessionFor(conversationId);
-    if (!sessionId || !(await this.cliSessionExists(client, sessionId))) {
-      const session = await client.createSession(directory);
-      sessionId = session.id;
-      registry.bind(conversationId, sessionId);
-    }
-
-    const chat = new CliChatSession(
-      client,
-      sessionId,
-      (tool, input) => toolTask(tool, input),
-      (items, busy) => this.applyCliProjection(conversationId, items, busy),
-      detail => this.post({ type: 'error', conversationId, text: detail }),
-      permission => this.post({
-        type: 'permission',
-        conversationId,
-        permissionId: permission.id,
-        title: permission.title ?? 'The CLI is asking for permission.',
-      }),
-    );
-    this.cliChats.set(conversationId, chat);
-    await chat.open();
-    return chat;
-  }
-
-  private async cliSessionExists(client: CliClient, sessionId: string): Promise<boolean> {
-    try {
-      await client.messages(sessionId);
-      return true;
-    } catch {
-      // A remembered session the CLI no longer has is not reusable.
-      return false;
-    }
+  private cliChatFor(conversationId: string, _root?: vscode.Uri) {
+    return this.cliSessions?.open(conversationId) ?? Promise.resolve(undefined);
   }
 
   /**
@@ -427,7 +404,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     conversation.pending = undefined;
     this.boundConversationItems(conversation);
     this.post({ type: 'state', conversationId, running: busy, label: busy ? 'Working' : '' });
+    // A full conversation republish wipes the streaming node. Keep the
+    // in-memory items while the CLI is busy; rebuild the settled transcript
+    // only when idle. Clear the webview's live buffer first, otherwise
+    // renderConversation() draws the settled answer and renderLive() appends
+    // the same streamed text a second time.
+    if (busy) return;
+    this.post({ type: 'cliSettled', conversationId });
     this.syncConversations();
+  }
+
+  private applyCliLiveEvent(conversationId: string, event: import('./cli-engine').CliLiveEvent): void {
+    if (event.kind === 'delta') this.post({ type: 'delta', conversationId, text: event.text });
+    else if (event.kind === 'reasoningDelta') this.post({ type: 'reasoningDelta', conversationId, text: event.text });
+    else this.post({ type: 'tool', conversationId, phase: event.phase, id: event.id, tool: event.tool, name: event.name, failed: event.failed });
   }
 
   private findConversation(conversationId: string): Conversation | undefined {
@@ -497,6 +487,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.post({
           type: 'error',
           conversationId,
+          keepTurn: true,
           text: model
             ? `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}". This conversation will use ${model.providerID}/${model.modelID} instead.`
             : `The Sleepy CLI has no model "${preferred.modelID}" under provider "${preferred.providerID}", and no connected provider to fall back to.`,
@@ -521,7 +512,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // Open the chat if it is not in memory yet: a reloaded window has an empty
     // map even though the conversation still lives in the CLI, and failing here
     // would silently resume it with the local agent instead.
-    const chat = this.cliChats.get(conversationId) ?? (await this.cliChatFor(conversationId, root));
+    const chat = this.cliSessions?.get(conversationId) ?? (await this.cliChatFor(conversationId, root));
     if (!chat) return false;
     const resumed = await chat.continueTurn();
     if (!resumed) {
@@ -531,7 +522,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async stopViaCli(conversationId: string): Promise<boolean> {
-    const chat = this.cliChats.get(conversationId);
+    const chat = this.cliSessions?.get(conversationId);
     if (!chat) return false;
     await chat.stop();
     return true;
@@ -550,7 +541,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private async undoViaCli(conversation: Conversation, root?: vscode.Uri): Promise<boolean> {
     if (!this.cliOwns(conversation, this.engineStatus)) return false;
-    const chat = this.cliChats.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
+    const chat = this.cliSessions?.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
     if (!chat) return false;
     // The CLI picks its own revert target, so it can also tell us when there is
     // no finished assistant turn to rewind. Falling through to the local stack
@@ -564,7 +555,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private async redoViaCli(conversation: Conversation, root?: vscode.Uri): Promise<boolean> {
     if (!this.cliOwns(conversation, this.engineStatus)) return false;
-    const chat = this.cliChats.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
+    const chat = this.cliSessions?.get(conversation.id) ?? (await this.cliChatFor(conversation.id, root));
     if (!chat) return false;
     await chat.redo();
     return true;
@@ -1003,6 +994,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       confirmDelete: this.confirmDeleteConversations(),
       compactionModel: config.compactionModel,
       maxPersistedReasoning: config.maxPersistedReasoning,
+      useCli: config.useCli,
       initialSetup,
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
       subagentModels: this.subagentModels(),
@@ -1200,9 +1192,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private newConversation(): void {
     const project = this.activeProject();
     if (!project) return;
-    const empty = project.conversations.find(item => !item.archived && item.items.length === 0);
-    const conversation = empty ?? this.createConversation();
-    if (!empty) project.conversations.unshift(conversation);
+    // "New conversation" is an identity boundary, not "find an empty tab".
+    // Always mint a new extension id so it cannot inherit any persisted or
+    // in-flight CLI binding, even when another conversation currently looks
+    // empty because its first CLI projection has not arrived yet.
+    const conversation = this.createConversation();
+    project.conversations.unshift(conversation);
     project.activeConversationId = conversation.id;
     project.updatedAt = Date.now();
     void this.persistProjects();
@@ -1585,9 +1580,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // are untouched and stay reachable from the CLI, but leaving the binding
       // here would let a later conversation that reuses this id silently adopt
       // the deleted one's session.
-      this.cliRegistry?.forget(message.id);
-      this.cliChats.get(message.id)?.dispose();
-      this.cliChats.delete(message.id);
+      this.cliSessions?.forget(message.id);
       void this.context.globalState.update(`sleepycode.compactionSnapshots.${message.id}`, undefined);
       project.conversations = project.conversations.filter(item => item.id !== message.id);
       project.updatedAt = Date.now();
@@ -1978,6 +1971,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await config.update('maxSteps', maxSteps, vscode.ConfigurationTarget.Global);
         await config.update('maxPersistedReasoning', maxPersistedReasoning, vscode.ConfigurationTarget.Global);
         await config.update('extraFreeModels', message.extraFreeModels ?? '', vscode.ConfigurationTarget.Global);
+        await config.update('useCli', Boolean(message.useCli), vscode.ConfigurationTarget.Global);
         await this.context.globalState.update('sleepycode.providers', providers);
         await this.context.globalState.update('sleepycode.activeProvider', activeProvider);
         const currentProviderIds = new Set(providers.map(provider => provider.id));
@@ -2004,6 +1998,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           this.apiKeys[activeProvider] = message.apiKey.trim();
         }
         this.post({ type: 'settingsResult', ok: true, text: 'Settings saved.' });
+        await this.ensureEngine();
         await this.refreshModels();
       } catch (error) {
         this.post({ type: 'settingsResult', ok: false, text: errorMessage(error) });
@@ -2198,6 +2193,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await config.update('maxPersistedReasoning', DEFAULT_PERSISTED_REASONING, vscode.ConfigurationTarget.Global);
       await config.update('extraFreeModels', '', vscode.ConfigurationTarget.Global);
       await config.update('model', '', vscode.ConfigurationTarget.Global);
+      await config.update('useCli', false, vscode.ConfigurationTarget.Global);
       await this.context.globalState.update('sleepycode.providers', defaults);
       await this.context.globalState.update('sleepycode.activeProvider', defaults[0]?.id ?? '');
       await this.context.globalState.update('sleepycode.approvalMode', 'ask');
@@ -4247,6 +4243,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       onlyDefaultModels: this.context.globalState.get<boolean>('sleepycode.onlyDefaultModels', true),
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
       compactionModel: this.context.globalState.get<string>('sleepycode.compactionModel', ''),
+      useCli: config.get<boolean>('useCli', false),
     };
   }
 

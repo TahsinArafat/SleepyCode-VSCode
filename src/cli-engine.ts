@@ -6,12 +6,10 @@
  * extension only renders its events. The local `ToolLoopAgent` stays as the
  * offline fallback for machines without the CLI.
  *
- * The CLI is now the primary engine, not an opt-in experiment. Any conversation
- * that has not accumulated local history yet goes to the CLI when the binary is
- * reachable. Conversations that already hold local turns stay local because the
- * CLI has no import path for them (there is no route that accepts pre-written
- * history without re-running the model, which would re-spend the user's credits
- * and fabricate a transcript that never happened).
+ * The CLI is an experimental, opt-in engine. The local `ToolLoopAgent` stays
+ * the default until the user ticks Settings → Advanced → "Use SleepyCode CLI
+ * when available". Conversations already bound to a CLI session keep that
+ * client: their history lives in sleepy.db with no import path back.
  *
  * The engine is resolved once per conversation and pinned. Swapping engines mid-
  * conversation would mix tool ids, permission rules, and compaction watermarks,
@@ -19,7 +17,7 @@
  */
 
 import { findCliBinary, startOrAttach } from './cli-server.ts';
-import { cliErrorText, applyPausedProjection, projectMessage, recoverableAssistant, type CliMessage, type ToolLabel } from './cli-projection.ts';
+import { applyCliPartDelta, applyCliPartUpdated, cliErrorText, applyPausedProjection, projectMessage, recoverableAssistant, type CliMessage, type CliPart, type ToolLabel } from './cli-projection.ts';
 import type { CliClient } from './cli-client.ts';
 import type { TranscriptItem } from './types';
 
@@ -37,12 +35,16 @@ const SESSION_KEY = 'sleepycode.cliSessionId';
 /**
  * Decide the engine for a workspace.
  *
- * The CLI wins whenever it is installed and can serve. The local loop is the
- * fallback for machines without the CLI or when the server cannot start.
+ * The CLI only wins when the user has opted in *and* the binary can serve.
+ * Off (the default) the local agent stays in charge and the CLI is not even
+ * probed for, so the stable path has no dependency on the CLI being installed.
  */
-export async function resolveEngine(directory: string): Promise<EngineStatus> {
+export async function resolveEngine(directory: string, useCli = false): Promise<EngineStatus> {
+  if (!useCli) {
+    return { mode: 'local', reason: 'The SleepyCode CLI is an experimental option and is turned off in Settings → Advanced, so this window uses the stable local agent.' };
+  }
   if (!findCliBinary()) {
-    return { mode: 'local', reason: 'The Sleepy CLI is not installed. Install it to use the full agentic experience; the local agent is running as a fallback.' };
+    return { mode: 'local', reason: 'The Sleepy CLI is not installed, so this window uses the offline agent.' };
   }
   try {
     const server = await startOrAttach({ directory });
@@ -124,6 +126,11 @@ export class CliSessionRegistry {
   }
 }
 
+export type CliLiveEvent =
+  | { kind: 'delta'; text: string }
+  | { kind: 'reasoningDelta'; text: string }
+  | { kind: 'tool'; phase: 'start' | 'end'; id: string; tool?: string; name?: string; failed?: boolean };
+
 /** Live bridge between one CLI session and the sidebar projection. */
 export class CliChatSession {
   private readonly controller = new AbortController();
@@ -134,6 +141,7 @@ export class CliChatSession {
   private readonly onUpdate: (items: TranscriptItem[], busy: boolean) => void;
   private readonly onError: (message: string) => void;
   private readonly onPermission: (permission: { id: string; title?: string }) => void;
+  private readonly onLive?: (event: CliLiveEvent) => void;
   /** Last rows the CLI returned, so a busy-state repaint keeps the transcript. */
   private lastMessages: CliMessage[] = [];
   /** Monotonic id of the newest refresh; older replies are dropped. */
@@ -148,6 +156,7 @@ export class CliChatSession {
     onUpdate: (items: TranscriptItem[], busy: boolean) => void,
     onError: (message: string) => void,
     onPermission: (permission: { id: string; title?: string }) => void,
+    onLive?: (event: CliLiveEvent) => void,
   ) {
     this.client = client;
     this.id = id;
@@ -155,6 +164,7 @@ export class CliChatSession {
     this.onUpdate = onUpdate;
     this.onError = onError;
     this.onPermission = onPermission;
+    this.onLive = onLive;
   }
 
   /** Load current history and start following server events. */
@@ -226,9 +236,40 @@ export class CliChatSession {
         void this.refresh();
         break;
       case 'message.updated':
-      case 'message.part.updated':
+        this.busy = true;
         void this.refresh();
         break;
+      case 'message.part.updated': {
+        this.busy = true;
+        const part = properties.part as CliPart | undefined;
+        if (part && applyCliPartUpdated(this.lastMessages, part)) {
+          this.publish(this.lastMessages, true);
+          // Text is streamed only by message.part.delta. Emitting text again
+          // from the full snapshot duplicates providers that publish both
+          // events for the same content. Full updates still drive tool state.
+          this.emitLiveFromPart(part);
+          break;
+        }
+        void this.refresh();
+        break;
+      }
+      case 'message.part.delta': {
+        this.busy = true;
+        const delta = {
+          messageID: String(properties.messageID ?? ''),
+          partID: String(properties.partID ?? ''),
+          field: String(properties.field ?? ''),
+          delta: String(properties.delta ?? ''),
+        };
+        // Never refresh on a token. A GET started before the part existed
+        // would republish a stale snapshot and the next tokens would miss
+        // lastMessages again — the sidebar only paints on idle.
+        if (applyCliPartDelta(this.lastMessages, delta)) {
+          this.publish(this.lastMessages, true);
+          this.emitLiveFromDelta(delta);
+        }
+        break;
+      }
       case 'permission.asked':
         this.busy = true;
         this.onPermission({
@@ -259,8 +300,38 @@ export class CliChatSession {
     }
   }
 
+  private findPart(messageID?: string, partID?: string): CliPart | undefined {
+    if (!messageID || !partID) return undefined;
+    return this.lastMessages.find(row => row.info?.id === messageID)?.parts?.find(row => row.id === partID);
+  }
+
+  private emitLiveFromDelta(event: { messageID: string; partID: string; field: string; delta: string }): void {
+    if (!this.onLive || event.field !== 'text' || !event.delta) return;
+    const part = this.findPart(event.messageID, event.partID);
+    // Unknown parts default to visible text so a token that arrived before
+    // part.updated still paints. A later reasoning upsert corrects the type.
+    if (part?.type === 'reasoning') this.onLive({ kind: 'reasoningDelta', text: event.delta });
+    else this.onLive({ kind: 'delta', text: event.delta });
+  }
+
+  private emitLiveFromPart(part: CliPart): void {
+    if (!this.onLive || part.type !== 'tool') return;
+    const status = part.state?.status;
+    const id = part.callID || part.id || 'tool';
+    const name = this.label(part.tool ?? 'tool', part.state?.input);
+    if (status === 'pending' || status === 'running') {
+      this.onLive({ kind: 'tool', phase: 'start', id, tool: part.tool, name });
+      return;
+    }
+    if (status === 'completed' || status === 'error' || status === 'aborted') {
+      this.onLive({ kind: 'tool', phase: 'end', id, tool: part.tool, name, failed: status !== 'completed' });
+    }
+  }
+
   /** Create a real user message in the CLI and let the CLI run the loop. */
   async send(text: string, model?: { providerID: string; modelID: string }): Promise<void> {
+    this.busy = true;
+    this.publish(this.lastMessages, true);
     await this.client.prompt(this.id, text, model);
     await this.refresh();
   }

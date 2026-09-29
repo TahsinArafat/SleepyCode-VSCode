@@ -579,6 +579,46 @@ test('the extension is a client: it never opens the CLI database', () => {
   assert.doesNotMatch(cliClient, /sleepy\.db/);
 });
 
+test('a busy CLI turn keeps the live renderer instead of rebuilding the transcript', () => {
+  const start = agent.indexOf('private applyCliProjection');
+  const body = agent.slice(start, start + 1600);
+  assert.match(body, /if \(busy\) return;/);
+  assert.match(body, /applyCliLiveEvent/);
+  assert.match(cliEngine, /case 'message\.part\.delta'/);
+  assert.match(cliEngine, /applyCliPartDelta/);
+  // Tokens that arrive before the GET has the new part must still paint.
+  assert.match(cliEngine, /Never refresh on a token/);
+  assert.match(cliProjection, /Invent the message\/part here/);
+  // A mismatch notice must not finish() the live turn, or later tokens vanish.
+  assert.match(agent, /keepTurn: true/);
+  assert.match(runtime, /if\(!m\.keepTurn\)finish\(\)/);
+  // Idle projection replaces the stream; clear its live buffer first or the
+  // settled assistant text is appended a second time by renderLive().
+  assert.match(agent, /type: 'cliSettled'/);
+  assert.match(runtime, /case'cliSettled':\{liveByConversation\.delete/);
+  // Full text snapshots and token deltas can describe the same bytes. Only the
+  // delta event may feed the text renderer.
+  assert.doesNotMatch(cliEngine, /part\.type === 'text'[\s\S]{0,200}kind: 'delta'/);
+});
+
+test('new conversation always mints a new extension conversation identity', () => {
+  const start = agent.indexOf('private newConversation()');
+  const body = agent.slice(start, agent.indexOf('/**', start + 30));
+  assert.match(body, /const conversation = this\.createConversation\(\)/);
+  assert.doesNotMatch(body, /find\(item =>/);
+  assert.match(body, /project\.conversations\.unshift\(conversation\)/);
+});
+
+test('the Sleepy CLI is an experimental opt-in, not the default engine', () => {
+  const manifest = read('package.json');
+  assert.match(manifest, /"sleepycode.useCli"/);
+  assert.match(manifest, /"sleepycode.useCli"[\s\S]{0,200}"default": false/);
+  assert.match(cliEngine, /export async function resolveEngine\(directory: string, useCli/);
+  assert.match(agent, /get<boolean>\('useCli', false\)/);
+  assert.match(webviewHtml, /id="useCli"/);
+  assert.match(runtime, /useCli:Boolean\(useCli&&useCli.checked\)/);
+});
+
 test('CLI mode routes the send path to the CLI instead of the local loop', () => {
   assert.match(cliEngine, /export async function resolveEngine/);
   // A conversation with no history of its own goes to the CLI, so the local
@@ -658,11 +698,13 @@ test('deleting a conversation releases its CLI session binding', () => {
   // the deleted one's session, and the sidebar would show someone else's chat.
   const start = agent.indexOf("message.type === 'deleteConversation'");
   const body = agent.slice(start, start + 2000);
-  assert.match(body, /this\.cliRegistry\?\.forget\(message\.id\)/);
-  // The live stream for that session must be torn down too, or a deleted
-  // conversation keeps posting projections into the sidebar.
-  assert.match(body, /this\.cliChats\.get\(message\.id\)\?\.dispose\(\)/);
-  assert.match(body, /this\.cliChats\.delete\(message\.id\)/);
+  assert.match(body, /this\.cliSessions\?\.forget\(message\.id\)/);
+  // CliSessionManager.forget owns both persisted binding removal and live/
+  // in-flight chat disposal, so deletion cannot leave a posting stream behind.
+  const manager = read('src/cli-session-manager.ts');
+  assert.match(manager, /this\.registry\.forget\(conversationId\)/);
+  assert.match(manager, /this\.chats\.get\(conversationId\)\?\.dispose\(\)/);
+  assert.match(manager, /this\.opening\.get\(conversationId\)\?\.then\(chat => chat\?\.dispose\(\)\)/);
   assert.doesNotMatch(body, /client\.deleteSession|session\.delete/, 'the CLI owns its rows; deleting a chat must not delete the session');
 });
 
@@ -702,7 +744,7 @@ test('a CLI error never renders as a bare category name', () => {
   // a generic message and a bare "UnknownError".
   assert.match(cliProjection, /export function cliErrorText\(error: unknown\): string \| undefined/);
   assert.match(cliProjection, /data\.message/, 'the unwrap must read data.message, the real field');
-  assert.match(cliEngine, /import \{ cliErrorText,/);
+  assert.match(cliEngine, /import \{[^}]*cliErrorText,/);
   assert.match(cliEngine, /return cliErrorText\(error\) \?\?/);
   // The projection must not keep its own copy.
   assert.doesNotMatch(cliProjection, /return error\.message \?\?/);
@@ -747,14 +789,11 @@ test('a model the CLI does not have is never sent to it', () => {
 test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);
-  // The guard returns the memoised engine when it has already resolved.
-  assert.match(
-    agent,
-    /if \(this\.engineReady\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/,
-  );
-  // The CLI is the primary engine — there is no experimental toggle to re-read.
-  assert.doesNotMatch(agent, /private engineUseCli: boolean \| undefined/);
-  assert.doesNotMatch(agent, /get<boolean>\('useCli'/);
+  // The guard may also compare the setting it resolved under, so a useCli flip
+  // re-resolves instead of silently returning the previous engine.
+  assert.match(agent, /if \(this\.engineReady(?: &&[^{]*)?\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/);
+  assert.match(agent, /private engineUseCli: boolean \| undefined/);
+  assert.match(agent, /get<boolean>\('useCli'/);
 });
 
 test('CLI sends create a real user turn, never a synthetic Continue', () => {

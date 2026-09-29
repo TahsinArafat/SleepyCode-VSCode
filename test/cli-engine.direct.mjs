@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CliChatSession, CliSessionRegistry } from '../src/cli-engine.ts';
+import { CliChatSession, CliSessionRegistry, resolveEngine } from '../src/cli-engine.ts';
 
 const HISTORY = [
   { info: { id: 'msg_user', role: 'user' }, parts: [{ id: 'prt_1', type: 'text', text: 'fix the build' }] },
@@ -15,11 +15,13 @@ function stubClient(history = HISTORY) {
   const updates = [];
   const permissions = [];
   const errors = [];
+  const live = [];
   let emit = () => { };
   return {
     updates,
     permissions,
     errors,
+    live,
     emit: event => emit(event),
     client: {
       messages: async () => history,
@@ -31,6 +33,7 @@ function stubClient(history = HISTORY) {
     onUpdate: items => updates.push(items),
     onError: message => errors.push(message),
     onPermission: permission => permissions.push(permission),
+    onLive: event => live.push(event),
   };
 }
 
@@ -43,10 +46,17 @@ async function openChat(overrides = {}) {
     stub.onUpdate,
     stub.onError,
     stub.onPermission,
+    stub.onLive,
   );
   await chat.open();
   return { chat, stub };
 }
+
+test('the CLI stays off until the experimental toggle is ticked', async () => {
+  const off = await resolveEngine('/tmp/workspace', false);
+  assert.equal(off.mode, 'local');
+  assert.match(off.reason, /experimental option|turned off/i);
+});
 
 test('an approval prompt shows the pending permission and keeps the transcript', async () => {
   const { stub } = await openChat();
@@ -240,6 +250,67 @@ test('a slow refresh cannot overwrite the newer transcript it raced', async () =
     'the finished answer',
     `the newest snapshot must win, got ${JSON.stringify(last.at(-1))}`,
   );
+});
+
+test('a text delta updates the snapshot without starting another refresh', async () => {
+  let fetches = 0;
+  const history = [
+    { info: { id: 'msg_a', role: 'assistant' }, parts: [{ id: 'prt_t', type: 'text', text: 'Hel' }] },
+  ];
+  const { stub } = await openChat({
+    messages: async () => {
+      fetches += 1;
+      return history;
+    },
+  });
+  const before = fetches;
+  stub.emit({
+    type: 'message.part.delta',
+    properties: { sessionID: 'ses_1', messageID: 'msg_a', partID: 'prt_t', field: 'text', delta: 'lo' },
+  });
+  assert.equal(fetches, before, 'a known part delta must not GET the session');
+  const last = stub.updates.at(-1);
+  assert.equal(last.at(-1)?.text, 'Hello');
+  assert.deepEqual(stub.live.at(-1), { kind: 'delta', text: 'lo' });
+});
+
+test('a delta that arrives before the part exists still streams live', async () => {
+  let fetches = 0;
+  const { stub } = await openChat({
+    messages: async () => {
+      fetches += 1;
+      return [];
+    },
+  });
+  const before = fetches;
+  stub.emit({
+    type: 'message.part.delta',
+    properties: { sessionID: 'ses_1', messageID: 'msg_new', partID: 'prt_new', field: 'text', delta: 'Hi' },
+  });
+  assert.equal(fetches, before, 'an unknown part delta must not GET the session');
+  assert.deepEqual(stub.live.at(-1), { kind: 'delta', text: 'Hi' });
+  const last = stub.updates.at(-1);
+  assert.equal(last.at(-1)?.text, 'Hi');
+});
+
+test('a full text snapshot does not replay content already streamed by part.delta', async () => {
+  const history = [
+    { info: { id: 'msg_a', role: 'assistant' }, parts: [{ id: 'prt_t', type: 'text', text: 'Hel' }] },
+  ];
+  const { stub } = await openChat({ messages: async () => history });
+  stub.emit({
+    type: 'message.part.delta',
+    properties: { sessionID: 'ses_1', messageID: 'msg_a', partID: 'prt_t', field: 'text', delta: 'lo' },
+  });
+  const liveCount = stub.live.length;
+  stub.emit({
+    type: 'message.part.updated',
+    properties: {
+      sessionID: 'ses_1',
+      part: { id: 'prt_t', messageID: 'msg_a', type: 'text', text: 'Hello' },
+    },
+  });
+  assert.equal(stub.live.length, liveCount, 'the full snapshot must not emit the same text again');
 });
 
 test('a corrupt registry does not stop the extension from starting', () => {

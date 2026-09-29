@@ -183,11 +183,19 @@ export async function startOrAttach(opts: {
   spawnFn?: typeof spawn;
   probeFn?: (port: number) => Promise<boolean>;
   directoryFn?: (url: string, directory: string) => Promise<string | undefined>;
+  /**
+   * How to locate the CLI binary. Defaults to a real filesystem lookup, which
+   * makes the spawn path unreachable on any machine without `sleepy` installed
+   * (every CI runner). Tests that only exercise the spawn seam must stub this,
+   * otherwise they pass locally and fail in CI.
+   */
+  binaryFn?: (env: NodeJS.ProcessEnv) => string | undefined;
 } = {}): Promise<CliServer> {
   const env = opts.env ?? process.env;
   const spawnProcess = opts.spawnFn ?? spawn;
   const probe = opts.probeFn ?? probePort;
   const askDirectory = opts.directoryFn ?? resolveServerDirectory;
+  const findBinary = opts.binaryFn ?? findCliBinary;
   const wanted = opts.directory ? canonical(opts.directory) : undefined;
 
   if (wanted) {
@@ -201,7 +209,7 @@ export async function startOrAttach(opts: {
     }
   }
 
-  const binary = findCliBinary(env);
+  const binary = findBinary(env);
   // No CLI on this machine: the caller keeps the local fallback engine.
   if (!binary) throw new Error('sleepy CLI not found');
 

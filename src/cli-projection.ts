@@ -269,6 +269,53 @@ export function applyPausedProjection(items: TranscriptItem[], busy: boolean): v
   }
 }
 
+/**
+ * Append a streamed text field onto the matching part. The first token can
+ * arrive before a session snapshot contains the assistant row, so missing
+ * message/part containers are created locally instead of forcing a stale GET.
+ */
+export function applyCliPartDelta(
+  messages: CliMessage[],
+  event: { messageID?: string; partID?: string; field?: string; delta?: string },
+): boolean {
+  if (!event.messageID || !event.partID || event.field !== 'text' || typeof event.delta !== 'string') return false;
+  // The first tokens often arrive before any GET has the new assistant row.
+  // Invent the message/part here so live tokens still append instead of
+  // kicking off a refresh that republishes a stale snapshot.
+  let message = messages.find(row => row.info?.id === event.messageID);
+  if (!message) {
+    message = { info: { id: event.messageID, role: 'assistant' }, parts: [] };
+    messages.push(message);
+  }
+  if (!message.parts) message.parts = [];
+  let part = message.parts.find(row => row.id === event.partID);
+  if (!part) {
+    part = { id: event.partID, messageID: event.messageID, type: 'text', text: '' };
+    message.parts.push(part);
+  }
+  part.text = `${part.text ?? ''}${event.delta}`;
+  return true;
+}
+
+/**
+ * Upsert a full part row (tool start/end, completed text). Creates the
+ * assistant message if the snapshot has not seen it yet.
+ */
+export function applyCliPartUpdated(messages: CliMessage[], part: CliPart): boolean {
+  const messageID = part.messageID;
+  if (!messageID || !part.id) return false;
+  let message = messages.find(row => row.info?.id === messageID);
+  if (!message) {
+    message = { info: { id: messageID, role: 'assistant' }, parts: [] };
+    messages.push(message);
+  }
+  if (!message.parts) message.parts = [];
+  const index = message.parts.findIndex(row => row.id === part.id);
+  if (index === -1) message.parts.push(part);
+  else message.parts[index] = { ...message.parts[index], ...part };
+  return true;
+}
+
 /** Project one CLI message row into transcript items. */
 export function projectMessage(message: CliMessage, label: ToolLabel = defaultLabel): TranscriptItem[] {
   const info = message?.info ?? {};

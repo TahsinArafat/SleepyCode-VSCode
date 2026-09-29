@@ -32,6 +32,8 @@ test('a healthy server scoped to another workspace is not adopted', async () => 
     // Something healthy is already listening, but it is another project's.
     probeFn: async () => true,
     directoryFn: async () => undefined,
+    // CI runners have no `sleepy` installed; the spawn seam must not depend on it.
+    binaryFn: () => '/usr/local/bin/sleepy',
     spawnFn: (binary, args, options) => {
       spawned.push({ binary, args, cwd: options?.cwd });
       return fakeChild();
@@ -85,6 +87,8 @@ test('the workspace travels as a header, not as a spawn argument', async () => {
   await startOrAttach({
     directory: '/tmp/workspace-a',
     probeFn: async () => false,
+    // Stubbed so the test does not silently depend on a local CLI install.
+    binaryFn: () => '/usr/local/bin/sleepy',
     spawnFn: (binary, args) => {
       spawned.push(args);
       return fakeChild();

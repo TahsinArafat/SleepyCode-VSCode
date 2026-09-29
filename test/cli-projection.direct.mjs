@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  applyCliPartDelta,
+  applyCliPartUpdated,
   cliErrorText,
   applyPausedProjection,
   projectMessage,
@@ -169,4 +171,55 @@ test('applyPausedProjection keeps the card only on the newest idle assistant', (
   const untouched = [{ id: 'a4', role: 'assistant', text: 'done', finish: 'stop' }];
   applyPausedProjection(untouched, false);
   assert.equal(untouched[0].paused, undefined);
+});
+
+test('a text delta appends onto the matching part without inventing a second message', () => {
+  const messages = [
+    { info: { id: 'msg_a', role: 'assistant' }, parts: [{ id: 'prt_t', type: 'text', text: 'Hel' }] },
+  ];
+  const changed = applyCliPartDelta(messages, { messageID: 'msg_a', partID: 'prt_t', field: 'text', delta: 'lo' });
+  assert.equal(changed, true);
+  assert.equal(messages[0].parts?.[0].text, 'Hello');
+  assert.equal(messages.length, 1);
+});
+
+test('a text delta that arrives before the part exists still appends', () => {
+  // The first tokens often beat the GET that would have created the row.
+  // Inventing the part here is what lets the live renderer paint instead of
+  // waiting for session.idle.
+  const messages = [];
+  const changed = applyCliPartDelta(messages, { messageID: 'msg_a', partID: 'prt_t', field: 'text', delta: 'Hel' });
+  assert.equal(changed, true);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].info.id, 'msg_a');
+  assert.equal(messages[0].parts?.[0].id, 'prt_t');
+  assert.equal(messages[0].parts?.[0].text, 'Hel');
+  applyCliPartDelta(messages, { messageID: 'msg_a', partID: 'prt_t', field: 'text', delta: 'lo' });
+  assert.equal(messages[0].parts?.[0].text, 'Hello');
+  assert.equal(messages.length, 1);
+});
+
+test('a reasoning delta appends onto the matching part', () => {
+  const messages = [
+    { info: { id: 'msg_a', role: 'assistant' }, parts: [{ id: 'prt_r', type: 'reasoning', text: 'think' }] },
+  ];
+  applyCliPartDelta(messages, { messageID: 'msg_a', partID: 'prt_r', field: 'text', delta: 'ing' });
+  assert.equal(messages[0].parts?.[0].text, 'thinking');
+});
+
+test('a tool part update upserts the row so a running call becomes a task', () => {
+  const messages = [
+    { info: { id: 'msg_a', role: 'assistant' }, parts: [{ id: 'prt_t', type: 'text', text: '' }] },
+  ];
+  applyCliPartUpdated(messages, {
+    id: 'prt_tool',
+    messageID: 'msg_a',
+    type: 'tool',
+    tool: 'read',
+    callID: 'c1',
+    state: { status: 'running', input: { path: 'a.ts' } },
+  });
+  assert.equal(messages[0].parts?.length, 2);
+  assert.equal(messages[0].parts?.[1].tool, 'read');
+  assert.equal(messages[0].parts?.[1].state?.status, 'running');
 });
