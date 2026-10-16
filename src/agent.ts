@@ -3315,7 +3315,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const effortBody = reasoningEffortBody(selection.reasoningEffort, model);
       const agent = new ToolLoopAgent({
         model: provider(model),
-        maxRetries: 4,
+        // Retry policy lives in the run loop below, which classifies the error first and
+        // backs off deliberately. The SDK's own retries ran ahead of that gate, so a
+        // payload the loop would never resend was still retried up to 4 times per
+        // attempt — 20 identical requests for one failure. Keep a single SDK attempt
+        // so the loop decides.
+        maxRetries: 1,
         instructions,
         tools: agentTools,
         stopWhen: maxSteps === 0 ? isLoopFinished() : isStepCount(maxSteps),
@@ -3372,6 +3377,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const baseStreamPrompt = streamPrompt;
       const baseWork = work.slice();
       while (true) {
+        // Each attempt restarts the stream from `baseStreamPrompt`, so the messages
+        // produced by the previous attempt must not be carried over: keeping them
+        // re-stacked the whole turn onto `structuredHistory` on every retry until the
+        // request overflowed the context window.
+        runMessages = [];
         let answer = '';
         let finishReason = '';
         let stepCount = 0;

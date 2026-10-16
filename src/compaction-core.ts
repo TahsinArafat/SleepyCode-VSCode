@@ -158,12 +158,29 @@ export function shouldAutoCompact(contextTokens: number, contextWindow?: number 
 }
 
 /**
+ * Total budget for the summarizer prompt, in characters.
+ *
+ * The per-item clamp alone was not enough: with `MAX_STORED_ITEMS` = 2_000 the prompt
+ * reached ~8M chars (~2M tokens), overran every model's context window, and failed on
+ * each candidate in turn. Compaction therefore broke exactly when it was needed.
+ */
+export const COMPACTION_PROMPT_MAX_CHARS = 600_000;
+
+/**
  * Builds the summarizer input from transcript items. Only the visible message
  * text is included — reasoning/"think" traces are deliberately skipped, and any
  * inline <think> blocks leaked into text by providers are stripped defensively.
+ *
+ * The result is capped to `maxChars` overall, keeping the newest turns: the recent end
+ * of a conversation is what a summary is judged on, and dropping it would summarize the
+ * wrong part of the history.
  */
-export function compactionPromptInput(items: readonly CompactableItem[], maxItemChars = 4_000): string {
-  return items
+export function compactionPromptInput(
+  items: readonly CompactableItem[],
+  maxItemChars = 4_000,
+  maxChars = COMPACTION_PROMPT_MAX_CHARS,
+): string {
+  const lines = items
     .filter(item => item.kind !== 'divider') // markers are never sent to the summarizer
     .map(item => {
       const role = item.role === 'user' ? 'User' : 'Assistant';
@@ -174,7 +191,22 @@ export function compactionPromptInput(items: readonly CompactableItem[], maxItem
         .slice(0, maxItemChars);
       return `[${role}] ${content}`;
     })
-    .join('\n\n');
+    .reverse(); // newest first, so the budget is spent on the recent turns
+  const kept: string[] = [];
+  let total = 0;
+  for (const line of lines) {
+    const size = line.length + 2;
+    if (total + size > maxChars) break;
+    kept.push(line);
+    total += size;
+  }
+  const newest = lines[0];
+  if (!kept.length && newest !== undefined) {
+    // The newest turn is larger than the whole budget. Summarizing nothing would be
+    // worse than summarizing its tail, so truncate it instead of dropping it.
+    kept.push(newest.slice(0, Math.max(0, maxChars - 12)));
+  }
+  return kept.reverse().join('\n\n');
 }
 
 /**

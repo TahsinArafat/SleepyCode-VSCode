@@ -9,6 +9,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   compactionOutputBudget,
   compactionPromptInput,
+  COMPACTION_PROMPT_MAX_CHARS,
   contextOccupancy,
   estimateContextTokens,
   selectCarriedItems,
@@ -180,4 +181,47 @@ test('compactionOutputBudget clamps to the provider advertised limit', () => {
   assert.equal(compactionOutputBudget(2048), 2048);
   assert.equal(compactionOutputBudget(1_000_000), COMPACTION_OUTPUT_BUDGET);
   assert.equal(compactionOutputBudget(COMPACTION_OUTPUT_BUDGET), COMPACTION_OUTPUT_BUDGET);
+});
+
+test('compactionPromptInput caps the total prompt, not just each item', () => {
+  // The per-item clamp alone let 2,000 items reach ~8M chars (~2M tokens), which
+  // overran every context window and failed on every summarizer candidate. Compaction
+  // has to stay bounded to be usable at all.
+  const items = Array.from({ length: 2_000 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    text: 'x'.repeat(4_000),
+  }));
+  const input = compactionPromptInput(items);
+  assert.ok(input.length <= COMPACTION_PROMPT_MAX_CHARS, `prompt was ${input.length} chars`);
+  assert.ok(input.length > 0, 'the budget must not collapse the prompt to nothing');
+});
+
+test('compactionPromptInput keeps the newest turns when the budget binds', () => {
+  // Each turn fits the budget; only the total does not. The recent end is what a
+  // summary is judged on, so it is what must survive.
+  const items = [
+    { role: 'user', text: 'OLDEST-1' },
+    { role: 'assistant', text: 'OLDEST-2' },
+    { role: 'user', text: 'MIDDLE-1' },
+    { role: 'assistant', text: 'MIDDLE-2' },
+    { role: 'user', text: 'NEWEST-1' },
+    { role: 'assistant', text: 'NEWEST-2' },
+  ];
+  const input = compactionPromptInput(items, 4_000, 40);
+  assert.match(input, /NEWEST-2/, 'the newest turn must survive the budget');
+  assert.doesNotMatch(input, /OLDEST-1/);
+});
+
+test('compactionPromptInput summarizes the tail rather than nothing when one turn overflows', () => {
+  // An oversized newest turn used to drop every line, so the summarizer was asked to
+  // summarize an empty conversation.
+  const items = [{ role: 'user', text: 'OLD' }, { role: 'assistant', text: 'z'.repeat(4_000) }];
+  const input = compactionPromptInput(items, 4_000, 50);
+  assert.ok(input.length > 0, 'the newest turn must be truncated, not discarded');
+  assert.doesNotMatch(input, /OLD/);
+});
+
+test('compactionPromptInput leaves a short conversation untouched', () => {
+  const items = [{ role: 'user', text: 'hello' }, { role: 'assistant', text: 'hi' }];
+  assert.equal(compactionPromptInput(items), '[User] hello\n\n[Assistant] hi');
 });
