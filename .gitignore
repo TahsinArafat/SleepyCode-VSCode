@@ -10,3 +10,6 @@ artifacts/
 !.env.example
 .omo/
 .sleepycode/
+
+.ui-shots/
+.witdiff/
