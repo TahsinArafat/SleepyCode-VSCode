@@ -18,7 +18,7 @@ import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
-import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
+import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, originalUserText, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
@@ -248,6 +248,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private persistFailed = false;
   /** Index entries that failed validation on load, kept verbatim so a rewrite cannot delete them. */
   private unreadableProjectEntries: unknown[] = [];
+  /** Last dropped-message count announced per conversation, so the notice is not repeated every turn. */
+  private lastHistoryDropNotice = new Map<string, number>();
   /** Timestamp of the last coalesced mid-run checkpoint write, per conversation. */
   private checkpointAtByConversation = new Map<string, number>();
   private notifySeq = 0;
@@ -1297,6 +1299,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private structuredHistory(conversation: Conversation, budgetTokens = STRUCTURED_HISTORY_BUDGET_TOKENS): ModelMessage[] {
     const selected = selectStructuredHistory(conversation.messages, budgetTokens, estimateMessageTokens);
+    // The cut is real context loss, so say so. Silently narrowing the window is what
+    // makes this read as "the agent forgot" instead of "older turns were dropped".
+    const dropped = droppedMessageCount(conversation.messages, selected);
+    if (dropped > 0 && this.lastHistoryDropNotice.get(conversation.id) !== dropped) {
+      this.lastHistoryDropNotice.set(conversation.id, dropped);
+      this.post({
+        type: 'contextNotice',
+        conversationId: conversation.id,
+        kind: 'trimmed',
+        text: `${dropped} older message${dropped === 1 ? '' : 's'} left this request to stay within the model context window. They are still saved in this conversation.`,
+      });
+    }
     return backfillAssistantReasoning(selected, reasoningTextsFromItems(conversation.items));
   }
 
@@ -1451,7 +1465,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           hasMessages: items.length > 0,
           messageCount: items.length,
           changeCount: lastAssistant?.changes?.length ?? 0,
-          status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? 'failed' : lastAssistant ? 'done' : 'empty',
+          status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? (lastAssistant.errorInfo?.code === 'interrupted' ? 'stopped' : 'failed') : lastAssistant ? 'done' : 'empty',
           running: this.runs.has(id),
           queued: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.text),
           queuedIds: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.id),
@@ -2682,7 +2696,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         void this.run(sendText, conversationId, undefined, undefined, message.context, promptContext).catch(error => {
           const detail = errorMessage(error);
           this.log('error', 'run.unhandled', detail);
-          this.post({ type: 'error', conversationId, text: detail });
+          // The user turn is persisted before the run starts, so a failure escaping the
+          // run left a turn that nothing ever answered. Both the streamed partial text
+          // and this error lived only in the DOM, so a reload erased the evidence. Persist
+          // a structured error instead, which renders with a retry action and survives.
+          const conversation = this.findConversation(conversationId);
+          if (conversation) {
+            const errorItem = createTranscriptItem('assistant', detail, 'error');
+            errorItem.errorInfo = classifyAgentError(error);
+            errorItem.errorInfo.retryable = true;
+            conversation.items.push(errorItem);
+            this.boundConversationItems(conversation);
+            conversation.updatedAt = Date.now();
+            void this.persistProjects();
+          }
+          this.post({ type: 'error', conversationId, text: detail, keepTurn: true });
           this.runs.delete(conversationId);
           this.post({ type: 'state', conversationId, running: false, label: '' });
         });
@@ -3674,6 +3702,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // card text is the retryable sentence; the partial lives in partialText so
           // the transcript shows it once instead of twice.
           const stoppedItem = createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
+          // The user asked for this. Tag it so the sidebar reports "Stopped" rather than
+          // "Failed", which is what a deliberate stop used to be labelled as.
+          stoppedItem.errorInfo = { code: 'interrupted', retryable: true, title: 'Stopped', message: 'You stopped this turn. Its partial output is saved.', primaryAction: 'retry' };
           if (model) stoppedItem.model = model;
           const stoppedChanges = await completeRunChanges();
           const fields = interruptedAssistantFields({

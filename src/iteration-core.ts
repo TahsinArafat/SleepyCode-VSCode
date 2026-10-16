@@ -125,6 +125,20 @@ export function selectStructuredHistory<T extends HistoryMessage>(
 }
 
 /**
+ * How many stored messages a budgeted selection dropped from the front.
+ *
+ * `selectStructuredHistory` cuts silently, which reads to the user as the agent
+ * forgetting. Callers use this to say so out loud.
+ */
+export function droppedMessageCount<T extends HistoryMessage>(
+  stored: readonly T[] | undefined,
+  selected: readonly T[],
+): number {
+  if (!stored?.length) return 0;
+  return Math.max(0, stored.length - selected.length);
+}
+
+/**
  * Append a completed user turn and the messages it produced. Always trims
  * from the front so the newest context survives the hard count bound.
  */

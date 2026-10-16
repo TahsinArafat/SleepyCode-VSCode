@@ -135,6 +135,7 @@ export type AgentErrorCode =
   | 'service_unavailable'
   | 'network'
   | 'provider_error'
+  | 'interrupted'
   | 'unknown';
 
 export type AgentErrorPresentation = {
