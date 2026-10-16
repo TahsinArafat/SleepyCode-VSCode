@@ -14,6 +14,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
+import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
@@ -243,6 +244,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private queueSeq = 0;
   private apiKeys: Record<string, string> = {};
   private persistChain: Promise<void> = Promise.resolve();
+  /** Set once a write failed, so one report covers a chain that keeps failing. */
+  private persistFailed = false;
+  /** Index entries that failed validation on load, kept verbatim so a rewrite cannot delete them. */
+  private unreadableProjectEntries: unknown[] = [];
   /** Timestamp of the last coalesced mid-run checkpoint write, per conversation. */
   private checkpointAtByConversation = new Map<string, number>();
   private notifySeq = 0;
@@ -718,7 +723,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
     view.onDidDispose(() => this.disposePendingNotifies());
     this.loaded = true;
-    this.loadProjects();
+    // loadProjects runs after the webview is live, so an escaped throw rendered an
+    // empty chat with nothing in the UI to explain it. Keep whatever loaded.
+    try {
+      this.loadProjects();
+    } catch (error) {
+      this.log('error', 'projects.load.failed', errorMessage(error));
+      this.post({ type: 'error', conversationId: '', text: `SleepyCode could not load your conversations: ${errorMessage(error)}` });
+    }
     this.syncConversations();
     void this.migrateProvidersIfNeeded().then(() => this.loadApiKeys()).then(() => {
       if (this.view !== view) return;
@@ -1060,7 +1072,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private loadProjects(): void {
     const stored = this.context.globalState.get<unknown[]>('sleepycode.projectIndex', []);
-    this.projects = (Array.isArray(stored) ? stored : []).filter(isProjectMeta).map(entry => {
+    const indexEntries = Array.isArray(stored) ? stored : [];
+    // Entries that do not validate are remembered, not discarded: loadProjects ends by
+    // writing the index back, and a filtered rewrite would delete their history for good.
+    const split = splitProjectIndex(indexEntries, isProjectMeta);
+    this.unreadableProjectEntries = split.unreadable;
+    this.projects = split.usable.map(entry => {
       const data = this.context.globalState.get<{ conversations?: unknown; activeConversationId?: unknown } | undefined>(`sleepycode.project.${entry.id}`, undefined);
       const conversations = Array.isArray(data?.conversations) ? data.conversations as Conversation[] : [];
       return {
@@ -1072,7 +1089,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
         conversations: conversations.map(conversation => {
           const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-          const items = conversation.items.map((item, index) => normalizeTranscriptItem(item, baseTimestamp + index));
+          // A single corrupt record must not abort the load: an earlier unguarded
+          // `items.map` threw here, which left the panel rendering an empty chat with
+          // no error at all. Degrade that one conversation and keep the rest.
+          const items = loadEach(
+            Array.isArray(conversation.items) ? conversation.items : [],
+            (item, index) => normalizeTranscriptItem(item, baseTimestamp + index),
+            () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
+            error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
+          ) as TranscriptItem[];
           // A run interrupted by a reload/crash left a partial turn behind. Fold it
           // into the structured history so the next message keeps that work, then
           // mark the turn as interrupted so the user knows it did not finish.
@@ -1110,7 +1135,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     for (const project of this.projects) {
       for (const conversation of project.conversations) {
         const stored = this.context.globalState.get<unknown>(`sleepycode.compactionSnapshots.${conversation.id}`, undefined);
-        const stacks = loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>(stored);
+        let stacks: ReturnType<typeof loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>>;
+        try {
+          stacks = loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>(stored);
+        } catch (error) {
+          this.log('warn', 'compactionSnapshot.load.corrupt', errorMessage(error));
+          continue;
+        }
         const normalize = (snapshot: SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }) => ({
           beforeItems: snapshot.beforeItems ?? snapshot.before ?? [],
           afterItems: snapshot.afterItems ?? snapshot.after ?? [],
@@ -1141,10 +1172,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const legacy = this.context.workspaceState.get<Conversation[]>('sleepycode.conversations', []);
     const legacyTranscript = this.context.workspaceState.get<TranscriptItem[]>('sleepycode.transcript', []);
     if ((!legacy.length && !legacyTranscript.length) || project.conversations.length) return;
+    // Legacy records predate current validation and can hold anything. A malformed one
+    // must not abort the startup load, so it degrades to an empty transcript.
     const conversations = legacy.length
       ? legacy.map(conversation => {
         const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-        return { ...conversation, items: conversation.items.map((item, index) => normalizeTranscriptItem(item, baseTimestamp + index)) };
+        const items = loadEach(
+          Array.isArray(conversation.items) ? conversation.items : [],
+          (item, index) => normalizeTranscriptItem(item, baseTimestamp + index),
+          () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
+          error => this.log('warn', 'legacy.conversation.corrupt', errorMessage(error)),
+        ) as TranscriptItem[];
+        return { ...conversation, items };
       })
       : [this.createConversation(legacyTranscript.map((item, index) => normalizeTranscriptItem(item, Date.now() + index)))];
     project.conversations = conversations;
@@ -1310,8 +1349,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private persistProjects(): Promise<void> {
     const projects = this.projects.slice(0, MAX_PERSISTED_PROJECTS);
-    this.persistChain = this.persistChain.then(async () => {
-      await this.context.globalState.update('sleepycode.projectIndex', projects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })));
+    this.persistChain = enqueuePersist(this.persistChain, async () => {
+      // Entries that failed validation on load are re-written verbatim rather than
+      // dropped: a filtered index rewrite permanently deletes that project's history.
+      await this.context.globalState.update('sleepycode.projectIndex', [
+        ...projects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })),
+        ...this.unreadableProjectEntries,
+      ]);
       for (const project of projects) {
         const conversations = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
         if (conversations.length < project.conversations.length) {
@@ -1323,8 +1367,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           activeConversationId: project.activeConversationId,
         });
       }
-    });
+    }, error => this.reportPersistFailure(error));
     return this.persistChain;
+  }
+
+  /**
+   * Keep one failed write from poisoning the whole chain.
+   *
+   * `persistChain` is a promise chain: a single rejected `globalState.update` skipped
+   * every later `.then` callback, so nothing was saved for the rest of the session and
+   * the user was never told. Recover here instead: log, report once to the user, and
+   * let the chain continue so the next write still lands.
+   */
+  private reportPersistFailure(error: unknown): void {
+    const detail = errorMessage(error);
+    this.log('error', 'persist.failed', detail);
+    if (this.persistFailed) return;
+    this.persistFailed = true;
+    this.post({ type: 'error', conversationId: this.activeProject()?.activeConversationId ?? '', text: `SleepyCode could not save your conversations: ${detail}. Later changes may not survive a reload.` });
   }
 
   /**
@@ -1334,13 +1394,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * conversation that is currently running.
    */
   private persistProject(project: Project): Promise<void> {
-    this.persistChain = this.persistChain.then(async () => {
+    this.persistChain = enqueuePersist(this.persistChain, async () => {
       const conversations = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
       await this.context.globalState.update(`sleepycode.project.${project.id}`, {
         conversations,
         activeConversationId: project.activeConversationId,
       });
-    });
+    }, error => this.reportPersistFailure(error));
     return this.persistChain;
   }
 
