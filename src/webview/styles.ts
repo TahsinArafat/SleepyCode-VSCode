@@ -113,12 +113,19 @@ export const WEBVIEW_STYLES = String.raw`
 .error-message{padding:0 var(--sc-space-4) var(--sc-space-3)}
 .error-symbol{width:18px;height:18px;font-size:11px}
 
-/* --- Fix: the composer row overflowed at sidebar width and clipped the
-   model label to "Choose mod". Let the row wrap so controls keep their
-   full labels and fall to a second line instead of being squeezed. --- */
+/* --- Fix: the composer clipped the model label to "Choose mod". The pill had a
+   hard max-width (112px, and 80px in the narrow media query) narrower than
+   "Choose model…" needs, and the row could not absorb the slack, so the label
+   ellipsized. Give the model pill enough width for its full label, let the row
+   wrap as a last resort, and keep every pill able to shrink so a long model
+   name still degrades to an ellipsis rather than pushing the row off-screen. --- */
 .composer-tools{flex-wrap:wrap;row-gap:var(--sc-space-1);flex:1 1 auto}
-.control-pill{flex:0 0 auto;max-width:100%}
-/* The select still needs to be able to shrink inside its own pill. */
+.composer .actions .model-pill,
+.composer .actions .agent-pill,
+.composer .actions .safety-dropdown{flex:0 1 auto;min-width:0;max-width:none}
+.composer .actions .model-pill{max-width:min(160px,42vw)}
+.composer .actions .agent-pill{max-width:min(140px,34vw)}
+.composer .actions .safety-dropdown{max-width:min(160px,38vw)}
 .model-select{min-width:0}
 
 /* Send action: the one place the accent is allowed. */
