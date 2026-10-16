@@ -132,6 +132,10 @@ for (const { tag, width, height } of WIDTHS) {
     const out = [];
     for (const el of document.querySelectorAll('*')) {
       if (el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1) {
+        const style = getComputedStyle(el);
+        // text-overflow:ellipsis truncating its own text is intentional, not a bug.
+        const intentional = style.textOverflow === 'ellipsis' || style.overflowX === 'auto' || style.overflowX === 'scroll';
+        if (intentional) continue;
         const name = typeof el.className === 'string' ? el.className : el.tagName;
         if (name) out.push(name);
       }

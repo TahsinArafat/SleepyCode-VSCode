@@ -76,4 +76,52 @@ export const WEBVIEW_STYLES = String.raw`
   .compaction-overlay{display:none;align-items:center;gap:7px;margin:0 0 8px;padding:7px 9px;border:1px solid color-mix(in srgb,var(--vscode-focusBorder) 45%,var(--vscode-widget-border));border-radius:9px;background:var(--vscode-editorWidget-background)}.compaction-overlay.visible{display:flex}.compaction-overlay .compaction-text{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground);font-size:11px}.compaction-overlay .compaction-cancel{flex:none;border:0;background:transparent;color:var(--vscode-foreground);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px}.compaction-overlay .compaction-cancel:hover{background:var(--vscode-toolbar-hoverBackground)}.compaction-overlay .compaction-cancel:disabled{opacity:.5;cursor:default}.compaction-overlay.done{border-color:color-mix(in srgb,var(--vscode-testing-iconPassed,#22c55e) 45%,transparent)}.compaction-overlay.error{border-color:color-mix(in srgb,var(--vscode-errorForeground) 50%,transparent)}.compaction-overlay.done .compaction-text{color:var(--vscode-foreground)}.compaction-overlay.error .compaction-text{color:var(--vscode-errorForeground)}.compaction-overlay.done .spinner,.compaction-overlay.error .spinner,.compaction-overlay.cancelled .spinner{display:none}
 .composer-tools .context-summary,.composer-tools .control-pill,.composer-tools .dropdown{min-width:0}.composer .actions .model-pill .dropdown-button,.composer .actions .agent-pill .dropdown-button{min-width:0}.composer .control-icon,.composer .agent-icon{opacity:.72}.composer .control-caret{opacity:.45}
 .math-block{margin:8px 0;padding:6px 4px;overflow-x:auto;overflow-y:hidden;max-width:100%}.math-block .katex-display{margin:.4em 0}.katex{font-size:1.05em;color:var(--vscode-foreground)}.katex-display>.katex{color:var(--vscode-foreground)}.katex .katex-error{color:var(--vscode-errorForeground,#f14c4c)}
+/* ============================================================
+   Design tokens + targeted component fixes.
+   Native-editor restraint: one restrained teal accent, everything else
+   derives from VS Code theme variables so the panel tracks the user's theme.
+   ============================================================ */
+:root{
+  /* Type scale. Prose is 13px to match VS Code; chrome steps down from there. */
+  --sc-font-xs:10px; --sc-font-sm:11px; --sc-font-md:12px; --sc-font-base:13px; --sc-font-lg:15px;
+  /* Spacing scale. */
+  --sc-space-1:4px; --sc-space-2:6px; --sc-space-3:8px; --sc-space-4:12px; --sc-space-5:16px;
+  /* Radius scale. */
+  --sc-radius-sm:4px; --sc-radius-md:6px; --sc-radius-lg:9px;
+  /* A single restrained accent, reserved for the send action and focus. */
+  --sc-accent:#14b8a6;
+  --sc-accent-contrast:#05201d;
+}
+/* Prose: give assistant text comfortable measure + rhythm. */
+.assistant{font-size:var(--sc-font-base);line-height:1.6}
+.assistant p{margin:0 0 var(--sc-space-4)}
+.assistant p:last-child{margin-bottom:0}
+.assistant h1,.assistant h2,.assistant h3{margin:var(--sc-space-5) 0 var(--sc-space-2);line-height:1.3}
+/* Inline code: a touch larger so it doesn't sink into 13px prose. */
+.assistant code{font-size:.92em;border-radius:var(--sc-radius-sm)}
+/* Code blocks: left accent rule + horizontal breathing room. */
+.assistant pre{border-left:2px solid color-mix(in srgb,var(--sc-accent) 55%,transparent);padding:var(--sc-space-3) var(--sc-space-4);border-radius:var(--sc-radius-md)}
+/* User turn: a touch more presence than raw prose. */
+.user-text{border-radius:var(--sc-radius-lg) var(--sc-radius-lg) var(--sc-radius-sm) var(--sc-radius-lg)}
+
+/* --- Fix: the error card padded its own children. The card already had
+   padding, and .error-head/.error-message each added more, so a two-line
+   error rendered ~250px tall with a dead gap. Card owns the box; children
+   own only their internal rhythm. --- */
+.error-card{padding:0;border-radius:var(--sc-radius-md)}
+.error-head{padding:var(--sc-space-3) var(--sc-space-4) var(--sc-space-1)}
+.error-message{padding:0 var(--sc-space-4) var(--sc-space-3)}
+.error-symbol{width:18px;height:18px;font-size:11px}
+
+/* --- Fix: the composer row overflowed at sidebar width and clipped the
+   model label to "Choose mod". Let the row wrap so controls keep their
+   full labels and fall to a second line instead of being squeezed. --- */
+.composer-tools{flex-wrap:wrap;row-gap:var(--sc-space-1);flex:1 1 auto}
+.control-pill{flex:0 0 auto;max-width:100%}
+/* The select still needs to be able to shrink inside its own pill. */
+.model-select{min-width:0}
+
+/* Send action: the one place the accent is allowed. */
+.send-btn,.composer .send{background:var(--sc-accent);color:var(--sc-accent-contrast)}
+.send-btn:hover,.composer .send:hover{filter:brightness(1.08)}
 `;
