@@ -2764,7 +2764,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // local agent.
       const resumeFrom = resumeFromLastAssistant(conversation.items);
       if (!resumeFrom) return;
-      const pausePlaceholder = `Iteration paused after reaching the ${last.pauseLimit ?? this.config().maxSteps}-step limit.`;
+      const truncatedPause = last.pauseReason === 'max_tokens';
+      const pausePlaceholder = truncatedPause
+        ? '(Response reached the model output limit before producing text.)'
+        : `Iteration paused after reaching the ${last.pauseLimit ?? this.config().maxSteps}-step limit.`;
       conversation.items.pop();
       project.activeConversationId = conversation.id;
       project.updatedAt = Date.now();
@@ -2774,7 +2777,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         work: last.work,
         changes: last.changes,
         fileSnapshot: last.fileSnapshot,
-        errorText: `The previous iteration paused after reaching its ${last.pauseLimit ?? this.config().maxSteps}-step limit. Continue only the unfinished work.`,
+        errorText: truncatedPause
+          ? 'The previous response reached the model output limit and is incomplete. Continue from where it stopped, finishing only what remains.'
+          : `The previous iteration paused after reaching its ${last.pauseLimit ?? this.config().maxSteps}-step limit. Continue only the unfinished work.`,
         partialText: last.text.trim() && last.text !== pausePlaceholder ? last.text : last.partialText,
         originalUserText: resumeFrom.userText,
       }, last.gitTree);
@@ -3623,7 +3628,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           } while (continuationCount < 2 && !run.controller.signal.aborted);
           this.sendUsage();
           const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
-          if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : '(No response)';
+          // The model hit its output limit and cut the answer mid-sentence. That is
+          // not a finished turn: committing it as a clean success is exactly how the
+          // "stopped midway but looks fine" symptom appears. Treat it as a recoverable
+          // pause so the partial text stays visible and can be continued.
+          const truncated = finishReason === 'length';
+          if (!answer.trim()) answer = paused ? `Iteration paused after reaching the ${maxSteps}-step limit.` : truncated ? '(Response reached the model output limit before producing text.)' : '(No response)';
           if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
           if (paused) {
             if (planState) { planState.interrupted = true; postPlan(); }
@@ -3642,8 +3652,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             assistantItem.paused = true;
             assistantItem.pauseReason = 'max_steps';
             assistantItem.pauseLimit = maxSteps;
+          } else if (truncated) {
+            assistantItem.paused = true;
+            assistantItem.pauseReason = 'max_tokens';
           }
           const finalChanges = await completeRunChanges();
+          if (truncated && !paused) assistantItem.partialText = finalAnswer;
           if (finalChanges.length) assistantItem.changes = finalChanges;
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           // Persist the structured model history so the next turn keeps prior tool
@@ -3659,9 +3673,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (runAttempt) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runAttempt, max: maxRunRetries });
           this.post({ type: 'done', conversationId, item: assistantItem });
           systemNotify(this.context, {
-            subtitle: paused ? 'Iteration paused' : 'Task complete',
-            message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : (notificationSummary(finalAnswer) || conversation.title),
-            kind: paused ? 'attention' : 'info',
+            subtitle: paused ? 'Iteration paused' : truncated ? 'Response truncated' : 'Task complete',
+            message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : truncated ? 'The model hit its output limit, so the answer is incomplete. Continue when ready.' : (notificationSummary(finalAnswer) || conversation.title),
+            kind: paused || truncated ? 'attention' : 'info',
           });
           break;
         } catch (attemptError) {

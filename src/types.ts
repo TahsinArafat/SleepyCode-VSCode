@@ -176,7 +176,13 @@ export type TranscriptItem = {
   /** Turn cost in USD as reported by the CLI or local usage tracker. */
   costUsd?: number;
   paused?: boolean;
-  pauseReason?: 'max_steps';
+  /**
+   * Why the turn is paused. `max_steps` is the bounded iteration limit;
+   * `max_tokens` is a response the model cut off because it hit its output limit.
+   * The latter is committed as recoverable rather than a clean success, so the
+   * partial answer stays visible and can be continued.
+   */
+  pauseReason?: 'max_steps' | 'max_tokens';
   pauseLimit?: number;
 };
 

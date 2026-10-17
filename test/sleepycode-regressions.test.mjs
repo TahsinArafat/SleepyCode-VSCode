@@ -728,7 +728,10 @@ test('continuing a paused iteration is routed to the engine that owns the conver
   // A CLI-owned paused card is a projection of an unfinished CLI row, so
   // continuing must resume via the CLI; the local re-run stays the fallback.
   const start = agent.indexOf("message.type === 'continueIteration'");
-  const body = agent.slice(start, start + 1600);
+  // Window must cover the whole handler: `this.run(` now sits ~1676 chars in because
+  // the continue path grew reason-aware resume text. Too small a window makes
+  // indexOf return -1 and fails for the wrong reason.
+  const body = agent.slice(start, start + 2600);
   assert.match(body, /cliOwns\(conversation, this\.engineStatus\)/, 'the CLI-owned path comes first');
   assert.ok(
     body.indexOf('cliOwns') < body.indexOf('this.run('),

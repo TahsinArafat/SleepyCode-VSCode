@@ -608,10 +608,11 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   }
   function iterationPauseCard(item,actionable=true){
     if(!item||!item.paused)return null;
+    const truncated=item.pauseReason==='max_tokens';
     const limit=Number(item.pauseLimit)||50;
     const card=document.createElement('div');
     card.className='iteration-paused';
-    card.innerHTML='<div class="iteration-paused-copy"><strong>Iteration paused</strong><span>Reached the '+limit+'-step limit with work still in progress.</span></div>'+(actionable?'<button type="button" class="iteration-continue">Continue iteration</button>':'');
+    card.innerHTML='<div class="iteration-paused-copy"><strong>'+(truncated?'Response truncated':'Iteration paused')+'</strong><span>'+(truncated?'The model reached its output limit, so this answer is incomplete.':'Reached the '+limit+'-step limit with work still in progress.')+'</span></div>'+(actionable?'<button type="button" class="iteration-continue">'+(truncated?'Continue response':'Continue iteration')+'</button>':'');
     const btn=card.querySelector('.iteration-continue');
     if(btn)btn.onclick=()=>{btn.disabled=true;btn.textContent='Continuing…';vscode.postMessage({type:'continueIteration',conversationId:activeConversationId,itemId:item.id})};
     return card;

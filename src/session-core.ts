@@ -83,7 +83,7 @@ export type SessionCompactionSnapshot<TItem extends SessionTranscriptItem = Sess
 
 export type InterruptedTurnInput = {
   userText: string;
-  reason: 'stop' | 'error' | 'max_steps';
+  reason: 'stop' | 'error' | 'max_steps' | 'max_tokens';
   message: string;
   work?: unknown[];
   changes?: unknown[];
@@ -233,7 +233,7 @@ export function resumeFromLastAssistant<TItem extends SessionTranscriptItem>(
   if (!last || last.role !== 'assistant') return undefined;
   const userText = originalUserText(items.slice(0, -1));
   if (!userText) return undefined;
-  const reason: InterruptedTurnInput['reason'] = last.paused ? 'max_steps' : last.kind === 'error' ? 'error' : 'stop';
+  const reason: InterruptedTurnInput['reason'] = last.paused ? (last.pauseReason === 'max_tokens' ? 'max_tokens' : 'max_steps') : last.kind === 'error' ? 'error' : 'stop';
   return {
     userText,
     item: last,
