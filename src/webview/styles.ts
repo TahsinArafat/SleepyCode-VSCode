@@ -101,6 +101,12 @@ export const WEBVIEW_STYLES = String.raw`
 .assistant code{font-size:.92em;border-radius:var(--sc-radius-sm)}
 /* Code blocks: left accent rule + horizontal breathing room. */
 .assistant pre{border-left:2px solid color-mix(in srgb,var(--sc-accent) 55%,transparent);padding:var(--sc-space-3) var(--sc-space-4);border-radius:var(--sc-radius-md)}
+/* Assistant identity: a small, quiet label so the agent's side of the turn is
+   distinguishable at a glance, without shouting. One accent dot + name. */
+.assistant-identity{display:flex;align-items:center;gap:var(--sc-space-2);margin:var(--sc-space-4) 0 var(--sc-space-1);color:var(--vscode-descriptionForeground);font-size:var(--sc-font-sm);line-height:1}
+.assistant-identity-mark{width:8px;height:8px;border-radius:50%;background:var(--sc-accent);flex:none}
+.assistant-identity-name{font-weight:600;letter-spacing:.01em}
+
 /* User turn: a touch more presence than raw prose. */
 .user-text{border-radius:var(--sc-radius-lg) var(--sc-radius-lg) var(--sc-radius-sm) var(--sc-radius-lg)}
 
