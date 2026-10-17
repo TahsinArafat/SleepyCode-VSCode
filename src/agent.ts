@@ -17,7 +17,7 @@ import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectRe
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
-import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, STRUCTURED_HISTORY_BUDGET_TOKENS, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, originalUserText, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
@@ -1297,7 +1297,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * results are never separated from the assistant message that requested them,
    * because an orphaned tool-call id makes strict providers reject the request.
    */
-  private structuredHistory(conversation: Conversation, budgetTokens = STRUCTURED_HISTORY_BUDGET_TOKENS): ModelMessage[] {
+  private structuredHistory(conversation: Conversation, contextWindow?: number | null): ModelMessage[] {
+    const budgetTokens = structuredHistoryBudget(contextWindow);
     const selected = selectStructuredHistory(conversation.messages, budgetTokens, estimateMessageTokens);
     // The cut is real context loss, so say so. Silently narrowing the window is what
     // makes this read as "the agent forgot" instead of "older turns were dropped".
@@ -3014,6 +3015,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
     let model = selection.model;
+    // The send budget has to follow the model's real window: a fixed budget either
+    // overflows a small window or strands a large one far below its capacity.
+    let modelInfo = this.getEffectiveModelInfo(selection.provider, model);
     try {
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
@@ -3392,7 +3396,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Prefer the structured model history (assistant turns + tool calls + tool
         // results). Fall back to the flattened text window only for conversations
         // that predate structured history or were compacted to text summaries.
-        const structured = this.structuredHistory(conversation);
+        const structured = this.structuredHistory(conversation, modelInfo.contextWindow);
         if (structured.length) {
           streamPrompt = `${userText}${promptContext}`;
         } else {
@@ -3448,7 +3452,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Keep prior conversation history AND this turn's already-produced
             // tool calls/results. Resume/auto-continue used to drop that live
             // slice, which is how partial context disappeared mid-iteration.
-            const history = this.structuredHistory(conversation);
+            const history = this.structuredHistory(conversation, modelInfo?.contextWindow);
             let agentMessages: ModelMessage[] | undefined;
             if (history.length || runMessages.length) {
               agentMessages = iterationRequestMessages(history, runMessages, streamPrompt);
@@ -3907,7 +3911,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.queue.some(entry => entry.conversationId === conversation.id)) return;
     const contextTokens = contextOccupancy(conversation.items).tokens;
     const modelInfo = this.getEffectiveModelInfo(providerId, model);
-    if (!shouldAutoCompact(contextTokens, modelInfo.contextWindow)) return;
+    // Measure the stored history the way the send path will budget it, so compaction
+    // fires before the budget starts dropping messages. Without this the conversation
+    // could grow past the send budget and silently lose turns with no compaction ever
+    // running, because the old trigger only watched the model window.
+    const budgetTokens = structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit);
+    const historyTokens = estimateHistoryTokens(conversation.messages, estimateMessageTokens);
+    if (!shouldAutoCompact(contextTokens, modelInfo.contextWindow, historyTokens, budgetTokens)) return;
     const now = Date.now();
     if (now - (this.lastAutoCompactAt.get(conversation.id) ?? 0) < 120_000) return;
     this.lastAutoCompactAt.set(conversation.id, now);

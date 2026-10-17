@@ -456,7 +456,7 @@ test('structured model history persists across turns instead of flattening to te
   assert.match(types, /export const MAX_STORED_MESSAGES/);
   // The run seeds the provider with real messages when structured history exists,
   // including the live tool-call slice of the current iteration.
-  assert.match(agent, /const history = this\.structuredHistory\(conversation\)/);
+  assert.match(agent, /const history = this\.structuredHistory\(conversation, modelInfo\?\.contextWindow\)/);
   assert.match(agent, /iterationRequestMessages\(history, runMessages, streamPrompt\)/);
   assert.match(agent, /messages: agentMessages/);
   // Response messages (assistant tool calls + tool results) are captured and kept.
@@ -466,7 +466,7 @@ test('structured model history persists across turns instead of flattening to te
   assert.match(iterationCore, /export function safeHistoryStart/);
   assert.match(iterationCore, /export function selectStructuredHistory/);
   // Legacy conversations without structured history still use the text fallback.
-  assert.match(agent, /const structured = this\.structuredHistory\(conversation\)/);
+  assert.match(agent, /const structured = this\.structuredHistory\(conversation, modelInfo\.contextWindow\)/);
 });
 
 test('compaction and rollbacks keep structured history in sync with the transcript', () => {

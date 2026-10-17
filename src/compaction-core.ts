@@ -35,6 +35,12 @@ export const COMPACTION_HISTORY_ITEMS = 10;
 /** Fraction of the context window at which auto-compaction kicks in. */
 export const AUTO_COMPACT_RATIO = 0.75;
 
+/** Fraction of the *send budget* at which auto-compaction kicks in. Compaction must
+ *  fire before the send budget starts dropping messages, otherwise the conversation
+ *  silently loses context with no summary ever being produced (the fixed-60k-budget
+ *  bug). This trigger is the one that stays reachable on every window size. */
+export const AUTO_COMPACT_BUDGET_RATIO = 0.9;
+
 /**
  * Default output-token budget for the summarizer call. Reasoning models spend
  * output tokens on thinking BEFORE writing text: with a small budget (the old
@@ -58,6 +64,12 @@ export function compactionOutputBudget(maxOutputLimit?: number | null): number {
 
 /** Assumed context window when the provider does not report one. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+/** Tokens reserved for the model's answer when its output limit is unknown. */
+export const DEFAULT_RESPONSE_RESERVE_TOKENS = 16_000;
+
+/** Floor for the structured-history budget on tiny windows. */
+export const MIN_STRUCTURED_HISTORY_BUDGET = 8_000;
 
 /**
  * Estimated tokens the next run would consume for the given transcript:
@@ -114,6 +126,22 @@ export function estimateMessageTokens(message: { role?: string; content?: unknow
 }
 
 /**
+ * Total tokens of a stored history, using the same per-message estimator the send
+ * path uses. This is the number to compare against the send budget when deciding
+ * whether compaction is due — measuring the rendered transcript instead would
+ * ignore tool calls and results, which are what usually fills the window.
+ */
+export function estimateHistoryTokens(
+  messages: readonly { role?: string; content?: unknown; toolCalls?: unknown }[] | undefined,
+  estimate: (message: { role?: string; content?: unknown; toolCalls?: unknown }) => number,
+): number {
+  if (!messages?.length) return 0;
+  let total = 0;
+  for (const message of messages) total += estimate(message);
+  return total;
+}
+
+/**
  * Summarize which files the conversation already read and changed, so a compacted
  * transcript still tells the next turn what has been inspected. Mirrors Pi's
  * CompactionDetails (readFiles/modifiedFiles). Returns '' when nothing is known.
@@ -144,17 +172,52 @@ export function summarizeFileOperations(items: readonly { work?: readonly { kind
 }
 
 /**
- * Token budget for the structured history handed to the provider on each turn.
- * Deliberately well below the compaction threshold so the newest work always fits
- * with room for the model's response; older turns are summarized by compaction.
+ * Token budget for the structured history handed to the provider on each turn when
+ * the model's context window is unknown. Conservative on purpose: a guessed
+ * window must not cause an overflow.
  */
 export const STRUCTURED_HISTORY_BUDGET_TOKENS = 60_000;
 
-/** True when the estimated occupancy reaches the auto-compaction threshold. */
-export function shouldAutoCompact(contextTokens: number, contextWindow?: number | null): boolean {
+/**
+ * Tokens the send may spend on history, derived from the model's actual window so
+ * small windows don't overflow and large windows aren't under-used. Leaves room
+ * for the system prompt, tool schemas, and the model's answer; never below
+ * MIN_STRUCTURED_HISTORY_BUDGET. Falls back to STRUCTURED_HISTORY_BUDGET_TOKENS
+ * when the window is unknown.
+ */
+export function structuredHistoryBudget(
+  contextWindow?: number | null,
+  maxOutputLimit?: number | null,
+): number {
+  if (!contextWindow || contextWindow <= 0) return STRUCTURED_HISTORY_BUDGET_TOKENS;
+  const responseReserve = maxOutputLimit && maxOutputLimit > 0 ? maxOutputLimit : DEFAULT_RESPONSE_RESERVE_TOKENS;
+  const budget = contextWindow - CONTEXT_SYSTEM_OVERHEAD_TOKENS - responseReserve;
+  return Math.max(MIN_STRUCTURED_HISTORY_BUDGET, Math.floor(budget));
+}
+
+/** True when the estimated occupancy reaches the auto-compaction threshold.
+ *
+ *  `contextTokens` is what was actually sent last turn. On its own that is not enough
+ *  to stay reachable: the send budget is deliberately below the window, so a
+ *  conversation can grow past the point where history would be cut without ever
+ *  crossing 75% of the window. Pass `historyTokens` (the size of the stored history)
+ *  and `budgetTokens` (the send budget) to also trigger compaction the moment the
+ *  history reaches 90% of that budget — which is always before any silent drop.
+ */
+export function shouldAutoCompact(
+  contextTokens: number,
+  contextWindow?: number | null,
+  historyTokens?: number,
+  budgetTokens?: number,
+): boolean {
   const window = contextWindow && contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW;
-  if (contextTokens <= 0) return false;
-  return contextTokens / window >= AUTO_COMPACT_RATIO;
+  if (contextTokens > 0 && contextTokens / window >= AUTO_COMPACT_RATIO) return true;
+  if (
+    typeof budgetTokens === 'number' && budgetTokens > 0 &&
+    typeof historyTokens === 'number' &&
+    historyTokens >= budgetTokens * AUTO_COMPACT_BUDGET_RATIO
+  ) return true;
+  return false;
 }
 
 /**
