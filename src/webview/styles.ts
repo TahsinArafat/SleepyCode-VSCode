@@ -117,6 +117,9 @@ export const WEBVIEW_STYLES = String.raw`
    auto margins and let the content scroll from its true top. --- */
 .empty{height:100%;display:block;text-align:center;overflow-y:auto;overflow-x:hidden}
 .empty-inner{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sc-space-4);padding:var(--sc-space-5) var(--sc-space-4);box-sizing:border-box}
+/* Composer affordances: /commands, @files, and ↑ recall are otherwise invisible. */
+.composer-hints{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:3px 5px;color:var(--vscode-descriptionForeground);font-size:10px}
+.composer-hints kbd{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;border:1px solid color-mix(in srgb,var(--vscode-widget-border) 82%,transparent);border-radius:4px;background:color-mix(in srgb,var(--vscode-input-background) 60%,transparent);color:var(--vscode-foreground);font:600 10px var(--vscode-editor-font-family,var(--vscode-font-family));line-height:1}
 /* Keep the heading block together when the panel is short. */
 .empty-inner>h2{font-size:var(--sc-font-lg);font-weight:600;margin:0;line-height:1.3}
 .empty-inner>.empty-subtitle{max-width:34ch}

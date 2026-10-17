@@ -18,6 +18,45 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     {id:'autonomous',name:'Open access',desc:'Run edits and commands without confirmation. Use only in trusted workspaces.'}
   ];
   let selectedAgentId='default';
+  const PROMPT_HISTORY_LIMIT=100;
+  let promptHistoryByConversation=new Map(),historyIndex=-1,historyDraft=null;
+  function historyEntries(){return promptHistoryByConversation.get(activeConversationId)||[]}
+  function recordPromptHistory(text){
+    const value=String(text||'').trim();
+    if(!value)return;
+    const entries=[...historyEntries()];
+    if(entries[entries.length-1]!==value)entries.push(value);
+    while(entries.length>PROMPT_HISTORY_LIMIT)entries.shift();
+    promptHistoryByConversation.set(activeConversationId,entries);
+    historyIndex=-1;historyDraft=null;
+  }
+  function showPrompt(text){input.value=text;resize();input.focus();input.setSelectionRange(text.length,text.length)}
+  function recallPrompt(older){
+    const entries=historyEntries();
+    if(!entries.length)return;
+    if(older){
+      // The first Up press stows whatever is typed so Down can bring it back.
+      if(historyIndex===-1)historyDraft=input.value;
+      if(historyIndex===-1)historyIndex=entries.length-1;
+      else if(historyIndex>0)historyIndex--;
+      showPrompt(entries[historyIndex]||'');
+      return;
+    }
+    if(historyIndex===-1)return;
+    if(historyIndex<entries.length-1){historyIndex++;showPrompt(entries[historyIndex]||'');return}
+    historyIndex=-1;
+    showPrompt(historyDraft||'');
+    historyDraft=null;
+  }
+  // Recall never steals a caret the user is aiming: a single-line draft has no
+  // vertical movement to do, but a multi-line one only yields Up/Down at the edge
+  // the arrow would otherwise leave the text at.
+  function canRecall(older){
+    if(!input.value.includes('\n'))return true;
+    const atStart=input.selectionStart===0&&input.selectionEnd===0;
+    const atEnd=input.selectionStart===input.value.length&&input.selectionEnd===input.value.length;
+    return older?atStart:atEnd;
+  }
   function findAgent(id){return AGENTS.find(a=>a.id===id)||AGENTS[0]}
   function agentIconSvg(a){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+a.icon+'</svg>'}
   function syncAgentPill(){const a=findAgent(selectedAgentId);if(agentButton){agentButton.textContent=a.mode;agentButton.title=a.name+' — '+a.desc}if(agentIcon){agentIcon.style.color=a.color;agentIcon.innerHTML=agentIconSvg(a)}}
@@ -539,7 +578,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     {title:'Review code',desc:'Find concrete correctness, security, and regression risks.',prompt:'Review the current project and recent changes for correctness, security, regressions, maintainability, and missing tests. Prioritize concrete findings and fix high-confidence issues.'},
     {title:'Understand project',desc:'Map architecture, execution paths, and key files.',prompt:'Inspect this project and explain its architecture, main execution paths, important modules, and the safest places to make changes. Keep the explanation practical and reference file paths.'}
   ];
-  const emptyState=()=>{const recent=conversations.filter(x=>!x.archived&&x.hasMessages).slice(0,5);const account=sleepyAccount&&sleepyAccount.loggedIn?('<div class="empty-account">SleepyAI'+(sleepyAccount.tier?' · '+esc(sleepyAccount.tier):'')+'</div>'):'';const project=projectIndicatorFolder&&projectIndicatorFolder!=='No folder open'?'<div class="empty-project">Workspace <strong title="'+esc(projectIndicatorFolder)+'">'+esc(projectIndicatorFolder)+'</strong></div>':'';const indexCard=projectIndicatorPath?'<button type="button" class="project-index-card '+esc(projectIndexState.status)+'" data-reindex-project><span class="project-index-dot"></span><span class="project-index-main"><span class="project-index-title">Project intelligence</span><span class="project-index-copy">'+esc(projectIndexNote())+'</span></span><span class="project-index-action">'+(projectIndexState.status==='indexing'?'Indexing…':'Reindex')+'</span></button>':'';return '<div class="empty" id="empty"><div class="empty-inner"><img class="empty-mark" src="${markUri}" alt=""><h2>What are we working on?</h2><p class="empty-subtitle">SleepyAI is ready to build, debug, review, or explain this workspace.</p>'+project+account+indexCard+'<div class="starter-grid">'+STARTERS.map((x,index)=>'<button type="button" class="starter-card" data-starter="'+index+'"><span class="starter-title">'+esc(x.title)+'</span><span class="starter-desc">'+esc(x.desc)+'</span></button>').join('')+'</div>'+(recent.length?'<div class="recent"><div class="recent-head"><span>Recent conversations</span><span class="count">'+recent.length+'</span></div><div class="recent-list">'+recent.map(x=>'<div class="recent-item" data-open-recent="'+esc(x.id)+'" title="'+esc(x.title)+'">'+(x.pinned?'<span class="recent-pin">★</span>':'')+(x.running?'<span class="spinner"></span>':'')+'<span class="title">'+esc(x.title)+'</span>'+(x.changeCount?'<span class="recent-change">'+x.changeCount+' files</span>':'')+'<span class="time">'+recentTimeLabel(x.updatedAt)+'</span><button class="archive-action" data-archive-recent="'+esc(x.id)+'" title="Archive" aria-label="Archive '+esc(x.title)+'"><svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg></button></div>').join('')+'</div></div>':'')+'</div></div>'};
+  const emptyState=()=>{const recent=conversations.filter(x=>!x.archived&&x.hasMessages).slice(0,5);const account=sleepyAccount&&sleepyAccount.loggedIn?('<div class="empty-account">SleepyAI'+(sleepyAccount.tier?' · '+esc(sleepyAccount.tier):'')+'</div>'):'';const project=projectIndicatorFolder&&projectIndicatorFolder!=='No folder open'?'<div class="empty-project">Workspace <strong title="'+esc(projectIndicatorFolder)+'">'+esc(projectIndicatorFolder)+'</strong></div>':'';const indexCard=projectIndicatorPath?'<button type="button" class="project-index-card '+esc(projectIndexState.status)+'" data-reindex-project><span class="project-index-dot"></span><span class="project-index-main"><span class="project-index-title">Project intelligence</span><span class="project-index-copy">'+esc(projectIndexNote())+'</span></span><span class="project-index-action">'+(projectIndexState.status==='indexing'?'Indexing…':'Reindex')+'</span></button>':'';return '<div class="empty" id="empty"><div class="empty-inner"><img class="empty-mark" src="${markUri}" alt=""><h2>What are we working on?</h2><p class="empty-subtitle">SleepyAI is ready to build, debug, review, or explain this workspace.</p>'+project+account+indexCard+'<div class="composer-hints"><kbd>/</kbd><span>commands</span><kbd>@</kbd><span>files</span><kbd>↑</kbd><span>recall</span></div><div class="starter-grid">'+STARTERS.map((x,index)=>'<button type="button" class="starter-card" data-starter="'+index+'"><span class="starter-title">'+esc(x.title)+'</span><span class="starter-desc">'+esc(x.desc)+'</span></button>').join('')+'</div>'+(recent.length?'<div class="recent"><div class="recent-head"><span>Recent conversations</span><span class="count">'+recent.length+'</span></div><div class="recent-list">'+recent.map(x=>'<div class="recent-item" data-open-recent="'+esc(x.id)+'" title="'+esc(x.title)+'">'+(x.pinned?'<span class="recent-pin">★</span>':'')+(x.running?'<span class="spinner"></span>':'')+'<span class="title">'+esc(x.title)+'</span>'+(x.changeCount?'<span class="recent-change">'+x.changeCount+' files</span>':'')+'<span class="time">'+recentTimeLabel(x.updatedAt)+'</span><button class="archive-action" data-archive-recent="'+esc(x.id)+'" title="Archive" aria-label="Archive '+esc(x.title)+'"><svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg></button></div>').join('')+'</div></div>':'')+'</div></div>'};
   function bindRecent(scope){scope.querySelectorAll('[data-open-recent]').forEach(el=>el.onclick=()=>vscode.postMessage({type:'openConversation',id:el.dataset.openRecent}));scope.querySelectorAll('[data-archive-recent]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'archiveConversation',id:el.dataset.archiveRecent})});scope.querySelectorAll('[data-starter]').forEach(el=>el.onclick=()=>{const starter=STARTERS[Number(el.dataset.starter)];if(!starter)return;input.value=starter.prompt;resize();input.focus();input.setSelectionRange(input.value.length,input.value.length)});scope.querySelectorAll('[data-reindex-project]').forEach(el=>el.onclick=()=>{projectIndexState={status:'indexing',text:'Reindexing project…',indexed:0,total:0,index:null};refreshEmpty();renderContext();vscode.postMessage({type:'reindexProject'})})}
   function refreshEmpty(){const el=document.getElementById('empty');if(!el)return;el.outerHTML=emptyState();const empty=document.getElementById('empty');if(empty)bindRecent(empty)}
   const timeLabel=value=>new Date(value||Date.now()).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
@@ -849,9 +888,27 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   syncSafetyControl();
   syncAgentPill();
   syncEffortPill();
-  function submit(){let text=input.value.trim();const wasRunning=isRunning();if(wasRunning&&!text&&!attachments.length){vscode.postMessage({type:'stop'});return}if(!text&&!attachments.length)return;if(text.startsWith('/')){const slash=expandSlashPrompt(text);if(slash.handled){input.value='';closeSlashMenu();resize();return}text=slash.text}if(!selectedModel){addError('Choose a model first.');return}const sentAttachments=[...attachments];const context={includeProjectIndex,includeActiveFile,includeSelection,activeFile:editorContext.activeFile,selectionLines:editorContext.selectionLines,attachments:sentAttachments};const optimisticText=text||'Please inspect the attached files.';const edit=editMessageState?{...editMessageState}:null;editMessageState=null;setEditBar(false);if(!edit&&!wasRunning)runningSet.add(activeConversationId);input.value='';attachments=[];renderAttachments();closeContextPanel();closeSlashMenu();resize();if(!edit){if(wasRunning){const list=queuedByConversation.get(activeConversationId)||[];list.push({id:'tmp-'+Date.now(),text:optimisticText});queuedByConversation.set(activeConversationId,list);updateQueuedVisibility();vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context});updateSendMode();return}updateJump();try{const now=Date.now(),optimistic={id:'tmp-'+now,role:'user',text:optimisticText,timestamp:now,attachments:sentAttachments};beginTurn(optimistic);createActivity();const st=activity&&activity.querySelector('.activity-status');if(st)st.textContent='Sending…';scroll(true)}catch(e){}vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context})}else{vscode.postMessage({type:'editUserMessage',conversationId:edit.conversationId,itemId:edit.itemId,text:optimisticText,context})}}
+  function submit(){let text=input.value.trim();const wasRunning=isRunning();if(wasRunning&&!text&&!attachments.length){vscode.postMessage({type:'stop'});return}if(!text&&!attachments.length)return;if(text.startsWith('/')){const slash=expandSlashPrompt(text);if(slash.handled){input.value='';closeSlashMenu();resize();return}text=slash.text}if(!selectedModel){addError('Choose a model first.');return}recordPromptHistory(text);const sentAttachments=[...attachments];const context={includeProjectIndex,includeActiveFile,includeSelection,activeFile:editorContext.activeFile,selectionLines:editorContext.selectionLines,attachments:sentAttachments};const optimisticText=text||'Please inspect the attached files.';const edit=editMessageState?{...editMessageState}:null;editMessageState=null;setEditBar(false);if(!edit&&!wasRunning)runningSet.add(activeConversationId);input.value='';attachments=[];renderAttachments();closeContextPanel();closeSlashMenu();resize();if(!edit){if(wasRunning){const list=queuedByConversation.get(activeConversationId)||[];list.push({id:'tmp-'+Date.now(),text:optimisticText});queuedByConversation.set(activeConversationId,list);updateQueuedVisibility();vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context});updateSendMode();return}updateJump();try{const now=Date.now(),optimistic={id:'tmp-'+now,role:'user',text:optimisticText,timestamp:now,attachments:sentAttachments};beginTurn(optimistic);createActivity();const st=activity&&activity.querySelector('.activity-status');if(st)st.textContent='Sending…';scroll(true)}catch(e){}vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context})}else{vscode.postMessage({type:'editUserMessage',conversationId:edit.conversationId,itemId:edit.itemId,text:optimisticText,context})}}
   function resize(){input.style.height='auto';const viewportCap=Math.max(72,Math.min(180,Math.floor(window.innerHeight*.28)));input.style.height=Math.min(input.scrollHeight,viewportCap)+'px';updateSendMode();if(followOutput)pinScroll();updateJump()}
-  send.onclick=()=>{if(isRunning()){vscode.postMessage({type:'stop'});return}submit()};input.oninput=resize;input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}};
+  send.onclick=()=>{if(isRunning()){vscode.postMessage({type:'stop'});return}submit()};
+  input.oninput=resize;
+  input.onkeydown=e=>{
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();return}
+    // Arrow-key carets move through multi-line drafts, so only recall when the
+    // caret sits on the edge that would otherwise move outside the text.
+    if(e.key==='ArrowUp'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&canRecall(true)){
+      e.preventDefault();recallPrompt(true);return;
+    }
+    if(e.key==='ArrowDown'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&historyIndex!==-1&&canRecall(false)){
+      e.preventDefault();recallPrompt(false);return;
+    }
+    if(e.key==='Escape'){
+      if(slashMenu?.classList.contains('open')||mentionMenu.classList.contains('open'))return;
+      e.preventDefault();
+      if(input.value){input.value='';historyDraft=null;resize()}
+      else input.blur();
+    }
+  };
   messages.addEventListener('scroll',()=>{followOutput=nearBottom();updateJump()});jumpBottom.onclick=()=>{followOutput=true;scroll(true)};projectIndicator.onclick=()=>{if(projectIndicatorPath)vscode.postMessage({type:'revealInOS'})};document.getElementById('statPillGroup')?.addEventListener('click',()=>toggleSessionInfo());document.getElementById('statPillGroup')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleSessionInfo()}});
     const composerEl=document.querySelector('.composer');if(typeof ResizeObserver!=='undefined'&&composerEl)new ResizeObserver(()=>{updateJump();placeOpenComposerMenus();if(followOutput)pinScroll()}).observe(composerEl);window.addEventListener('resize',()=>{resize();updateJump();placeOpenComposerMenus()});window.visualViewport?.addEventListener('resize',()=>placeOpenComposerMenus());window.visualViewport?.addEventListener('scroll',()=>placeOpenComposerMenus());
   queued.onclick=(event)=>{const button=event.target.closest('button[data-act]');if(!button)return;const id=button.dataset.id;const act=button.dataset.act;if(act==='steer'){vscode.postMessage({type:'steerQueued',conversationId:activeConversationId,id});return}const list=queuedByConversation.get(activeConversationId)||[];const entry=list.find(item=>item.id===id);if(!entry)return;if(act==='edit'){queuedByConversation.set(activeConversationId,list.filter(item=>item.id!==id));updateQueuedVisibility();vscode.postMessage({type:'removeQueued',conversationId:activeConversationId,id});input.value=entry.text;resize();input.focus();return}if(act==='remove'){vscode.postMessage({type:'removeQueued',conversationId:activeConversationId,id})}};
