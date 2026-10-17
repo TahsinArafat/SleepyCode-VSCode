@@ -1,16 +1,28 @@
-// A 401/403 mid-chat is retried with a rotated token before the turn is ever
-// reported as a sign-out, and a transient 404 is retried for idempotent reads.
-// These assertions pin the recovery path so it cannot silently regress into
-// "you are logged out" after a single rejected request.
+// A mid-chat 401/403 is recovered by rotating the token and resending, and a
+// transient 404 on a read waits for the edge to settle — both before anything is
+// reported. Every one of those retries is spent from the single per-turn budget.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { authRetryBackoffMs, classifyAgentError, isAuthRejection, statusCodeOf } from '../src/util.ts';
+import { MAX_RUN_RETRIES, retryBackoffMs } from '../src/retry-core.ts';
+import { classifyAgentError, isAuthRejection, statusCodeOf } from '../src/util.ts';
 
 const SLEEPY = { id: 'sleepyai', name: 'SleepyAI', baseURL: 'https://www.sleepyai.org/api/v1', isSleepy: true };
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
 const sleepyai = readFileSync(new URL('../src/sleepyai.ts', import.meta.url), 'utf8');
+
+function fetchLayer() {
+  const start = agent.indexOf('fetch: async (input, init) =>');
+  assert.ok(start > 0, 'request layer not found');
+  return agent.slice(start, start + 5_000);
+}
+
+function streamCatch() {
+  const start = agent.indexOf('} catch (attemptError) {');
+  assert.ok(start > 0, 'attempt catch not found');
+  return agent.slice(start, agent.indexOf('} catch (error) {', start));
+}
 
 test('a 403 on the first-party provider is retryable, not a forced sign-in', () => {
   for (const status of [401, 403]) {
@@ -38,49 +50,45 @@ test('auth rejections are detected from nested provider error shapes', () => {
   assert.equal(statusCodeOf({ status: 404 }), 404);
 });
 
-test('auth backoff stays short enough to keep a turn alive without hammering', () => {
-  assert.equal(authRetryBackoffMs(1), 750);
-  assert.equal(authRetryBackoffMs(2), 1500);
-  assert.equal(authRetryBackoffMs(9), 5000);
-  for (let attempt = 1; attempt <= 10; attempt++) assert.ok(authRetryBackoffMs(attempt) <= 5000);
+test('backoff stays short enough to keep a turn alive without hammering', () => {
+  assert.equal(retryBackoffMs(1), 500);
+  for (let attempt = 1; attempt <= MAX_RUN_RETRIES; attempt++) assert.ok(retryBackoffMs(attempt) <= 15_000);
 });
 
-test('the request layer rotates the token and resends instead of giving up', () => {
-  const fetchLayer = agent.slice(agent.indexOf('fetch: async (input, init) =>'), agent.indexOf('// Skills and project memory are loaded on demand'));
-  assert.ok(fetchLayer.length > 0, 'fetch layer not found');
-  assert.match(fetchLayer, /response\.status === 401 \|\| response\.status === 403/, '401/403 must be recognised as recoverable');
-  assert.match(fetchLayer, /refreshSleepyToken\(\)/, 'the token must be rotated before the resend');
-  assert.match(fetchLayer, /MAX_AUTH_RECOVERIES/, 'auth recovery needs its own budget');
+test('the request layer asks the shared policy what to do, then rotates and resends', () => {
+  const layer = fetchLayer();
+  assert.match(layer, /retryKindForStatus\(response\.status, \{ replayable, isFirstParty: providerConfig\.isSleepy \}\)/);
+  assert.match(layer, /retryBudget\.take\(kind,/, 'the request layer spends from the turn budget');
+  assert.match(layer, /refreshSleepyToken\(\)/, 'the token must be rotated before the resend');
   assert.ok(
-    fetchLayer.indexOf('refreshSleepyToken()') < fetchLayer.indexOf('response.status === 404'),
-    'auth recovery runs before the generic not-found/transient handling',
+    layer.indexOf('retryKindForStatus(') < layer.indexOf('retryBudget.take('),
+    'the status must be classified before budget is spent',
   );
+  assert.ok(layer.indexOf('refreshSleepyToken()') < layer.indexOf('withAuthorization(renewed)'), 'rotate, then apply');
+  assert.match(layer, /authHeaders\.set\('Authorization', `Bearer \$\{bearer\}`\)/, 'the resent request needs the new token');
+  assert.match(layer, /if \(!decision\) return response;/, 'a spent budget surfaces the response untouched');
 });
 
-test('a rejected token is replaced on the resent request', () => {
-  // The headers closure captured the old Bearer token; after a rotation the same
-  // Request would replay the rejected credential forever.
-  assert.match(agent, /withAuthorization/);
-  assert.match(agent, /authHeaders\.set\('Authorization', `Bearer \$\{bearer\}`\)/);
-  assert.match(agent, /withAuthorization\(renewed\)/, 'a renewed token must be applied to the request');
+test('a spent budget ends the turn instead of inventing another attempt', () => {
+  const layer = fetchLayer();
+  assert.match(layer, /if \(!decision\) throw error;/, 'a transport failure with no budget left is surfaced');
 });
 
-test('transient 404s on idempotent reads retry without replaying a prompt', () => {
-  const fetchLayer = agent.slice(agent.indexOf('fetch: async (input, init) =>'), agent.indexOf('// Skills and project memory are loaded on demand'));
-  assert.match(fetchLayer, /response\.status === 404 && method === 'GET'/, 'only GETs may be replayed');
-  assert.match(fetchLayer, /MAX_NOT_FOUND_RETRIES/);
-  assert.doesNotMatch(fetchLayer, /status === 404[\s\S]{0,80}POST/, 'a POST must never be resent on 404');
+test('a 404 waits for the edge, but only on a request that can be replayed', () => {
+  const layer = fetchLayer();
+  assert.match(layer, /const replayable = method === 'GET' \|\| method === 'HEAD';/);
+  assert.match(layer, /retryKindForStatus\(/, 'the 404 rule lives in the shared policy, not here');
+  // A duplicate local policy is exactly what unified: no status is judged twice.
+  assert.ok(!/response\.status === (401|403|404|408|409|429)/.test(layer), 'status classification must not be re-implemented');
 });
 
 test('a stream rejected mid-answer resumes instead of reporting a logout', () => {
-  const catchAt = agent.indexOf('} catch (attemptError) {');
-  const streamCatch = agent.slice(catchAt, agent.indexOf('} catch (error) {', catchAt));
-  assert.ok(streamCatch.length > 0);
-  assert.match(streamCatch, /isAuthRejection\(attemptError\)/, 'stream-level auth rejections must be recovered');
-  assert.match(streamCatch, /refreshSleepyToken\(\)/);
-  assert.match(streamCatch, /continue;/, 'the attempt must restart with the renewed token');
-  const partial = streamCatch.slice(streamCatch.indexOf('carriedText'));
-  assert.match(partial, /partialAnswer|answer/, 'the partial answer must be carried into the resumed prompt');
+  const block = streamCatch();
+  assert.match(block, /isAuthRejection\(attemptError\)/, 'stream-level auth rejections must be recovered');
+  assert.match(block, /retryBudget\.take\(kind,/, 'the run loop spends from the same budget');
+  assert.match(block, /refreshSleepyToken\(\)/);
+  assert.match(block, /carriedText/, 'the partial answer must be carried into the resumed prompt');
+  assert.match(block.slice(block.indexOf('carriedText')), /answer\.trim\(\) \|\| partialAnswer\.trim\(\)/);
 });
 
 test('a refresh is only attempted when refresh credentials exist', () => {

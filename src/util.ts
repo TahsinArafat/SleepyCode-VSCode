@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { Provider } from './providers';
 import type { TranscriptItem, WorkItem, ApprovalMode, AgentErrorPresentation } from './types';
+import { AUTH_ERROR_TITLE } from './retry-core.ts';
 
 export function pathInside(root: string, candidate: string): boolean {
   const lexical = path.relative(root, candidate);
@@ -217,23 +218,12 @@ export function statusCodeOf(error: unknown): number | undefined {
  * True when the error is the gateway refusing our credentials (401/403).
  *
  * A first-party SleepyAI 401/403 is usually a rotated or briefly flapping token
- * rather than a real sign-out, so the run loop retries it with a forced token
- * refresh before it is ever shown as "session expired".
+ * rather than a real sign-out, so the turn's shared retry budget (see
+ * retry-core) renews the token before anything is shown as "session expired".
  */
 export function isAuthRejection(error: unknown): boolean {
   const status = statusCodeOf(error);
   return status === 401 || status === 403;
-}
-
-/**
- * How long an automatic auth recovery may wait before it re-sends the request.
- *
- * The first retries are fast (a stale token is renewed within the first second)
- * and later ones back off to a few seconds, so a gateway that flaps auth for a
- * longer window still recovers without hammering it.
- */
-export function authRetryBackoffMs(attempt: number): number {
-  return Math.min(5_000, 750 * Math.pow(2, Math.max(0, attempt - 1)));
 }
 
 export function classifyAgentError(error: unknown, provider?: Provider): AgentErrorPresentation {
@@ -265,7 +255,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     if (sleepy) {
       return {
         code: 'auth_required',
-        title: 'SleepyAI could not verify this session',
+        title: AUTH_ERROR_TITLE,
         message: raw,
         retryable: true,
         primaryAction: 'retry',

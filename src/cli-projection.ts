@@ -12,6 +12,7 @@
  */
 
 import type { AgentErrorPresentation, TranscriptItem, WorkItem } from './types';
+import { AUTH_ERROR_TITLE } from './retry-core.ts';
 
 /**
  * Shape a projected CLI failure the same way the local run loop does, without
@@ -25,7 +26,7 @@ function projectedErrorInfo(message: string): AgentErrorPresentation {
   if (status === 401 || status === 403) {
     return {
       code: 'auth_required',
-      title: 'SleepyAI could not verify this session',
+      title: AUTH_ERROR_TITLE,
       message,
       retryable: true,
       primaryAction: 'retry',
