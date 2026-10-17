@@ -49,7 +49,9 @@ test('one retry budget is created per turn and both layers draw from it', () => 
     assert.match(source, /decision\.attempt/, `${name} must report the shared attempt number`);
     assert.match(source, /decision\.max/, `${name} must report the shared maximum`);
   }
-  assert.match(loop, /retryBudget\.spent/, 'the run loop must close the shared retry row');
+  assert.match(loop, /runRetries = decision\.attempt/, 'the run loop must remember the row it opened');
+  assert.match(loop, /type: 'retryEnd', conversationId, ok: true, attempt: runRetries/, 'a success closes that row');
+  assert.match(layer, /retryBudget\.succeed\(\)/, 'a completed exchange must reset the retry streak');
 });
 
 test('retry policy is not declared twice', () => {
@@ -74,15 +76,23 @@ test('a 403 is recovered, a 404 waits, and everything else is left alone', () =>
   for (const status of [400, 402, 422, 200, 201]) assert.equal(retryKindForStatus(status, first), undefined);
 });
 
-test('the budget is spent once per retry and then refuses', () => {
-  const budget = createRetryBudget(3);
+test('a success resets the streak, a flapping turn still has a ceiling', () => {
+  const budget = createRetryBudget(3, 6);
   assert.equal(budget.spent, 0);
   assert.equal(budget.max, 3);
-  const kinds = ['auth', 'not_ready', 'transient', 'auth'];
-  const taken = kinds.map(kind => budget.take(kind, 'x'));
-  assert.deepEqual(taken.map(d => d?.attempt), [1, 2, 3, undefined]);
-  assert.deepEqual(taken.map(d => d?.kind), ['auth', 'not_ready', 'transient', undefined]);
-  assert.equal(budget.spent, 3);
+  assert.deepEqual([budget.take('auth', 'x'), budget.take('transient', 'x'), budget.take('transient', 'x')].map(d => d?.attempt), [1, 2, 3]);
+  assert.equal(budget.take('transient', 'x'), undefined, 'a spent streak refuses another retry');
+  // A completed exchange resets the streak: numbering and backoff start over.
+  budget.succeed();
+  assert.equal(budget.spent, 0);
+  const afterSuccess = budget.take('auth', 'x');
+  assert.equal(afterSuccess?.attempt, 1);
+  assert.equal(afterSuccess?.backoffMs, retryBackoffMs(1), 'a fresh streak must not inherit a long wait');
+  assert.equal(budget.total, 4, 'the turn total keeps counting across streaks');
+  // But the ceiling still stops an endlessly flapping turn.
+  while (budget.take('transient', 'x')) { /* drain the ceiling */ }
+  assert.equal(budget.total, budget.totalMax);
+  assert.equal(budget.take('transient', 'x'), undefined);
   assert.equal(createRetryBudget().max, MAX_RUN_RETRIES);
 });
 

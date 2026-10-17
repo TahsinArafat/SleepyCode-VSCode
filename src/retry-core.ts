@@ -9,6 +9,11 @@
  * Both layers now draw from one budget created per turn, with one backoff curve
  * and one label vocabulary. A failing turn therefore has a single, bounded,
  * predictable amount of work instead of a product of unrelated limits.
+ *
+ * The budget counts a *streak*, not a lifetime: any completed exchange calls
+ * `succeed()` and the streak restarts, so one flapping request early in a turn
+ * cannot spend the retries a genuinely broken gateway needs later. A separate
+ * ceiling caps the whole turn, so a flapping gateway still cannot retry forever.
  */
 
 /** Why a request or a whole attempt is being resent. */
@@ -20,7 +25,7 @@ export type RetryKind =
   /** 408/409/429/5xx or a transport failure. */
   | 'transient';
 
-/** Total retries a single turn may spend, shared by the request layer and the run loop. */
+/** Consecutive retries allowed before a turn gives up. Reset by any success. */
 export const MAX_RUN_RETRIES = 6;
 
 /** Title for the card shown only when a turn could not be recovered. */
@@ -28,7 +33,8 @@ export const AUTH_ERROR_TITLE = 'SleepyAI could not verify this session';
 
 /**
  * The single backoff curve: fast enough that a rotated token is picked up within
- * half a second, long enough that a flapping gateway is not hammered.
+ * half a second, long enough that a flapping gateway is not hammered. It follows
+ * the streak, so a fresh streak starts fast again instead of inheriting a long wait.
  */
 export function retryBackoffMs(attempt: number): number {
   return Math.min(15_000, 500 * Math.pow(2, Math.max(0, attempt - 1)));
@@ -57,6 +63,7 @@ export function retryMessage(options: { kind: RetryKind; status?: number; detail
 
 export type RetryDecision = {
   kind: RetryKind;
+  /** Position in the current streak, 1-based. This is the number the user sees. */
   attempt: number;
   max: number;
   backoffMs: number;
@@ -64,24 +71,40 @@ export type RetryDecision = {
 };
 
 export type RetryBudget = {
+  /** Consecutive retries allowed; the streak resets on every success. */
   readonly max: number;
+  /** Retries spent in the current streak. */
   readonly spent: number;
+  /** Retries spent by this turn in total. Never resets; bounded by `totalMax`. */
+  readonly total: number;
+  readonly totalMax: number;
   /** Spend one retry, or return undefined when the turn has no budget left. */
   take: (kind: RetryKind, message: string) => RetryDecision | undefined;
+  /** Report a completed exchange: the streak, its numbering, and its backoff all restart. */
+  succeed: () => void;
 };
 
 /** Create the one budget a turn shares across every layer that resends work. */
-export function createRetryBudget(max: number = MAX_RUN_RETRIES): RetryBudget {
+export function createRetryBudget(max: number = MAX_RUN_RETRIES, totalMax: number = max * 2): RetryBudget {
   let spent = 0;
+  let total = 0;
   return {
     max,
+    totalMax,
     get spent() {
       return spent;
     },
+    get total() {
+      return total;
+    },
     take(kind: RetryKind, message: string): RetryDecision | undefined {
-      if (spent >= max) return undefined;
+      if (spent >= max || total >= totalMax) return undefined;
       spent++;
+      total++;
       return { kind, attempt: spent, max, backoffMs: retryBackoffMs(spent), message };
+    },
+    succeed(): void {
+      spent = 0;
     },
   };
 }

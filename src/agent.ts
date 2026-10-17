@@ -3107,6 +3107,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               // reflects the real failure instead of a synthetic "logged out".
               const kind = retryKindForStatus(response.status, { replayable, isFirstParty: providerConfig.isSleepy });
               if (!kind) {
+                // The exchange completed, so the retry streak starts over: a later
+                // failure in this same turn gets the full budget again instead of
+                // inheriting what an earlier flaky request already spent.
+                retryBudget.succeed();
                 if (response.ok) endReport(true);
                 return response;
               }
@@ -3455,6 +3459,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
       const baseStreamPrompt = streamPrompt;
+      // Retries this loop has reported, so it closes the row it opened. The budget
+      // itself is a streak that a success resets, so it cannot be used for that.
+      let runRetries = 0;
       const baseWork = work.slice();
       while (true) {
         // Each attempt restarts the stream from `baseStreamPrompt`, so the messages
@@ -3717,7 +3724,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           conversation.updatedAt = Date.now();
           project.updatedAt = Date.now();
           await this.checkpointConversation(conversation, true);
-          if (retryBudget.spent) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: retryBudget.spent, max: retryBudget.max });
+          if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runRetries, max: retryBudget.max });
           this.post({ type: 'done', conversationId, item: assistantItem });
           systemNotify(this.context, {
             subtitle: paused ? 'Iteration paused' : truncated ? 'Response truncated' : 'Task complete',
@@ -3735,7 +3742,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // than throwing the partial answer away.
           const kind = isAuthRejection(attemptError) && providerConfig.isSleepy ? 'auth' : attemptInfo.retryable && attemptInfo.code !== 'action_denied' ? 'transient' : undefined;
           if (!kind) {
-            if (retryBudget.spent) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: retryBudget.spent, max: retryBudget.max });
+            if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: runRetries, max: retryBudget.max });
             throw attemptError;
           }
           const renewed = kind === 'auth' ? await refreshSleepyToken().catch(() => null) : null;
@@ -3743,9 +3750,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             ? retryMessage({ kind, status: statusCodeOf(attemptError), recovered: Boolean(renewed) })
             : attemptInfo.message);
           if (!decision) {
-            this.post({ type: 'retryEnd', conversationId, ok: false, attempt: retryBudget.spent, max: retryBudget.max });
+            if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: runRetries, max: retryBudget.max });
             throw attemptError;
           }
+          runRetries = decision.attempt;
           this.log('warn', `run.stream.retry.${decision.kind}`, `attempt=${decision.attempt}/${decision.max}; renewed=${Boolean(renewed)}`);
           this.post({ type: 'retry', conversationId, attempt: decision.attempt, max: decision.max, error: decision.message, backoffMs: decision.backoffMs });
           await waitForRetry(decision.backoffMs, run.controller.signal);
