@@ -101,6 +101,32 @@ export const WEBVIEW_STYLES = String.raw`
 .assistant code{font-size:.92em;border-radius:var(--sc-radius-sm)}
 /* Code blocks: left accent rule + horizontal breathing room. */
 .assistant pre{border-left:2px solid color-mix(in srgb,var(--sc-accent) 55%,transparent);padding:var(--sc-space-3) var(--sc-space-4);border-radius:var(--sc-radius-md)}
+/* --- Top bar: three actions inline, the rest behind one menu. Six identical
+   ghost icons gave no clue which was which and crowded out the title. --- */
+.chat-more-menu{display:none;position:absolute;top:calc(100% - 2px);right:6px;z-index:95;min-width:190px;padding:4px;border:1px solid var(--vscode-menu-border,var(--vscode-widget-border));border-radius:var(--sc-radius-md);background:var(--vscode-menu-background);box-shadow:0 12px 28px rgba(0,0,0,.32)}
+.chat-more-menu.open{display:block}
+.chat-more-item{display:flex;align-items:center;gap:var(--sc-space-2);width:100%;padding:var(--sc-space-2) var(--sc-space-3);border:0;border-radius:var(--sc-radius-sm);background:transparent;color:var(--vscode-menu-foreground,var(--vscode-foreground));font:var(--sc-font-sm) var(--vscode-font-family);text-align:left;cursor:pointer}
+.chat-more-item:hover,.chat-more-item:focus-visible{background:var(--vscode-menu-selectionBackground,var(--vscode-toolbar-hoverBackground));color:var(--vscode-menu-selectionForeground,var(--vscode-foreground));outline:none}
+.chat-more-item svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
+.chat-more-label{white-space:nowrap}
+
+/* --- Fix: the empty state pinned to the top and clipped its starter cards.
+   place-items:center inside a scroll container centres the box in the *scroll*
+   area, so once the content is taller than the panel it starts above the fold and
+   the cards that make the empty screen useful are never seen. Centre safely with
+   auto margins and let the content scroll from its true top. --- */
+.empty{height:100%;display:block;text-align:center;overflow-y:auto;overflow-x:hidden}
+.empty-inner{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sc-space-4);padding:var(--sc-space-5) var(--sc-space-4);box-sizing:border-box}
+/* Keep the heading block together when the panel is short. */
+.empty-inner>h2{font-size:var(--sc-font-lg);font-weight:600;margin:0;line-height:1.3}
+.empty-inner>.empty-subtitle{max-width:34ch}
+/* Starter cards: a real affordance, not filler. */
+.starter-card{border:1px solid color-mix(in srgb,var(--vscode-widget-border) 70%,transparent);border-radius:var(--sc-radius-md);background:color-mix(in srgb,var(--vscode-editorWidget-background) 60%,transparent);padding:var(--sc-space-3);text-align:left;cursor:pointer;color:var(--vscode-foreground);display:flex;flex-direction:column;gap:2px}
+.starter-card:hover{border-color:color-mix(in srgb,var(--sc-accent) 55%,transparent);background:color-mix(in srgb,var(--vscode-editorWidget-background) 85%,transparent)}
+.starter-card:focus-visible{outline:1px solid var(--sc-accent);outline-offset:1px}
+.starter-title{font-size:var(--sc-font-sm);font-weight:600;line-height:1.35}
+.starter-desc{font-size:var(--sc-font-xs);color:var(--vscode-descriptionForeground);line-height:1.4}
+
 /* Assistant identity: a small, quiet label so the agent's side of the turn is
    distinguishable at a glance, without shouting. One accent dot + name. */
 .assistant-identity{display:flex;align-items:center;gap:var(--sc-space-2);margin:var(--sc-space-4) 0 var(--sc-space-1);color:var(--vscode-descriptionForeground);font-size:var(--sc-font-sm);line-height:1}
@@ -137,4 +163,12 @@ export const WEBVIEW_STYLES = String.raw`
 /* Send action: the one place the accent is allowed. */
 .send-btn,.composer .send{background:var(--sc-accent);color:var(--sc-accent-contrast)}
 .send-btn:hover,.composer .send:hover{filter:brightness(1.08)}
+/* --- Fix: composer labels ellipsized inside a normal sidebar ("Conte...", "Choose
+   mod"). These must be declared AFTER the narrow-width @media blocks above, because
+   a later @media rule beats an earlier unqualified one at equal specificity. --- */
+.composer .actions .context-summary{max-width:none}
+@media (max-width:560px){.composer .actions .context-summary{max-width:104px}}
+/* Genuinely narrow: drop the label but keep the icon, title and aria-label. */
+@media (max-width:320px){.composer .actions .context-summary{max-width:26px;padding:0;justify-content:center}.composer .actions .context-summary #contextSummaryText{display:none}}
+@media (max-width:560px){.composer .actions .model-pill,.composer .actions .agent-pill{max-width:min(160px,42vw)}}
 `;

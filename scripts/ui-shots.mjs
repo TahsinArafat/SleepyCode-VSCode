@@ -114,6 +114,18 @@ for (const { tag, width, height } of WIDTHS) {
 
   await page.setContent(html, { waitUntil: 'load' });
   await page.waitForTimeout(300);
+  // The shipped HTML carries a static empty placeholder that only the runtime's
+  // emptyState() replaces, and that runs when a conversation renders with no items.
+  // Drive that path so the screenshot shows the real empty screen (starter cards,
+  // project intelligence) rather than the shell fallback.
+  await page.evaluate(() => {
+    window.__emit({ type: 'project', name: 'sleepycode', path: '/repo' });
+    window.__emit({ type: 'conversations', conversations: [
+      { id: 'c1', title: 'Empty', status: 'empty', running: false, messageCount: 0, changeCount: 0, pinned: false, archived: false },
+    ] });
+    window.__emit({ type: 'conversation', conversationId: 'c1', items: [], running: false, label: '' });
+  });
+  await page.waitForTimeout(400);
   if (!check) await page.screenshot({ path: join(outDir, `${tag}-empty.png`) });
 
   await page.evaluate(items => {
