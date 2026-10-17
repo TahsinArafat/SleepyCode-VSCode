@@ -4,9 +4,14 @@ const raw = readFileSync('src/webview.ts', 'utf8');
 const runtimeRaw = readFileSync('src/webview/runtime.ts', 'utf8');
 const runtimeMatch = runtimeRaw.match(/return String\.raw`([\s\S]*?)`;\r?\n}/);
 if (!runtimeMatch) throw new Error('webview runtime template not found');
+// The template interpolates a few identifiers at build time. The syntax check works on
+// the template source, so substitute them here too — otherwise the checker sees raw
+// `${NAME}` and reports a syntax error that the real build never produces.
+const { ESCAPE_HTML_SOURCE } = await import('../src/webview/runtime-core.ts');
 const js = runtimeMatch[1]
   .replaceAll('${gitTracked}', 'true')
-  .replaceAll('${markUri}', 'mark');
+  .replaceAll('${markUri}', 'mark')
+  .replaceAll('${ESCAPE_HTML_SOURCE}', ESCAPE_HTML_SOURCE);
 await import('node:child_process').then(({ execFileSync }) => {
   execFileSync(process.execPath, ['--check', '--input-type=module', '-'], { input: js, stdio: 'pipe' });
   console.log('webview JS: syntax OK');

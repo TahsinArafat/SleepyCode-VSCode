@@ -1,3 +1,5 @@
+import { ESCAPE_HTML_SOURCE } from './runtime-core';
+
 export function getWebviewRuntime(markUri: string, gitTracked: boolean): string {
   return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',reasoningSupported=false,modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
   const effortDropdown=document.getElementById('effortDropdown'),effortButton=document.getElementById('effortButton'),effortMenu=document.getElementById('effortMenu');
@@ -163,8 +165,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   const attachButton=document.getElementById('attachButton');
   attachButton?.addEventListener('click',()=>vscode.postMessage({type:'requestFilePicker'}));
 
-  const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const escAttr=esc;
+  ${ESCAPE_HTML_SOURCE}
   const mathTokens=[];
   const mathStart=String.fromCharCode(57346),mathEnd=String.fromCharCode(57347);
   const katexApi=()=>window.katex;
