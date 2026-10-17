@@ -5,6 +5,8 @@
  *
  * The value is a per-conversation UI choice, not a global setting: the same
  * workspace can hold a fast "none" chat and a deep "max" chat side by side.
+ * The control is offered for every model -- model ids are open-ended, so any
+ * allow-list would hide the choice from models it has not heard of.
  * `none` is the default and means "send nothing", so a model that does not
  * understand the parameter is never sent one.
  */
@@ -39,9 +41,15 @@ export const REASONING_EFFORT_HINTS: Record<ReasoningEffort, string> = {
 };
 
 /**
- * Models that publish an OpenAI-style `reasoning_effort` field. Matched
- * case-insensitively against the model id, because providers disagree on
- * casing and on the `openai/`-style prefix.
+ * Models whose provider is known to accept the OpenAI-style
+ * `reasoning_effort` field.
+ *
+ * This is a best-effort, case-insensitive substring match against the model
+ * id: providers disagree on casing and on the `openai/`-style prefix, and new
+ * reasoning models ship constantly. It decides only *which* provider-option
+ * key carries the level -- never whether the user may pick one. Known
+ * idempotent reasoning families also accept a parameter they already default
+ * to, so treating an unrecognised id as a member of this set stays harmless.
  */
 const EFFORT_MODEL_PATTERNS = [
   /\bgpt-5\b/,
@@ -50,18 +58,43 @@ const EFFORT_MODEL_PATTERNS = [
   /\bo[1-9]-/,
   /\bgpt-oss\b/,
   /\bcodex\b/,
+  /\bgpt-4\.1\b/,
+  /\bgpt-4o\b/,
+  /\bgpt-4-turbo\b/,
+  /\bgemini\b/,
+  /\bgrok\b/,
+  /\bqwen/,
+  /\bdeepseek/,
+  /\bglm/,
+  /\bminimax/,
+  /\bkimi/,
+  /\bmistral\b/,
+  /\bmixtral\b/,
+  /\bpixtral\b/,
+  /\bgranite\b/,
+  /\bnemotron\b/,
+  /\breasoner\b/,
+  /\bthinking\b/,
 ];
 
-/** True when this model id should receive `reasoning_effort`. */
+/** True when this model id is recognised as an OpenAI-style effort consumer. */
 export function supportsReasoningEffort(modelId: string | undefined): boolean {
   const id = (modelId ?? '').toLowerCase();
   if (!id) return false;
   return EFFORT_MODEL_PATTERNS.some(pattern => pattern.test(id));
 }
 
-/** True when the composer should offer the dropdown at all for this model. */
-export function supportsReasoningControl(modelId: string | undefined): boolean {
-  return supportsReasoningEffort(modelId);
+/**
+ * True when the composer should offer the reasoning dropdown.
+ *
+ * Always. The control is available for every model, not just ones we can
+ * recognise: model ids are user-supplied and the catalog grows faster than any
+ * allow-list, so hiding the control stranded users on models it simply had not
+ * heard of -- including models that do honour the field. Levels are additive
+ * (see `reasoningEffortBody`), so choosing one is always safe.
+ */
+export function supportsReasoningControl(_modelId?: string | undefined): boolean {
+  return true;
 }
 
 /** Coerce any stored/UI value into a known level, falling back to the default. */
@@ -76,25 +109,26 @@ export function normalizeReasoningEffort(raw: unknown): ReasoningEffort {
 /**
  * Provider request fields for a level, or `{}` when nothing should be sent.
  *
- * `none` returns `{}` on purpose: a model that does not know the field must
- * not receive it, and a model that does falls back to its own default, which
- * is the behaviour the user asked for by choosing "none".
+ * `none` returns `{}` on purpose: no reasoning parameter is sent at all, so a
+ * model is never handed a field it does not understand and simply uses its own
+ * default.
+ *
+ * A non-`none` level is sent for every model. Providers that do not know
+ * `reasoning_effort` ignore an unknown body field, so this is additive rather
+ * than destructive; the alternative (silently dropping the choice because the
+ * model id was not recognised) is what made the control unusable off-list.
  */
 export function reasoningEffortBody(
   effort: unknown,
-  modelId: string | undefined,
+  _modelId: string | undefined,
 ): Record<string, string | number> {
   const level = normalizeReasoningEffort(effort);
   if (level === DEFAULT_REASONING_EFFORT) return {};
-  if (supportsReasoningEffort(modelId)) {
-    // `reasoningEffort` is the AI SDK's provider-option name. The
-    // OpenAI-compatible adapter serializes it as `reasoning_effort` on the
-    // wire. Passing the wire spelling here would bypass the adapter schema.
-    const portable = level === 'minimal' ? 'low' : level === 'max' ? 'xhigh' : level;
-    return { reasoningEffort: portable };
-  }
-  // The model does not advertise support: send nothing rather than risk a 400.
-  return {};
+  // `reasoningEffort` is the AI SDK's provider-option name. The
+  // OpenAI-compatible adapter serializes it as `reasoning_effort` on the
+  // wire. Passing the wire spelling here would bypass the adapter schema.
+  const portable = level === 'minimal' ? 'low' : level === 'max' ? 'xhigh' : level;
+  return { reasoningEffort: portable };
 }
 
 /** Compact label for the composer pill. */

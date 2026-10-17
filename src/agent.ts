@@ -43,7 +43,6 @@ import {
   DEFAULT_REASONING_EFFORT,
   normalizeReasoningEffort,
   reasoningEffortBody,
-  supportsReasoningControl,
   type ReasoningEffort,
 } from './reasoning-effort';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
@@ -1498,7 +1497,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const selection = this.selectionFor(active);
         const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
         const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
-        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, reasoningSupported: !this.cliOwns(active, this.engineStatus) && supportsReasoningControl(selection.model), compactionUndoable, compactionRedoable });
+        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, compactionUndoable, compactionRedoable });
       }
     }
   }
@@ -4644,7 +4643,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       approvalMode: this.config().approvalMode,
       agentId: selection.agentId,
       reasoningEffort: selection.reasoningEffort,
-      reasoningSupported: (!active || !this.cliOwns(active, this.engineStatus)) && supportsReasoningControl(selection.model),
     });
   }
 
