@@ -204,13 +204,36 @@ export function friendlyError(error: unknown, provider?: Provider): string {
 }
 
 
-function statusCodeOf(error: unknown): number | undefined {
+export function statusCodeOf(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
   const record = error as Record<string, unknown>;
   for (const value of [record.statusCode, record.status, (record.response as Record<string, unknown> | undefined)?.status, (record.cause as Record<string, unknown> | undefined)?.statusCode]) {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
   }
   return undefined;
+}
+
+/**
+ * True when the error is the gateway refusing our credentials (401/403).
+ *
+ * A first-party SleepyAI 401/403 is usually a rotated or briefly flapping token
+ * rather than a real sign-out, so the run loop retries it with a forced token
+ * refresh before it is ever shown as "session expired".
+ */
+export function isAuthRejection(error: unknown): boolean {
+  const status = statusCodeOf(error);
+  return status === 401 || status === 403;
+}
+
+/**
+ * How long an automatic auth recovery may wait before it re-sends the request.
+ *
+ * The first retries are fast (a stale token is renewed within the first second)
+ * and later ones back off to a few seconds, so a gateway that flaps auth for a
+ * longer window still recovers without hammering it.
+ */
+export function authRetryBackoffMs(attempt: number): number {
+  return Math.min(5_000, 750 * Math.pow(2, Math.max(0, attempt - 1)));
 }
 
 export function classifyAgentError(error: unknown, provider?: Provider): AgentErrorPresentation {
@@ -236,25 +259,29 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     || status === 403
     || /\bunauthori[sz]ed\b|\bforbidden\b|session expired|token expired|invalid token|authentication required/.test(lower)
   ) {
-    return sleepy
-      ? {
+    // A 403 is frequently a transient gateway/proxy rejection rather than a real
+    // sign-out, so a first-party failure stays retryable: the run loop renews the
+    // token and resends before this card is ever rendered.
+    if (sleepy) {
+      return {
         code: 'auth_required',
-        title: 'SleepyAI session expired',
+        title: 'SleepyAI could not verify this session',
         message: raw,
-        retryable: false,
-        primaryAction: 'signin',
-        primaryLabel: 'Sign in again',
-        secondaryAction: 'account',
-        secondaryLabel: 'Open account',
-      }
-      : {
-        code: 'auth_required',
-        title: `${providerName} authentication failed`,
-        message: friendlyError(error, provider),
-        retryable: false,
-        primaryAction: 'settings',
-        primaryLabel: 'Open settings',
+        retryable: true,
+        primaryAction: 'retry',
+        primaryLabel: 'Retry',
+        secondaryAction: 'signin',
+        secondaryLabel: 'Sign in again',
       };
+    }
+    return {
+      code: 'auth_required',
+      title: `${providerName} authentication failed`,
+      message: friendlyError(error, provider),
+      retryable: false,
+      primaryAction: 'settings',
+      primaryLabel: 'Open settings',
+    };
   }
 
   if (

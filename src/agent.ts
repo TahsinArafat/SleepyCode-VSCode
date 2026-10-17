@@ -15,7 +15,7 @@ import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
-import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, toolTask } from './util';
+import { authRetryBackoffMs, classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
@@ -25,7 +25,7 @@ import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
 import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
-import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
+import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, refreshSleepyToken, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
 import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
 import { TerminalManager } from './terminal';
 import { MEMORY_RELATIVE_PATH, openProjectMemory, readProjectMemory, writeProjectMemory } from './memory';
@@ -61,6 +61,14 @@ type PlanState = {
 
 const MAX_CONCURRENT_RUNS = 3;
 const MAX_RUN_RETRIES = 5;
+/**
+ * Auth rejections get their own budget: a gateway that flaps a 401/403 mid-turn
+ * is retried with a freshly rotated token well before the turn is ever reported
+ * as a sign-out.
+ */
+const MAX_AUTH_RECOVERIES = 6;
+/** Transient 404s (edge/gateway routing while a model list propagates) get a short, separate budget. */
+const MAX_NOT_FOUND_RETRIES = 2;
 
 function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -3068,31 +3076,73 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ...(sleepyToken ? { Authorization: `Bearer ${sleepyToken}` } : {}),
         },
         fetch: async (input, init) => {
-          const maxRetries = 5;
-          const requestTemplate = typeof Request !== 'undefined' && input instanceof Request ? input.clone() : input;
+          let authRecoveries = 0;
+          let notFoundRetries = 0;
+          const method = (init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET') ?? 'GET').toUpperCase();
+          const headersAtSend = new Headers(init?.headers ?? (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined));
+          // A request carries the token captured in the headers closure at send time.
+          // After a rotation the same Request object would keep replaying the rejected
+          // token, so rebuild it (and the message-carrying init) with the new header.
+          const withAuthorization = (bearer: string): { input: typeof input; init: typeof init } => {
+            const authHeaders = new Headers(headersAtSend);
+            authHeaders.set('Authorization', `Bearer ${bearer}`);
+            if (typeof Request !== 'undefined' && input instanceof Request) {
+              input = new Request(input, { headers: authHeaders });
+            }
+            init = { ...(init ?? {}), headers: authHeaders };
+            return { input, init };
+          };
+          const report = (attempt: number, max: number, errorMsg: string, backoffMs: number): void => {
+            reconnectAttempt = attempt;
+            this.post({ type: 'retry', conversationId, attempt, max, error: errorMsg, backoffMs });
+          };
+          const endReport = (ok: boolean): void => {
+            if (!reconnectAttempt) return;
+            const attempt = reconnectAttempt;
+            reconnectAttempt = 0;
+            this.post({ type: 'retryEnd', conversationId, ok, attempt, max: Math.max(attempt, 5) });
+          };
           for (let attempt = 0; ; attempt++) {
             try {
-              const requestInput = typeof Request !== 'undefined' && requestTemplate instanceof Request ? requestTemplate.clone() : requestTemplate;
+              const requestInput = typeof Request !== 'undefined' && input instanceof Request ? input.clone() : input;
               const response = await fetch(requestInput, init);
-              const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
-              if (!retryable || attempt >= maxRetries) {
-                if (response.ok && reconnectAttempt) {
-                  this.post({ type: 'retryEnd', conversationId, ok: true, attempt: reconnectAttempt, max: maxRetries });
-                  reconnectAttempt = 0;
-                }
+              // The gateway refusing our credentials mid-turn is usually a rotated or
+              // briefly flapping token, not a real sign-out. Rotate it and resend the
+              // same request instead of ending the turn as "logged out".
+              if ((response.status === 401 || response.status === 403) && providerConfig.isSleepy && authRecoveries < MAX_AUTH_RECOVERIES) {
+                authRecoveries++;
+                const backoffMs = authRetryBackoffMs(authRecoveries);
+                const renewed = await refreshSleepyToken().catch(() => null);
+                this.log('warn', 'run.auth.recover', `status=${response.status}; attempt=${authRecoveries}/${MAX_AUTH_RECOVERIES}; renewed=${Boolean(renewed)}`);
+                report(authRecoveries, MAX_AUTH_RECOVERIES, `HTTP ${response.status}: ${renewed ? 'SleepyAI session refreshed' : 'SleepyAI session refresh unavailable'}`, backoffMs);
+                if (renewed) withAuthorization(renewed);
+                await waitForRetry(backoffMs, run.controller.signal);
+                continue;
+              }
+              // A 404 right after a model list change can be the edge still routing to
+              // the old catalog. Only an idempotent GET is replayed; a POST/prompt is
+              // never resent blindly, so a genuinely unknown model is still reported.
+              if (response.status === 404 && method === 'GET' && notFoundRetries < MAX_NOT_FOUND_RETRIES) {
+                notFoundRetries++;
+                const backoffMs = 1000 * notFoundRetries;
+                this.log('warn', 'run.request.notready', `status=404; attempt=${notFoundRetries}/${MAX_NOT_FOUND_RETRIES}`);
+                report(notFoundRetries, MAX_NOT_FOUND_RETRIES, 'HTTP 404: endpoint or model not ready yet', backoffMs);
+                await waitForRetry(backoffMs, run.controller.signal);
+                continue;
+              }
+              const transient = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+              if (!transient || attempt >= MAX_RUN_RETRIES) {
+                if (response.ok) endReport(true);
                 return response;
               }
-              reconnectAttempt = attempt + 1;
               const backoffMs = Math.min(30_000, 1000 * Math.pow(2, attempt));
-              const errorMsg = `HTTP ${response.status}: ${response.statusText || 'Server error'}`;
-              this.post({ type: 'retry', conversationId, attempt: reconnectAttempt, max: maxRetries, error: errorMsg, backoffMs });
+              report(attempt + 1, MAX_RUN_RETRIES, `HTTP ${response.status}: ${response.statusText || 'Server error'}`, backoffMs);
               await waitForRetry(backoffMs, run.controller.signal);
             } catch (error) {
-              if (run.controller.signal.aborted || attempt >= maxRetries) throw error;
-              reconnectAttempt = attempt + 1;
+              if (run.controller.signal.aborted || attempt >= MAX_RUN_RETRIES) throw error;
               const backoffMs = Math.min(30_000, 1000 * Math.pow(2, attempt));
               const errorMsg = error instanceof Error ? error.message : String(error);
-              this.post({ type: 'retry', conversationId, attempt: reconnectAttempt, max: maxRetries, error: errorMsg, backoffMs });
+              report(attempt + 1, MAX_RUN_RETRIES, errorMsg, backoffMs);
               await waitForRetry(backoffMs, run.controller.signal);
             }
           }
@@ -3422,6 +3472,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       const maxRunRetries = MAX_RUN_RETRIES;
       let runAttempt = 0;
+      // Auth rejections have their own budget; they are renewed, not counted as
+      // failed run attempts, so a flapping gateway never exhausts the retry loop.
+      let authRecoveries = 0;
       const baseStreamPrompt = streamPrompt;
       const baseWork = work.slice();
       while (true) {
@@ -3696,6 +3749,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         } catch (attemptError) {
           if (run.controller.signal.aborted) throw attemptError;
           const attemptInfo = classifyAgentError(attemptError, providerConfig);
+          // A sleep/wake or a gateway rollout can reject the stream with a 401/403
+          // even though the request was accepted. Rotate the token and resume the
+          // interrupted stream instead of ending the turn as "logged out": the
+          // partial answer is kept and continuation resumes from it.
+          if (isAuthRejection(attemptError) && providerConfig.isSleepy && authRecoveries < MAX_AUTH_RECOVERIES) {
+            authRecoveries++;
+            const backoffMs = authRetryBackoffMs(authRecoveries);
+            const renewed = await refreshSleepyToken().catch(() => null);
+            this.log('warn', 'run.stream.auth.recover', `attempt=${authRecoveries}/${MAX_AUTH_RECOVERIES}; renewed=${Boolean(renewed)}`);
+            this.post({ type: 'retry', conversationId, attempt: authRecoveries, max: MAX_AUTH_RECOVERIES, error: `HTTP ${statusCodeOf(attemptError) ?? 401}: ${renewed ? 'SleepyAI session refreshed' : 'SleepyAI session refresh unavailable'}`, backoffMs });
+            await waitForRetry(backoffMs, run.controller.signal);
+            const carriedText = answer.trim() || partialAnswer.trim() || resume?.partialText || '';
+            streamPrompt = carriedText
+              ? `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${carriedText.slice(-8_000)}`
+              : baseStreamPrompt;
+            work.length = 0;
+            work.push(...baseWork);
+            planState = undefined;
+            planItem = undefined;
+            activeTasks.clear();
+            reasoningBuffer = '';
+            workStartedAt = 0;
+            continue;
+          }
           if (!attemptInfo.retryable || attemptInfo.code === 'action_denied' || runAttempt >= maxRunRetries) {
             if (runAttempt) this.post({ type: 'retryEnd', conversationId, ok: false, attempt: runAttempt, max: maxRunRetries });
             throw attemptError;

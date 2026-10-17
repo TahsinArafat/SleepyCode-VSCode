@@ -106,14 +106,23 @@ export function getSleepyTokenSync(): string | null {
   return config?.access_token || config?.token || null;
 }
 
-export async function getSleepyToken(): Promise<string | null> {
+/**
+ * Access token for the gateway.
+ *
+ * `forceRefresh` renews with an explicit refresh-token call regardless of the
+ * stored `expires_at`. The gateway can reject a token that local expiry still
+ * considers valid (revoked, clock skew, or a 403 from the edge), so a mid-chat
+ * 401/403 must be able to rotate the token before the turn is retried.
+ */
+export async function getSleepyToken(options: { forceRefresh?: boolean } = {}): Promise<string | null> {
   const config = readGatewayConfig();
   if (!config) return null;
   let token = config.access_token || config.token || null;
   if (!token) return null;
 
   const expiresAt = config.expires_at ?? 0;
-  if (config.refresh_token && (Date.now() >= expiresAt || expiresAt - Date.now() < 10 * 60 * 1000)) {
+  const force = Boolean(options.forceRefresh);
+  if (config.refresh_token && (force || Date.now() >= expiresAt || expiresAt - Date.now() < 10 * 60 * 1000)) {
     const refreshed = await refreshToken(dashboardUrlOf(config), config.refresh_token);
     if (refreshed) {
       token = refreshed.access_token;
@@ -126,6 +135,19 @@ export async function getSleepyToken(): Promise<string | null> {
     }
   }
   return token;
+}
+
+/**
+ * Rotate the stored access token after the gateway rejected it, and return the
+ * fresh token. Returns null when the credentials have no refresh token or the
+ * refresh endpoint refuses the renewal — only then is the session really gone.
+ */
+export async function refreshSleepyToken(): Promise<string | null> {
+  const config = readGatewayConfig();
+  if (!config?.refresh_token) return null;
+  const before = config.access_token || config.token || null;
+  const rotated = await getSleepyToken({ forceRefresh: true });
+  return rotated && rotated !== before ? rotated : null;
 }
 
 export interface SleepyLimits {

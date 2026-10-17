@@ -11,7 +11,31 @@
  * parts onto `TranscriptItem`/`WorkItem` and never builds model-visible history.
  */
 
-import type { TranscriptItem, WorkItem } from './types';
+import type { AgentErrorPresentation, TranscriptItem, WorkItem } from './types';
+
+/**
+ * Shape a projected CLI failure the same way the local run loop does, without
+ * importing it: this module stays dependency-free so it can be unit-tested
+ * without `vscode`. A CLI turn that died on a 401/403 is an auth problem the
+ * sidebar retries with a renewed token (the CLI owns the token), so it must not
+ * read as a bare "Turn failed" or as a plain sign-out.
+ */
+function projectedErrorInfo(message: string): AgentErrorPresentation {
+  const status = Number(/(?:^|\D)(401|403)(?:\D|$)/.exec(message)?.[1] ?? NaN);
+  if (status === 401 || status === 403) {
+    return {
+      code: 'auth_required',
+      title: 'SleepyAI could not verify this session',
+      message,
+      retryable: true,
+      primaryAction: 'retry',
+      primaryLabel: 'Retry',
+      secondaryAction: 'signin',
+      secondaryLabel: 'Sign in again',
+    };
+  }
+  return { code: 'unknown', title: 'Turn failed', message, retryable: true };
+}
 
 /**
  * Pull a human-readable reason out of a CLI error value.
@@ -209,7 +233,10 @@ export function projectParts(parts: CliPart[], role: string, label: ToolLabel = 
       kind: 'error',
       timestamp: stamp,
       work: work.length ? work : undefined,
-      errorInfo: { code: 'unknown', title: 'Turn failed', message: errorMessage, retryable: true },
+      // Classify instead of hardcoding "Turn failed": a CLI turn that died on a
+      // 401/403 is an auth card that offers the retry/sign-in path rather than a
+      // bare "failed", and the run loop can retry it with a renewed token.
+      errorInfo: projectedErrorInfo(errorMessage),
     });
     return items;
   }
