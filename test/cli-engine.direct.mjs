@@ -324,3 +324,33 @@ test('a corrupt registry does not stop the extension from starting', () => {
   registry.bind('conv_a', 'ses_a');
   assert.equal(registry.sessionFor('conv_a'), 'ses_a');
 });
+
+test('an empty snapshot does not wipe a transcript that is already on screen', async () => {
+  // The sidebar is a pure mirror of CLI rows with nothing to fall back on, so clearing it
+  // on an empty read destroys real history — and an empty read also happens when a fetch
+  // races the CLI before the rows are written.
+  const stub = stubClient();
+  const chat = new CliChatSession(
+    { ...stub.client, messages: async () => HISTORY },
+    'ses_1', tool => tool, stub.onUpdate, stub.onError, stub.onPermission, stub.onLive,
+  );
+  await chat.open();
+  const settled = stub.updates.length;
+  assert.ok(settled > 0, 'the first read publishes the transcript');
+
+  // A later read comes back empty (idle, so not a streaming race).
+  chat.client.messages = async () => [];
+  await chat.refresh();
+
+  assert.equal(stub.updates.length, settled, 'an empty idle snapshot must not republish');
+});
+
+test('a session that really is empty still renders its empty state', async () => {
+  const stub = stubClient([]);
+  const chat = new CliChatSession(
+    { ...stub.client, messages: async () => [] },
+    'ses_1', tool => tool, stub.onUpdate, stub.onError, stub.onPermission, stub.onLive,
+  );
+  await chat.open();
+  assert.ok(stub.updates.length > 0, 'a first-ever empty read still publishes');
+});

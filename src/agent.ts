@@ -349,6 +349,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           }),
           live: event => this.applyCliLiveEvent(conversationId, event),
         }));
+        // A lost CLI session starts a fresh one, which orphans the old conversation in
+        // sleepy.db. Say so: silent replacement reads as history vanishing.
+        this.cliSessions.onSessionLost = id => {
+          this.log('warn', 'cli.session.lost', id);
+          this.post({
+            type: 'contextNotice',
+            conversationId: id,
+            kind: 'trimmed',
+            text: 'The Sleepy CLI no longer has this session, so a new one was started. The previous CLI history is still on disk but is no longer shown here.',
+          });
+        };
       }
     })();
     await this.engineReady;

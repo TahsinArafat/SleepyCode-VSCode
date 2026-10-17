@@ -1,5 +1,5 @@
 import { CliChatSession, CliSessionRegistry, type CliLiveEvent } from './cli-engine.ts';
-import type { CliClient } from './cli-client.ts';
+import { CliApiError, type CliClient } from './cli-client.ts';
 import type { TranscriptItem } from './types';
 
 export type CliChatCallbacks = {
@@ -22,6 +22,8 @@ export class CliSessionManager {
   private readonly registry: CliSessionRegistry;
   private readonly directory: string;
   private readonly callbacks: (conversationId: string) => CliChatCallbacks;
+  /** Called when a bound CLI session disappeared, before a replacement is created. */
+  onSessionLost?: (conversationId: string) => void;
 
   constructor(
     client: CliClient,
@@ -73,11 +75,17 @@ export class CliSessionManager {
 
   private async create(conversationId: string): Promise<CliChatSession | undefined> {
     let sessionId = this.registry.sessionFor(conversationId);
-    if (!sessionId || !(await this.sessionExists(sessionId))) {
-      const session = await this.client.createSession(this.directory);
-      sessionId = session.id;
-      this.registry.bind(conversationId, sessionId);
+    if (!sessionId) {
+      sessionId = await this.startSession(conversationId);
+    } else if ((await this.sessionState(sessionId)) === 'gone') {
+      // The CLI no longer knows this session. Starting a fresh one orphans the old
+      // history in sleepy.db, so say so before doing it.
+      this.onSessionLost?.(conversationId);
+      sessionId = await this.startSession(conversationId);
     }
+    // 'unknown' (the probe itself failed) keeps the existing binding and retries against
+    // it: a transient error is not evidence the session is gone, and rebinding on one was
+    // silently orphaning whole conversations.
 
     const callbacks = this.callbacks(conversationId);
     const chat = new CliChatSession(
@@ -94,12 +102,25 @@ export class CliSessionManager {
     return chat;
   }
 
-  private async sessionExists(sessionId: string): Promise<boolean> {
+  private async startSession(conversationId: string): Promise<string> {
+    const session = await this.client.createSession(this.directory);
+    this.registry.bind(conversationId, session.id);
+    return session.id;
+  }
+
+  /**
+   * Does the CLI still hold this session?
+   *
+   * Only an explicit 404 means gone. Any other failure — a timeout, a 5xx, the CLI
+   * restarting, a locked database — is `unknown`, and treating that as gone was
+   * silently minting a new session and orphaning the conversation's history.
+   */
+  private async sessionState(sessionId: string): Promise<'exists' | 'gone' | 'unknown'> {
     try {
       await this.client.messages(sessionId);
-      return true;
-    } catch {
-      return false;
+      return 'exists';
+    } catch (error) {
+      return error instanceof CliApiError && error.status === 404 ? 'gone' : 'unknown';
     }
   }
 }

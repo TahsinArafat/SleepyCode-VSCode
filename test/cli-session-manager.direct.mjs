@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { CliSessionRegistry } from '../src/cli-engine.ts';
 import { CliSessionManager } from '../src/cli-session-manager.ts';
+import { CliApiError } from '../src/cli-client.ts';
 
 function harness() {
   const persisted = new Map();
@@ -68,4 +69,68 @@ test('concurrent opens for one conversation create exactly one CLI session', asy
   assert.equal(a, b);
   assert.deepEqual(created, ['ses_1']);
   assert.equal(registry.sessionFor('conv_one'), 'ses_1');
+});
+
+function probeHarness(messagesImpl) {
+  const persisted = new Map();
+  const registry = new CliSessionRegistry({
+    get: key => persisted.get(key),
+    set: (key, value) => persisted.set(key, value),
+  });
+  const created = [];
+  let sequence = 0;
+  const known = new Set(['ses_existing']);
+  const client = {
+    async createSession() {
+      const id = `ses_${++sequence}`;
+      created.push(id);
+      known.add(id);
+      return { id };
+    },
+    messages: messagesImpl(known),
+    events() { return new Promise(() => {}); },
+  };
+  const lost = [];
+  const manager = new CliSessionManager(client, registry, '/workspace', () => ({
+    label: tool => tool,
+    update: () => {},
+    error: () => {},
+    permission: () => {},
+  }));
+  manager.onSessionLost = id => lost.push(id);
+  return { manager, registry, created, lost };
+}
+
+test('a transient probe failure does NOT start a new CLI session', async () => {
+  // The old probe was `catch { return false }`, so a timeout, a 5xx, or the CLI
+  // restarting all minted a fresh session and orphaned the conversation's history.
+  const { manager, registry, created, lost } = probeHarness(known => async id => {
+    if (id === 'ses_existing') throw new CliApiError('gateway timeout', 504);
+    if (!known.has(id)) throw new CliApiError('missing', 404);
+    return [];
+  });
+  registry.bind('conv', 'ses_existing');
+  await manager.open('conv');
+  assert.deepEqual(created, [], 'a non-404 failure must not create a session');
+  assert.equal(registry.sessionFor('conv'), 'ses_existing', 'the binding is kept');
+  assert.deepEqual(lost, [], 'and the conversation is not reported as lost');
+});
+
+test('a genuine 404 does start a new session and reports the loss', async () => {
+  const { manager, registry, created, lost } = probeHarness(known => async id => {
+    if (!known.has(id)) throw new CliApiError('missing', 404);
+    return [];
+  });
+  registry.bind('conv', 'ses_existing');
+  // Simulate the CLI having dropped it.
+  await manager.open('conv');
+  assert.equal(created.length, 0, 'still present, so no new session');
+
+  const gone = probeHarness(() => async () => {
+    throw new CliApiError('missing', 404);
+  });
+  gone.registry.bind('conv2', 'ses_existing');
+  await gone.manager.open('conv2');
+  assert.equal(gone.created.length, 1, 'a 404 replaces the session');
+  assert.deepEqual(gone.lost, ['conv2'], 'and tells the user their history was orphaned');
 });

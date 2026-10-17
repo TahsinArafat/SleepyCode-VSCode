@@ -219,6 +219,12 @@ export class CliChatSession {
   }
 
   private publish(messages: CliMessage[], busy: boolean): void {
+    // An empty snapshot is ambiguous: it can be a genuinely new session, or a read that
+    // raced the CLI before the rows were written. Clearing the sidebar on it wiped real
+    // history, because the extension's items are a pure mirror with nothing to fall back
+    // on. Keep what is on screen instead; a session that really is empty still shows the
+    // empty state the first time it opens.
+    if (!messages.length && !busy && this.lastMessages.length) return;
     this.lastMessages = messages;
     const items = messages.flatMap(message => projectMessage(message, this.label));
     applyPausedProjection(items, busy);
