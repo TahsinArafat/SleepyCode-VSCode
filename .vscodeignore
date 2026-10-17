@@ -21,3 +21,7 @@ artifacts/**
 .sleepycode/**
 .codegraph
 **/*.vsix
+.ui-shots/**
+.witdiff/**
+witdiff.toml
+docs/**
