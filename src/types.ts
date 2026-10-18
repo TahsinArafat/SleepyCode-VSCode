@@ -149,6 +149,22 @@ export type AgentErrorPresentation = {
   secondaryLabel?: string;
 };
 
+/**
+ * A single approval request and the decision the user made on it.
+ *
+ * `decision` mirrors the three choices the webview can already return over the `notifyResponse`
+ * channel (`'once' | 'session' | 'rejected'`). It is stored for the transcript only: authorisation
+ * still happens exclusively inside `Agent.approve`, so replaying history can never re-grant anything.
+ */
+export type ApprovalRecord = {
+  title: string;
+  kind: 'edit' | 'command';
+  /** The command or path that was gated, so the card can show the real thing rather than a label. */
+  command?: string;
+  risk?: 'low' | 'medium' | 'high';
+  decision: 'once' | 'session' | 'rejected';
+};
+
 export type TranscriptItem = {
   id: string;
   role: 'user' | 'assistant';
@@ -158,7 +174,7 @@ export type TranscriptItem = {
   /** Routed model id that produced this assistant response. */
   model?: string;
   timestamp: number;
-  kind?: 'error' | 'divider';
+  kind?: 'error' | 'divider' | 'approval';
   gitTree?: string;
   work?: WorkItem[];
   seconds?: number;
@@ -171,6 +187,12 @@ export type TranscriptItem = {
   changes?: FileChange[];
   fileSnapshot?: FileSnapshot[];
   errorInfo?: AgentErrorPresentation;
+  /**
+   * What an approval asked for and what was granted. Recorded so history shows the decision instead
+   * of silently replaying without it. The agent-side gate remains the only thing that authorises
+   * execution; this is a transcript record, never a control.
+   */
+  approval?: ApprovalRecord;
   commitHash?: string;
   commitMessage?: string;
   /** Turn cost in USD as reported by the CLI or local usage tracker. */

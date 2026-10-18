@@ -137,4 +137,25 @@ check(!packageJson.keywords.some(keyword => ['openrouter', 'groq', 'gemini', 'mi
 check(packageJson.contributes.commands.some(command => command.command === 'sleepycode.usage' && command.title === 'SleepyCode: Usage & Billing'), 'command palette presents the commercial Usage & Billing surface');
 check(packageJson.scripts.check.includes('scripts/logic-check.mjs') && packageJson.scripts.check.includes('npm test'), 'npm check executes repository contracts and tests');
 
+// --- Inline approvals: the trust-critical invariants -------------------------------
+// Approvals moved into the transcript for legibility. These pin the properties that make that safe,
+// because "the card looks like the modal" is not evidence that it behaves like one.
+const types = read('src/types.ts');
+check(/type\s*:\s*['"]notifyResponse['"]/.test(webviewRuntime) && /case ['"]notify['"]/.test(webviewRuntime)
+  && /showInlineApproval/.test(webviewRuntime) && /await showNotifyModal/.test(webviewRuntime),
+  'both the inline card and the modal answer over the same notifyResponse channel, so the reply vocabulary cannot drift between paths');
+check(/approvalCanRenderInline/.test(webviewRuntime) && /activeConversationId===activeConversationId|conversationId===activeConversationId/.test(webviewRuntime),
+  'the inline card is only used when the prompt belongs to the transcript on screen; everything else falls back to the modal');
+check(/if\s*\(!this\.view\)\s*return ['"]cancel['"]/.test(agent) && /if \(choice !== 'ok'\) throw new Error\('User denied this action\.'\)/.test(agent) && /if \(choice !== 'ok'\) throw new Error\('User rejected the proposed edit\.'\)/.test(agent),
+  'approval still blocks on an explicit decision, and both non-ok outcomes still throw before anything executes');
+check(/private async recordApproval/.test(agent) && /sessionAllowedCommands\.add/.test(agent) && /sessionAutoApproveEditRoots\.add/.test(agent),
+  'session-scoped grants still go through the existing allow-lists rather than a new path');
+// Recording the decision must never become authorising it: nothing may read item.approval back.
+check(!/item\.approval\b[^\n]*\?\s*(sessionAllowedCommands|sessionAutoApproveEditRoots)\.add/.test(agent)
+  && !/approval\.decision\s*===\s*['"]once['"][\s\S]{0,120}sessionAllowedCommands\.add/.test(agent),
+  'the recorded approval decision is never read back to grant anything');
+check(/kind\s*\?\s*:\s*['"]error['"]\s*\|\s*['"]divider['"]\s*\|\s*['"]approval['"]/.test(types)
+  && /decision:\s*['"]once['"]\s*\|\s*['"]session['"]\s*\|\s*['"]rejected['"]/.test(types),
+  'the approval record carries the full three-way decision vocabulary, so history can show what was granted');
+
 console.log(`LOGIC CHECK OK (${checks.length} checks)`);

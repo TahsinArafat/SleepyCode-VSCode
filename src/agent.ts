@@ -3215,8 +3215,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           root,
           skillsDir: this.skillsRoot(),
           config: () => this.config(),
-          approve: (kind, title, detail, destructive, approvalKey) => this.approve(kind, title, detail, destructive, approvalKey),
-          reviewEdit: (filePath, before, after, reason, destructive) => this.reviewEdit(filePath, before, after, reason, destructive),
+          approve: (kind, title, detail, destructive, approvalKey) => this.approve(kind, title, detail, destructive, approvalKey, conversationId),
+          reviewEdit: (filePath, before, after, reason, destructive) => this.reviewEdit(filePath, before, after, reason, destructive, conversationId),
           post: subagentPost,
           resolvePath: filePath => this.resolveWorkspacePath(filePath),
           observationsDir: () => this.observationsRoot(),
@@ -3382,8 +3382,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           root,
           skillsDir: this.skillsRoot(),
           config: () => this.config(),
-          approve: (kind, title, detail, destructive, approvalKey) => this.approve(kind, title, detail, destructive, approvalKey),
-          reviewEdit: (filePath, before, after, reason, destructive) => this.reviewEdit(filePath, before, after, reason, destructive),
+          approve: (kind, title, detail, destructive, approvalKey) => this.approve(kind, title, detail, destructive, approvalKey, conversationId),
+          reviewEdit: (filePath, before, after, reason, destructive) => this.reviewEdit(filePath, before, after, reason, destructive, conversationId),
           post: postToolEvent,
           resolvePath: filePath => this.resolveWorkspacePath(filePath),
           describePlan,
@@ -4391,10 +4391,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async approve(kind: 'edit' | 'command', title: string, detail: string, destructive = false, approvalKey?: string): Promise<void> {
+  private async approve(kind: 'edit' | 'command', title: string, detail: string, destructive = false, approvalKey?: string, conversationId?: string): Promise<void> {
     this.enforceHooks(kind === 'command' ? 'onCommand' : 'onEdit', { tool: kind, path: approvalKey, text: detail });
     const mode = this.config().approvalMode;
     if (!requiresApproval(kind, mode, destructive)) return;
+    const approval = conversationId ? { conversationId, kind, command: approvalKey } : undefined;
+    const record = async (choice: 'ok' | 'secondary' | 'cancel'): Promise<void> => {
+      if (approval) await this.recordApproval(approval, title, choice, destructive ? 'high' : 'medium');
+    };
 
     if (kind === 'command' && !destructive) {
       const command = approvalKey?.trim() ?? '';
@@ -4407,7 +4411,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         secondary: command ? 'Allow this command for session' : undefined,
         cancel: 'Deny',
         risk: 'medium',
+        approval,
       });
+      await record(choice);
       if (choice === 'secondary' && commandKey) {
         this.sessionAllowedCommands.add(commandKey);
         return;
@@ -4425,7 +4431,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       cancel: 'Deny',
       danger: destructive,
       risk: destructive ? 'high' : 'medium',
+      approval,
     });
+    await record(choice);
     if (choice === 'secondary' && kind === 'edit' && !destructive) {
       if (editRoot) this.sessionAutoApproveEditRoots.add(editRoot);
       return;
@@ -4433,7 +4441,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (choice !== 'ok') throw new Error('User denied this action.');
   }
 
-  private async reviewEdit(filePath: string, before: string, after: string, reason: string, destructive = false): Promise<void> {
+  /**
+   * Persist what an approval asked for and what the user granted, so history shows the decision
+   * rather than replaying a turn with a silent gap where the user was stopped and asked.
+   *
+   * This method only records. Authorisation remains entirely inside `approve`/`reviewEdit`; nothing
+   * ever reads `item.approval` back to decide anything, so a replayed transcript can never re-grant
+   * a permission that was not granted in that session.
+   */
+  private async recordApproval(
+    approval: { conversationId: string; kind: 'edit' | 'command'; command?: string },
+    title: string,
+    choice: 'ok' | 'secondary' | 'cancel',
+    risk: 'low' | 'medium' | 'high',
+  ): Promise<void> {
+    const project = this.projectForConversation(approval.conversationId);
+    const conversation = project?.conversations.find(item => item.id === approval.conversationId);
+    if (!conversation) return;
+    const item = createTranscriptItem('assistant', title, 'approval');
+    item.approval = {
+      title,
+      kind: approval.kind,
+      command: approval.command,
+      risk,
+      decision: choice === 'ok' ? 'once' : choice === 'secondary' ? 'session' : 'rejected',
+    };
+    conversation.items.push(item);
+    conversation.updatedAt = Date.now();
+    if (project) project.updatedAt = Date.now();
+    await this.persistProjects();
+  }
+
+  private async reviewEdit(filePath: string, before: string, after: string, reason: string, destructive = false, conversationId?: string): Promise<void> {
     this.enforceHooks('onEdit', { tool: 'edit', path: filePath, text: reason });
     const mode = this.config().approvalMode;
     const editRoot = this.workspaceRoot()?.fsPath ?? '';
@@ -4461,8 +4500,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           cancel: 'Reject',
           danger: destructive,
           risk: destructive ? 'high' : 'medium',
+          approval: conversationId ? { conversationId, kind: 'edit' as const, command: filePath } : undefined,
         },
       );
+      if (conversationId) {
+        await this.recordApproval(
+          { conversationId, kind: 'edit', command: filePath },
+          destructive ? `Review deletion of ${filePath}` : `Review proposed edit to ${filePath}`,
+          choice,
+          destructive ? 'high' : 'medium',
+        );
+      }
       if (choice === 'secondary' && !destructive) {
         if (editRoot) this.sessionAutoApproveEditRoots.add(editRoot);
         return;
@@ -4473,7 +4521,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async prompt(title: string, detail: string, options: { ok?: string; secondary?: string; cancel?: string; danger?: boolean; risk?: 'low' | 'medium' | 'high' } = {}): Promise<'ok' | 'secondary' | 'cancel'> {
+  /**
+   * Ask the user to decide, and block until they do.
+   *
+   * The decision vocabulary is deliberately unchanged: `'ok' | 'secondary' | 'cancel'` is the same
+   * contract the modal has always used, and `approve` remains the only thing that reads it. Inline
+   * rendering is purely presentational — the webview still answers with a `notifyResponse`, so
+   * moving the prompt into the transcript cannot widen what is allowed to execute.
+   *
+   * `options.approval` is extra context for the inline card only (which conversation the card
+   * belongs to, and the real command being gated). Omitting it keeps the modal behaviour.
+   */
+  private async prompt(title: string, detail: string, options: { ok?: string; secondary?: string; cancel?: string; danger?: boolean; risk?: 'low' | 'medium' | 'high'; approval?: { conversationId: string; kind: 'edit' | 'command'; command?: string } } = {}): Promise<'ok' | 'secondary' | 'cancel'> {
     if (!this.view) return 'cancel';
     const id = ++this.notifySeq;
     return new Promise(resolve => {
@@ -4488,6 +4547,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         cancelLabel: options.cancel ?? 'Cancel',
         danger: options.danger ?? false,
         risk: options.risk,
+        // Presentational only. `id` lets the webview find the card again when the decision lands.
+        approval: options.approval ? { id, ...options.approval } : undefined,
       });
     });
   }

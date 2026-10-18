@@ -12,7 +12,9 @@
 export type CompactableItem = {
   role: 'user' | 'assistant';
   text?: string;
-  kind?: 'error' | 'divider';
+  // 'approval' items are UI records of what the user granted. They carry the same shape as any other
+  // assistant item and are compacted like one; the model benefits from seeing what was approved.
+  kind?: 'error' | 'divider' | 'approval';
   contextTokens?: number;
 };
 

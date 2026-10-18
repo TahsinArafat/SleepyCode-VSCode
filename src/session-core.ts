@@ -18,7 +18,15 @@ export type SessionTranscriptItem = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  kind?: 'error' | 'divider';
+  kind?: 'error' | 'divider' | 'approval';
+  /** Mirrors `ApprovalRecord` in types.ts, redeclared structurally to keep this module dependency-free. */
+  approval?: {
+    title: string;
+    kind: 'edit' | 'command';
+    command?: string;
+    risk?: 'low' | 'medium' | 'high';
+    decision: 'once' | 'session' | 'rejected';
+  };
   partialText?: string;
   work?: unknown[];
   changes?: unknown[];

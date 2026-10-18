@@ -219,4 +219,28 @@ export const WEBVIEW_STYLES = String.raw`
 .task-block-copy.done{color:var(--vscode-testing-iconPassed,#22c55e)}
 .task-block pre{margin:0;padding:7px 9px;max-height:220px;overflow:auto}
 .task-block code{font:var(--vscode-editor-font-family);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+  /* Inline approval card. Mirrors the modal's risk vocabulary so the two paths read identically. */
+  .approval-card{border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-focusBorder);border-radius:6px;background:var(--vscode-editorWidget-background);padding:10px 12px;margin:8px 0;display:flex;flex-direction:column;gap:8px}
+  .approval-card.pending{border-left-color:var(--vscode-focusBorder)}
+  .approval-card.danger{border-left-color:var(--vscode-editorError-foreground)}
+  .approval-card.decided{opacity:.92}
+  .approval-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .approval-title{font-weight:600;color:var(--vscode-foreground);flex:1 1 auto;min-width:0}
+  .approval-kind{font-size:10px;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:10px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)}
+  .approval-risk{font-size:10px;padding:2px 7px;border-radius:10px;border:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground)}
+  .approval-risk.high{color:var(--vscode-editorError-foreground);border-color:var(--vscode-editorError-foreground)}
+  .approval-risk.medium{color:var(--vscode-editorWarning-foreground);border-color:var(--vscode-editorWarning-foreground)}
+  .approval-body{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .approval-body pre,.approval-reason{margin:0;padding:8px 10px;border-radius:4px;background:var(--vscode-textCodeBlock-background);color:var(--vscode-foreground);font-family:var(--vscode-editor-font-family);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}
+  .approval-reason{color:var(--vscode-descriptionForeground)}
+  .approval-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .approval-actions button{font:inherit;font-size:12px;padding:5px 12px;border-radius:4px;border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);cursor:pointer}
+  .approval-actions button:hover{background:var(--vscode-button-secondaryHoverBackground)}
+  .approval-actions button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:2px}
+  .approval-ok{background:var(--vscode-button-background)!important;color:var(--vscode-button-foreground)!important}
+  .approval-ok:hover{background:var(--vscode-button-hoverBackground)!important}
+  .approval-cancel{background:transparent!important;color:var(--vscode-descriptionForeground)!important;border-color:var(--vscode-panel-border)!important}
+  .approval-decision{font-size:12px;font-weight:600;color:var(--vscode-descriptionForeground)}
+  .approval-card[data-approval-decision="rejected"] .approval-decision{color:var(--vscode-editorError-foreground)}
+  .approval-card[data-approval-decision="once"] .approval-decision,.approval-card[data-approval-decision="session"] .approval-decision{color:var(--vscode-testing-iconPassed,var(--vscode-charts-green))}
 `;

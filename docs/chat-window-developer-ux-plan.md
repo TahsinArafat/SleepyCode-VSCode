@@ -181,7 +181,7 @@ Five independently shippable phases. Each names its files, its design, and the t
 
 ---
 
-### Phase 3 — Inline, auditable approvals
+### Phase 3 — Inline, auditable approvals ✅ SHIPPED
 
 **Problem:** §2-D. **Safety constraint: no widening.** The agent must still block on an explicit user decision; only the *presentation* changes.
 
@@ -283,4 +283,7 @@ Phase 2 shipped: `src/webview/highlight.ts` (dependency-free tokenizer for js/ts
 
 Two latent webview-injection bugs surfaced and were fixed on the way. `scripts/verify.mjs` substituted template interpolations with a string replacement, and a string replacement interprets `$'` as "the rest of the input", so any injected source containing that sequence was silently truncated before it was syntax-checked; all substitutions now use function replacers. And `runtime.ts` is a single `String.raw` template, so a backtick in a *comment* truncates the entire webview, which is now pinned by a test against `runtime.ts` itself.
 
-**Phase 3 is next — inline approvals.** Render the approval inside the turn with the real command and diff, offer Run once / Always-for-session / Reject, and persist the decision. The modal stays as a fallback so the set of things that can execute does not widen.
+Phase 3 shipped, and the design goal that mattered was that it could not widen what runs. That was made structural rather than reviewed: the inline card answers over the *same* `notifyResponse` channel the modal already used, and `Agent.approve` / `reviewEdit` are unchanged, so the three-way decision vocabulary is literally the same code path in both. The card is only used when the prompt belongs to the transcript currently on screen; a different conversation, a collapsed sidebar or a hidden view keeps the modal, because that is the case the modal exists for. The real command is rendered through the Phase 2 highlighter instead of a label, focus moves to the card, Escape rejects, and it announces with `aria-live="assertive"` — a blocking decision is not chatter.
+The decision is recorded on the transcript item (`decision: 'once' | 'session' | 'rejected'`) and replays read-only, so history shows what was requested *and* what was granted. Recording and authorising are deliberately separate concerns: `recordApproval` writes to `conversation.items` and nothing anywhere reads `item.approval` back, which is pinned as a gate contract so a future edit cannot quietly turn the record into a grant. Session-scoped grants still go through the pre-existing `sessionAllowedCommands` / `sessionAutoApproveEditRoots` allow-lists rather than a new path.
+Verified in `test/inline-approval.direct.mjs` against the real webview in Chromium, not a stub — the seam is exactly what is under test. It asserts the card renders the actual command, that each of the three buttons answers with the modal's own vocabulary, that a decided card exposes no buttons, that a double click resolves the promise once, that Escape rejects, that a mismatched conversation falls back to the modal, and that replaying a recorded approval posts *nothing* back to the host.
+**Phase 4 is next — keyboard-first shell model & accessibility.** Menus, focus order and ARIA, which currently assume a mouse.

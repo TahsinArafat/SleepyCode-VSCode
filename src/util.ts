@@ -42,7 +42,7 @@ export function resolvePathSafe(root: string, relativePath: string): string {
   }
 }
 
-export function createTranscriptItem(role: 'user' | 'assistant', text: string, kind?: 'error' | 'divider', gitTree?: string, work?: WorkItem[], seconds?: number, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number): TranscriptItem {
+export function createTranscriptItem(role: 'user' | 'assistant', text: string, kind?: 'error' | 'divider' | 'approval', gitTree?: string, work?: WorkItem[], seconds?: number, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number): TranscriptItem {
   return { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, role, text, timestamp: Date.now(), kind, gitTree, work, seconds, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 }
 
