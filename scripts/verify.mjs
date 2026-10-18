@@ -8,10 +8,15 @@ if (!runtimeMatch) throw new Error('webview runtime template not found');
 // the template source, so substitute them here too — otherwise the checker sees raw
 // `${NAME}` and reports a syntax error that the real build never produces.
 const { ESCAPE_HTML_SOURCE } = await import('../src/webview/runtime-core.ts');
+const { STREAM_RENDER_SOURCE, STREAM_FRAME_SOURCE } = await import('../src/webview/stream-render.ts');
+const { HIGHLIGHT_SOURCE } = await import('../src/webview/highlight.ts');
 const js = runtimeMatch[1]
-  .replaceAll('${gitTracked}', 'true')
-  .replaceAll('${markUri}', 'mark')
-  .replaceAll('${ESCAPE_HTML_SOURCE}', ESCAPE_HTML_SOURCE);
+  .replaceAll('${gitTracked}', () => 'true')
+  .replaceAll('${markUri}', () => 'mark')
+  .replaceAll('${ESCAPE_HTML_SOURCE}', () => ESCAPE_HTML_SOURCE)
+  .replaceAll('${STREAM_RENDER_SOURCE}', () => STREAM_RENDER_SOURCE)
+  .replaceAll('${STREAM_FRAME_SOURCE}', () => STREAM_FRAME_SOURCE)
+  .replaceAll('${HIGHLIGHT_SOURCE}', () => HIGHLIGHT_SOURCE);
 await import('node:child_process').then(({ execFileSync }) => {
   execFileSync(process.execPath, ['--check', '--input-type=module', '-'], { input: js, stdio: 'pipe' });
   console.log('webview JS: syntax OK');
@@ -58,7 +63,7 @@ if (!webviewCode.includes('projectIndicatorName.textContent=editorContext.active
 if (!webviewCode.includes('includeActiveFile=true') || !webviewCode.includes('data-context-toggle="active"')) {
   throw new Error('active-file context toggle is missing');
 }
-if (!webviewCode.includes('const context={includeProjectIndex,includeActiveFile,includeSelection')) {
+if (!/const context\s*=\s*\{\s*includeProjectIndex\s*,\s*includeActiveFile\s*,\s*includeSelection/.test(webviewCode)) {
   throw new Error('composer context toggles are not sent with requests');
 }
 if (!webviewCode.includes('id="contextSummaryButton"') || !webviewCode.includes('id="contextPanel"')) {

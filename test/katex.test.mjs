@@ -34,16 +34,23 @@ test('runtime renders inline and display math through KaTeX', () => {
 test('KaTeX is limited to think and content tokens, not tool-call labels', () => {
   assert.match(runtime, /function markdown\(raw,allowMath\)/);
   assert.match(runtime, /function protectInlineMath\(line,allowMath\)\{if\(allowMath===false\)return String\(line\);/);
-  assert.match(runtime, /r\.innerHTML=markdown\(part\);/);
-  assert.match(runtime, /current\.innerHTML=markdown\(current\.dataset\.raw\);/);
-  assert.match(runtime, /reasoning\.innerHTML=markdown\(reasoning\.dataset\.raw\);/);
-  assert.match(runtime, /className='reasoning';r\.innerHTML=markdown\(w\.text\);/);
+  assert.match(runtime, /r\.innerHTML\s*=\s*markdown\(\s*part\s*\)/);
+  // The streamed answer paints through the incremental stream renderer now, but its math handling
+  // must be unchanged. Two invariants pin that: it is bound to the page's own `markdown`, so live
+  // output and replayed history stay in lockstep, and `allowMath` arrives undefined, which markdown
+  // treats as enabled (`allowMath !== false`) — the same value a full pass gets.
+  assert.match(runtime, /createStreamRenderer\(markdown\)/);
+  assert.match(runtime, /streamRenderer\.html\(\s*raw\s*,\s*undefined\s*\)/);
+  assert.match(runtime, /reasoning\.innerHTML\s*=\s*markdown\(\s*reasoning\.dataset\.raw\s*\)/);
+  assert.match(runtime, /className\s*=\s*'reasoning';\s*r\.innerHTML\s*=\s*markdown\(\s*w\.text\s*\)/);
   assert.doesNotMatch(runtime, /task-label">'\+markdown\((?:t\.name|w\.text|retLabel)\)/);
-  assert.match(runtime, /task-label">'\+markdown\(t\.name,false\)/);
-  assert.match(runtime, /task-label">'\+markdown\(w\.text,false\)/);
-  assert.match(runtime, /innerHTML=markdown\(m\.name,false\)/);
-  assert.match(runtime, /innerHTML=markdown\(label,false\)/);
-  assert.match(runtime, /Reconnect failed '\+m\.attempt\+'\/'\+m\.max\+'\*\*',false\)/);
+  assert.match(runtime, /task-label">'\+markdown\(\s*t\.name\s*,\s*false\s*\)/);
+  assert.match(runtime, /task-label">'\+markdown\(\s*name\s*,\s*false\s*\)/);
+  // updateTask used to render the live label itself; it now delegates to the shared tool-card
+  // builder, which passes allowMath=false. Guard against a math-enabled label creeping back in.
+  assert.doesNotMatch(runtime, /\.task-label'\)\.innerHTML\s*=\s*markdown\(\s*m\.name\s*[,)]/);
+  assert.match(runtime, /innerHTML\s*=\s*markdown\(\s*label\s*,\s*false\s*\)/);
+  assert.match(runtime, /Reconnect failed '\s*\+\s*m\.attempt\s*\+\s*'\/'\s*\+\s*m\.max\s*\+\s*'\*\*'\s*,\s*false\s*\)/);
 });
 
 test('math blocks stay scrollable and themed', () => {

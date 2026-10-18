@@ -11,6 +11,8 @@ const webviewStyles = read('src/webview/styles.ts');
 const projectIndex = read('src/project-index.ts');
 const projectIndexCore = read('src/project-index-core.ts');
 const modelRoutingCore = read('src/model-routing-core.ts');
+const retryCore = read('src/retry-core.ts');
+const retryCoreTest = read('test/run-retry-budget.direct.mjs');
 const modelRoutingCoreTest = read('test/model-routing-core.direct.mjs');
 const git = read('src/git.ts');
 const ci = read('.github/workflows/ci.yml');
@@ -53,8 +55,8 @@ check(/id=['"]pf-headers['"]/.test(webviewCode), 'compatibility provider editor 
 check(/mentionSelectedIndex/.test(webviewCode) && /moveMentionSelection/.test(webviewCode), 'file mention menu supports keyboard selection');
 check(/stopImmediatePropagation\(\)/.test(webviewCode), 'mention selection prevents Enter from also submitting the prompt');
 check(!/providersList\.unshift\(\{id:['"]sleepyai['"][^}]*baseURL:\s*['"]['"]/.test(webviewCode), 'SleepyAI UI does not fabricate an empty provider URL');
-check(/What are we working on\?/.test(webviewCode) && /const STARTERS=\[/.test(webviewCode), 'empty state offers task-oriented SleepyAI starters');
-check(/id="contextSummaryButton"/.test(webviewCode) && /data-context-toggle="active"/.test(webviewCode) && /const context=\{includeProjectIndex,includeActiveFile,includeSelection/.test(webviewCode), 'composer exposes explicit active-file and selection context controls');
+check(/What are we working on\?/.test(webviewCode) && /const STARTERS\s*=\s*\[/.test(webviewCode), 'empty state offers task-oriented SleepyAI starters');
+check(/id="contextSummaryButton"/.test(webviewCode) && /data-context-toggle="active"/.test(webviewCode) && /const context\s*=\s*\{\s*includeProjectIndex\s*,\s*includeActiveFile\s*,\s*includeSelection/.test(webviewCode), 'composer exposes explicit active-file and selection context controls');
 check(/mode:'Build'/.test(webviewCode) && /mode:'Debug'/.test(webviewCode) && /mode:'Review'/.test(webviewCode), 'branded agents expose task-oriented modes');
 check(/function modelMeta\(/.test(webviewCode) && /per 1M in\/out/.test(webviewCode), 'model picker surfaces context and SleepyAI pricing metadata');
 check(/function changesCard\(/.test(webviewCode) && /Source Control/.test(webviewCode) && /Stage all/.test(webviewCode), 'completed responses expose a workspace changes review card');
@@ -72,8 +74,11 @@ check(/sendSleepyAccountData/.test(agent) && /30_000/.test(agent), 'SleepyAI acc
 check(/sessionAllowedCommands/.test(agent) && /commandKey/.test(agent) && /workspaceRoot\(\)\?\.fsPath/.test(agent) && /Allow this command for session/.test(agent), 'non-destructive exact commands can be trusted for the current workspace session');
 check(/sessionAutoApproveEditRoots/.test(agent) && /Allow edits for session/.test(agent), 'non-destructive edits can be trusted for the current workspace session');
 check(/risk: destructive \? 'high' : 'medium'/.test(agent) && /notify-risk/.test(webviewStyles), 'approval prompts surface a risk level');
-check(/for \(let attempt = 0; ; attempt\+\+\)/.test(agent) && /waitForRetry\(backoffMs, run\.controller\.signal\)/.test(agent) && /throw part\.error/.test(agent), 'retry UI is backed by real abort-aware HTTP retries without discarding structured provider errors');
-check(/MAX_RUN_RETRIES/.test(agent) && /Math\.pow\(2, runAttempt - 1\)/.test(agent) && /attemptInfo\.retryable/.test(agent) && /attemptInfo\.code === 'action_denied'/.test(agent), 'failed or unexpectedly stopped requests auto-retry with exponential backoff and skip non-transient failures');
+// Retries were extracted into src/retry-core.ts (bounded budget + transient classification) with the
+// loop staying in agent.ts. Two properties must never regress regardless of the loop's shape: the
+// backoff stays abort-aware, and a structured provider error is rethrown rather than flattened.
+check(/retryBudget\.take\(/.test(agent) && /await waitForRetry\((?:\w+\.)?backoffMs, run\.controller\.signal\)/.test(agent) && /throw part\.error/.test(agent) && /createRetryBudget/.test(retryCore) && /createRetryBudget/.test(retryCoreTest), 'retry UI is backed by real abort-aware HTTP retries without discarding structured provider errors');
+check(/attemptInfo\.retryable/.test(agent) && /attemptInfo\.code !== 'action_denied'/.test(agent) && /MAX_RUN_RETRIES/.test(retryCore) && /Math\.pow\(2/.test(retryCore), 'failed or unexpectedly stopped requests auto-retry with exponential backoff and skip non-transient failures');
 check(webviewCode.indexOf('Reasoning history') < webviewCode.indexOf('SleepyCode CLI') && webviewCode.indexOf('SleepyCode CLI') < webviewCode.indexOf('Danger zone'), 'CLI opt-in is placed at the bottom of Advanced settings above the danger zone');
 check(/WEBVIEW_STYLES/.test(webviewCode) && /\.\/webview\/styles/.test(webviewCode), 'webview stylesheet is extracted from the monolithic renderer');
 
@@ -96,13 +101,13 @@ check(/font-family="monospace"/.test(sleepyCodeMark) && sleepyCodeMark.includes(
 check(packageJson.name === 'sleepycode-agent' && packageJson.displayName === 'SleepyCode' && /^\d+\.\d+\.\d+$/.test(packageJson.version), 'package identity is fully rebranded and versioned as SleepyCode');
 check(!new RegExp(['Sleepy', 'IDE'].join('') + '|' + ['sleepy', 'ide'].join('')).test([providers, agent, webviewCode, webviewStyles, util, read('README.md'), read('plan.md'), read('src/extension.ts'), JSON.stringify(packageJson)].join('\n')), 'core source, docs, and manifest contain no retired product branding');
 check(/subagentSequence/.test(agent) && /type: 'subagent'/.test(agent) && /parentId: subagentId/.test(agent) && /Subagent \(\$\{role\}\) failed/.test(agent), 'subagents use explicit unique lifecycle/parent metadata and propagate failures');
-check(/case'subagent'/.test(webviewRuntime) && /const parentId=m\.parentId/.test(webviewRuntime) && !/startsWith\(['"]subagent-['"]\)/.test(webviewRuntime), 'webview groups subagent tools by explicit parent id instead of fragile id prefixes');
+check(/case\s*'subagent'/.test(webviewRuntime) && /const parentId\s*=\s*m\.parentId/.test(webviewRuntime) && !/startsWith\(\s*['"]subagent-['"]/.test(webviewRuntime), 'webview groups subagent tools by explicit parent id instead of fragile id prefixes');
 check(/delete subagentTools\.delegate_task/.test(agent) && /isolated context window/.test(agent) && /Subagents cannot recursively delegate/.test(read('src/tools.ts')), 'subagent context is isolated and recursive delegation is disabled');
 check(/classifySubagentStep/.test(agent) && /harvestSubagentText/.test(agent) && /rememberVisibleText/.test(agent) && /export function harvestSubagentText/.test(read('src/subagent-core.ts')), 'subagent results harvest leftover visible text instead of returning empty');
 check(/html,body\{[^}]*overflow:hidden/.test(webviewStyles) && /#messages\{[^}]*flex:1 1 0[^}]*overflow-y:auto/.test(webviewStyles) && /\.composer\{[^}]*flex:0 0 auto/.test(webviewStyles), 'chat viewport keeps the composer out of the scroll pane and messages independently scroll');
 check(/max-height:min\(180px,28vh\)/.test(webviewStyles) && /@media \(max-height:520px\)/.test(webviewStyles) && /ResizeObserver/.test(webviewRuntime), 'composer height is bounded and responds to short/narrow VS Code panels');
 check(/const SLASH_COMMANDS=\[/.test(webviewRuntime) && /command:'\/skill'/.test(webviewRuntime) && /command:'\/skills'/.test(webviewRuntime) && /command:'\/reindex'/.test(webviewRuntime), 'composer exposes slash commands for skills and high-value extension actions');
-check(/installedSkills\.filter\(skill=>/.test(webviewRuntime) && /skillPickerQuery\(value\)!==null/.test(webviewRuntime) && /if\(skillPickerOpen\)refreshSkillPicker\(\)/.test(webviewRuntime) && /The user explicitly invoked the installed skill/.test(webviewRuntime), 'slash skill autocomplete is driven by installed skills and expands to an explicit skill invocation');
+check(/installedSkills\.filter\(skill=>/.test(webviewRuntime) && /skillPickerQuery\(value\)!==null/.test(webviewRuntime) && /if\s*\(skillPickerOpen\)\s*refreshSkillPicker\(\)/.test(webviewRuntime) && /The user explicitly invoked the installed skill/.test(webviewRuntime), 'slash skill autocomplete is driven by installed skills and expands to an explicit skill invocation');
 check(/skillsmp_list_installed \/ skillsmp_read_installed/.test(agent) && /inspect the Installed skills inventory included in your instructions/.test(agent) && /Installed skills inventory \(metadata only/.test(read('src/skills.ts')), 'system prompt actively discovers and loads installed skills before use');
 check(/try \{\s*this\.log\('info', 'run\.preflight\.start'[\s\S]*?if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
 check(/await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/.test(agent), 'model refresh re-reads configuration before declaring that no model is selected');
@@ -120,7 +125,7 @@ check(/ubuntu-latest/.test(ci) && /windows-latest/.test(ci) && /macos-latest/.te
 check(/vsce package/.test(releaseWorkflow) && /upload-artifact@v\d+/.test(releaseWorkflow) && /verify:release/.test(releaseWorkflow), 'release workflow validates metadata and packages a VSIX artifact');
 check(packageJson.version === JSON.parse(read('package-lock.json')).version, 'package and lockfile versions match');
 
-check(/fileChangeStats/.test(agent) && /additions: live\.additions/.test(agent) && /function changeStatHtml/.test(webviewRuntime) && /className='changed has-preview'/.test(webviewRuntime) && /changeStatHtml\(plus,minus,true\)/.test(webviewRuntime) && /\.change-plus\{/.test(webviewStyles) && /\.change-stat\.totals\{/.test(webviewStyles), 'file changes persist plus/minus counts and render expandable line previews with a completed-turn total');
+check(/fileChangeStats/.test(agent) && /additions: live\.additions/.test(agent) && /function changeStatHtml/.test(webviewRuntime) && /className='changed has-preview'/.test(webviewRuntime) && /changeStatHtml\(\s*plus\s*,\s*minus\s*,\s*true\s*\)/.test(webviewRuntime) && /\.change-plus\{/.test(webviewStyles) && /\.change-stat\.totals\{/.test(webviewStyles), 'file changes persist plus/minus counts and render expandable line previews with a completed-turn total');
 check(/DEFAULT_PERSISTED_REASONING = 32_000/.test(read('src/reasoning-core.ts')) && /attachReasoningToLatestAssistant\(runMessages/.test(agent) && /maxPersistedReasoning/.test(JSON.stringify(packageJson.contributes.configuration.properties)) && /Persisted thinking characters/.test(webview), 'previous thinking is persisted onto later model requests and the budget is configurable in Settings → Advanced');
 check(/type: 'changed', path: filePath, action: exists \? 'Modified' : 'Created', before, after: content/.test(read('src/tools.ts')) && /type: 'changed', path: filePath, action: 'Deleted', before, after: ''/.test(read('src/tools.ts')), 'create, edit, and delete tools post before/after text so line stats can be computed');
 

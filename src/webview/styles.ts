@@ -174,4 +174,49 @@ export const WEBVIEW_STYLES = String.raw`
 /* Genuinely narrow: drop the label but keep the icon, title and aria-label. */
 @media (max-width:320px){.composer .actions .context-summary{max-width:26px;padding:0;justify-content:center}.composer .actions .context-summary #contextSummaryText{display:none}}
 @media (max-width:560px){.composer .actions .model-pill,.composer .actions .agent-pill{max-width:min(160px,42vw)}}
+
+/* Code blocks. The transcript's densest surface, so it gets a labelled header bar, a copy button
+   on every block, and an expand toggle once a block passes 24 lines. Tall blocks cap their height
+   behind a fade instead of pushing the rest of the answer off screen. */
+.code-block{margin:10px 0;border:1px solid color-mix(in srgb,var(--vscode-widget-border) 78%,transparent);border-radius:6px;background:var(--vscode-editor-background);overflow:hidden}
+.code-bar{display:flex;align-items:center;gap:8px;padding:3px 6px 3px 10px;border-bottom:1px solid color-mix(in srgb,var(--vscode-widget-border) 60%,transparent);background:color-mix(in srgb,var(--vscode-editorWidget-background,#252526) 55%,transparent)}
+.code-lang{font:600 10px/1.6 var(--vscode-font-family);letter-spacing:.04em;text-transform:uppercase;color:var(--vscode-descriptionForeground)}
+.code-bar button{margin-left:auto;font:500 10px/1.6 var(--vscode-font-family);color:var(--vscode-descriptionForeground);background:transparent;border:1px solid transparent;border-radius:4px;padding:2px 7px;cursor:pointer}
+.code-bar button+button{margin-left:4px}
+.code-bar button:hover{color:var(--vscode-foreground);background:var(--vscode-toolbar-hoverBackground)}
+.code-bar button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:1px}
+.code-bar button.done{color:var(--vscode-testing-iconPassed,#22c55e)}
+.code-block pre{margin:0;padding:10px 12px;overflow-x:auto;font:var(--vscode-editor-font-family);font-size:12.5px;line-height:1.55;tab-size:2}
+.code-block code{font:inherit;white-space:pre}
+.code-block.tall:not(.expanded) pre{max-height:320px;-webkit-mask-image:linear-gradient(to bottom,#000 78%,transparent);mask-image:linear-gradient(to bottom,#000 78%,transparent)}
+.code-block.tall.expanded pre{max-height:none}
+
+/* Token colors come from VS Code's own theme variables so light, dark and high-contrast themes are
+   all correct for free. Each falls back through the plain foreground, which keeps an unthemed
+   webview legible rather than colorless. */
+.tok-keyword{color:var(--vscode-editor-tokenKeyword-foreground,var(--vscode-foreground))}
+.tok-str{color:var(--vscode-editor-tokenString-foreground,var(--vscode-foreground))}
+.tok-num{color:var(--vscode-editor-tokenNumber-foreground,var(--vscode-foreground))}
+.tok-com{color:var(--vscode-editor-tokenComment-foreground,var(--vscode-descriptionForeground));font-style:italic}
+.tok-key{color:var(--vscode-editor-tokenKeyword-foreground,var(--vscode-foreground))}
+.tok-meta{color:var(--vscode-editor-tokenComment-foreground,var(--vscode-descriptionForeground))}
+.tok-add{color:var(--vscode-gitDecoration-addedResourceForeground,var(--vscode-testing-iconPassed,#22c55e))}
+.tok-del{color:var(--vscode-gitDecoration-deletedResourceForeground,var(--vscode-testing-iconFailed,#f14c4c))}
+
+/* Tool cards. Args and Result stay collapsed until asked for, so a run with thirty tool calls still
+   reads as a list rather than a wall; expanding is a per-row class flip, so nothing re-renders. */
+.tool{flex-wrap:wrap}
+.task-duration{flex:none;font:500 10px/1.6 var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding-top:3px}
+.task-detail-toggle{flex:none;font:500 10px/1.6 var(--vscode-font-family);color:var(--vscode-descriptionForeground);background:transparent;border:1px solid color-mix(in srgb,var(--vscode-widget-border) 80%,transparent);border-radius:4px;padding:1px 7px;cursor:pointer}
+.task-detail-toggle:hover,.task-detail-toggle:focus-visible{color:var(--vscode-foreground);background:var(--vscode-toolbar-hoverBackground)}
+.task-block{flex:0 0 100%;display:none;margin:4px 0 6px 24px;border:1px solid color-mix(in srgb,var(--vscode-widget-border) 60%,transparent);border-radius:5px;background:var(--vscode-editor-background);overflow:hidden}
+.tool.expanded .task-block{display:block}
+.task-block.error{border-color:color-mix(in srgb,var(--vscode-errorForeground) 45%,transparent)}
+.task-block-head{display:flex;align-items:center;justify-content:space-between;padding:1px 5px 1px 9px;border-bottom:1px solid color-mix(in srgb,var(--vscode-widget-border) 55%,transparent)}
+.task-block-label{font:600 10px/1.8 var(--vscode-font-family);letter-spacing:.04em;text-transform:uppercase;color:var(--vscode-descriptionForeground)}
+.task-block-copy{font:500 10px/1.8 var(--vscode-font-family);color:var(--vscode-descriptionForeground);background:transparent;border:0;border-radius:4px;padding:0 6px;cursor:pointer}
+.task-block-copy:hover{color:var(--vscode-foreground);background:var(--vscode-toolbar-hoverBackground)}
+.task-block-copy.done{color:var(--vscode-testing-iconPassed,#22c55e)}
+.task-block pre{margin:0;padding:7px 9px;max-height:220px;overflow:auto}
+.task-block code{font:var(--vscode-editor-font-family);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 `;

@@ -1,7 +1,9 @@
 import { ESCAPE_HTML_SOURCE } from './runtime-core';
+import { HIGHLIGHT_SOURCE } from './highlight';
+import { STREAM_FRAME_SOURCE, STREAM_RENDER_SOURCE } from './stream-render';
 
 export function getWebviewRuntime(markUri: string, gitTracked: boolean): string {
-  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
+  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),composerEl=document.querySelector('.composer'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
   const effortDropdown=document.getElementById('effortDropdown'),effortButton=document.getElementById('effortButton'),effortMenu=document.getElementById('effortMenu');
   const agentDropdown=document.getElementById('agentDropdown'),agentButton=document.getElementById('agentButton'),agentMenu=document.getElementById('agentMenu'),agentIcon=document.getElementById('agentIcon'),safetyDropdown=document.getElementById('safetyDropdown'),safetyButton=document.getElementById('safetyButton'),safetyMenu=document.getElementById('safetyMenu'),contextPanel=document.getElementById('contextPanel'),contextItems=document.getElementById('contextItems'),contextPanelMeta=document.getElementById('contextPanelMeta'),contextSummaryButton=document.getElementById('contextSummaryButton'),contextSummaryText=document.getElementById('contextSummaryText');
   const AGENTS=[
@@ -203,8 +205,60 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   input.addEventListener('paste',event=>{const file=[...event.clipboardData.files].find(item=>item.type.startsWith('image/'));if(!file)return;event.preventDefault();const reader=new FileReader();reader.onload=()=>vscode.postMessage({type:'pasteImage',dataUrl:String(reader.result),mimeType:file.type,name:file.name||'pasted-image',size:file.size});reader.readAsDataURL(file)});
   const attachButton=document.getElementById('attachButton');
   attachButton?.addEventListener('click',()=>vscode.postMessage({type:'requestFilePicker'}));
+  // Code-block controls live inside innerHTML that streaming rewrites constantly, so they are
+  // delegated from the message list instead of bound per node. Copy uses the host clipboard
+  // (vscode.env.clipboard), which avoids webview focus and permission quirks; the label feedback is
+  // local because the host's {type:'copied'} acknowledgement carries no UI today.
+  messages.addEventListener('click',event=>{
+    const target=event.target;
+    if(!target||!target.closest)return;
+    const toggle=target.closest('.code-toggle');
+    if(toggle){
+      const block=toggle.closest('.code-block');
+      if(!block)return;
+      const open=block.classList.toggle('expanded');
+      toggle.setAttribute('aria-expanded',open?'true':'false');
+      toggle.textContent=open?'Collapse':(toggle.dataset.label||'Expand');
+      return;
+    }
+    const detail=target.closest('.task-detail-toggle');
+    if(detail){
+      const row=detail.closest('.tool');
+      if(!row)return;
+      const open=row.classList.toggle('expanded');
+      detail.setAttribute('aria-expanded',open?'true':'false');
+      detail.textContent=open?'Hide details':'Details';
+      return;
+    }
+    const blockCopy=target.closest('.task-block-copy');
+    if(blockCopy){
+      const block=blockCopy.closest('.task-block');
+      const source=block&&block.querySelector('code');
+      if(!source)return;
+      vscode.postMessage({type:'copyText',text:source.textContent||''});
+      const previous=blockCopy.textContent;
+      blockCopy.textContent='Copied';
+      blockCopy.classList.add('done');
+      setTimeout(()=>{blockCopy.textContent=previous;blockCopy.classList.remove('done')},1200);
+      return;
+    }
+    const copy=target.closest('.code-copy');
+    if(copy){
+      const block=copy.closest('.code-block');
+      const source=block&&block.querySelector('code');
+      if(!source)return;
+      vscode.postMessage({type:'copyText',text:source.textContent||''});
+      const previous=copy.textContent;
+      copy.textContent='Copied';
+      copy.classList.add('done');
+      setTimeout(()=>{copy.textContent=previous;copy.classList.remove('done')},1200);
+    }
+  });
 
   ${ESCAPE_HTML_SOURCE}
+  ${STREAM_RENDER_SOURCE}
+  ${STREAM_FRAME_SOURCE}
+  ${HIGHLIGHT_SOURCE}
   const mathTokens=[];
   const mathStart=String.fromCharCode(57346),mathEnd=String.fromCharCode(57347);
   const katexApi=()=>window.katex;
@@ -524,11 +578,22 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function closeUsageView(){usageView.classList.remove('visible');document.querySelector('.app').style.display='flex';clearInterval(usageTimer);usageTimer=null}
   const nearBottom=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<42;
   const isRunning=()=>runningSet.has(activeConversationId);
-  function updateJump(){const away=!nearBottom();jumpBottom.style.bottom=(document.querySelector('.composer').offsetHeight+10)+'px';jumpBottom.classList.toggle('visible',away);jumpBottom.classList.toggle('working',away&&isRunning())}
+  function updateJump(){const away=!nearBottom();jumpBottom.style.bottom=((composerEl?composerEl.offsetHeight:0)+10)+'px';jumpBottom.classList.toggle('visible',away);jumpBottom.classList.toggle('working',away&&isRunning())}
   function syncSendButton(){updateSendMode()}
   function ensureOptimisticActivity(){if(isRunning()&&!activity&&currentTurn){try{createActivity();const st=activity&&activity.querySelector('.activity-status');if(st)st.textContent='Working…'}catch(e){}}}
   const pinScroll=()=>{if(followOutput)messages.scrollTop=messages.scrollHeight};
-  const scroll=(force=false)=>{if(force||followOutput)pinScroll();updateJump();requestAnimationFrame(()=>{if(followOutput)pinScroll();updateJump()})};
+  // scroll() re-measures after the frame because a layout can still shift under it (webfonts,
+  // a composer growing, an inserted activity block). That second pass used to be queued on every
+  // call, so one streamed token scheduled one extra frame of forced layout. Coalesce it: at most
+  // one follow-up measurement is pending per tick, no matter how many callers asked.
+  let scrollFollowUp=0;
+  const scroll=(force=false)=>{
+    if(force||followOutput)pinScroll();
+    updateJump();
+    if(scrollFollowUp)return;
+    const raf=typeof requestAnimationFrame==='function'?requestAnimationFrame:cb=>setTimeout(cb,16);
+    scrollFollowUp=raf(()=>{scrollFollowUp=0;if(followOutput)pinScroll();updateJump()});
+  };
   function scrollActivity(){const body=activityBody,details=activity;requestAnimationFrame(()=>{if(body&&details?.open&&followOutput)body.scrollTop=body.scrollHeight});scroll()}
   function freshLive(){return{userItem:null,phase:'thinking',plan:null,currentRaw:'',errorText:null,errorRetry:false,activity:null,closedActivities:[]}}
   function liveState(convId){let s=liveByConversation.get(convId);if(!s){s=freshLive();liveByConversation.set(convId,s)}return s}
@@ -539,889 +604,957 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function changePreviewHtml(preview){if(!preview||!preview.length)return'';return '<div class="change-hunk">'+preview.map(line=>{const kind=line&&line.kind==='add'?'add':line&&line.kind==='del'?'del':line&&line.kind==='ctx'?'ctx':'meta';const mark=kind==='add'?'+':kind==='del'?'−':kind==='ctx'?' ':'·';return '<div class="change-line '+kind+'"><span class="change-mark">'+mark+'</span><span class="change-text">'+esc(line&&line.text||'')+'</span></div>'}).join('')+'</div>'}
   function liveChangedRow(change,openPreview){const preview=changePreviewHtml(change.preview);const stats=changeStatHtml(change.additions,change.deletions);const label=esc(change.action||'Changed');const path=esc(change.path||'');if(!preview){const d=document.createElement('div');d.className='changed';d.innerHTML='<span class="changed-action">'+label+'</span><span class="changed-path">'+path+'</span>'+stats;if(change.path)d.onclick=()=>vscode.postMessage({type:'openFile',path:change.path});return d}if(activityBody)activityBody.querySelectorAll('details.changed.has-preview[open]').forEach(el=>{el.open=false});const d=document.createElement('details');d.className='changed has-preview';d.open=openPreview!==false;d.innerHTML='<summary><span class="changed-action">'+label+'</span><button type="button" class="changed-path">'+path+'</button>'+stats+'</summary>'+preview;const open=d.querySelector('.changed-path');if(open)open.onclick=e=>{e.preventDefault();e.stopPropagation();if(change.path)vscode.postMessage({type:'openFile',path:change.path})};return d}
   function taskIconSvg(tool,label){const IC={read_file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/>',write_file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14h6"/>',replace_text:'<path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',delete_file:'<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',list_files:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',diagnostics:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',terminal:'<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',web:'<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',plan:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m9 12 2 2 4-4"/>',subagent:'<circle cx="12" cy="8" r="5"/><path d="M4 21a8 8 0 0 1 16 0"/>',memory:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',repo:'<path d="m12 2 10 5-10 5L2 7l10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/>',symbol:'<path d="m8 7-5 5 5 5"/><path d="m16 7 5 5-5 5"/>',worktree:'<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',github:'<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 9v6"/><path d="M18 9a6 6 0 0 1-6 6h-3"/>',browser:'<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',skills:'<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/>',question:'<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',clock:'<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',retry:'<path d="M3 12a9 9 0 0 1 15.5-6.5L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.5L3 16"/><path d="M3 21v-5h5"/>',tool:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'};IC.search_files=IC.search;IC.get_diagnostics=IC.diagnostics;IC.run_command=IC.terminal;IC.web_search=IC.web;IC.delegate_task=IC.subagent;IC.read=IC.read_file;IC.write=IC.write_file;IC.edit=IC.replace_text;IC.multiedit=IC.replace_text;IC.apply_patch=IC.replace_text;IC.bash=IC.terminal;IC.glob=IC.list_files;IC.grep=IC.search;IC.webfetch=IC.web;IC.websearch=IC.web;IC.skill=IC.skills;IC.task=IC.plan;IC.actor=IC.subagent;IC.lsp=IC.tool;IC.notebook_edit=IC.replace_text;IC.repo_symbol=IC.symbol;IC.cron=IC.clock;IC.history=IC.clock;const key=String(tool||'');let icon=IC[key];if(!icon){for(const p of [['terminal_','terminal'],['browser_','browser'],['github_','github'],['worktree_','worktree'],['skillsmp_','skills'],['repo_search','search'],['repo_memory','memory'],['memory_','memory'],['repo_','repo']]){if(key.startsWith(p[0])){icon=IC[p[1]];break}}}if(!icon){const text=String(label||'');if(/^Reading file/.test(text))icon=IC.read_file;else if(/^Writing file/.test(text))icon=IC.write_file;else if(/^Editing file/.test(text))icon=IC.replace_text;else if(/^Deleting file/.test(text))icon=IC.delete_file;else if(/^Listing files/.test(text))icon=IC.list_files;else if(/^Searching workspace|^Searching repository/.test(text))icon=IC.search;else if(/^Checking diagnostics/.test(text))icon=IC.diagnostics;else if(/^Running subagent/.test(text))icon=IC.subagent;else if(/^Running command/.test(text))icon=IC.terminal;else if(/^Searching the web/.test(text))icon=IC.web;else if(/^Planning/.test(text))icon=IC.plan;else if(/project memory/.test(text))icon=IC.memory;else if(/terminal/.test(text))icon=IC.terminal;else if(/^Reconnecting/.test(text))icon=IC.retry;else if(/[Ss]kill/.test(text))icon=IC.skills;else icon=IC.tool}return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(icon||IC.tool)+'</svg>'}
+  // One card shape for every tool row, shared by the live activity and the history replay, so a run
+  // looks identical while it streams and after it is reloaded. Duration prefers the server-measured
+  // value and falls back to a live tick while the tool is still running; the tick piggybacks on
+  // activity re-renders instead of running a permanent interval per open row.
+  function toolDurationText(t){if(typeof t.durationMs==='number'&&isFinite(t.durationMs))return t.durationMs<1000?t.durationMs+'ms':(Math.round(t.durationMs/100)/10)+'s';if(t.startedAt&&!t.done)return (Math.max(0,Date.now()-t.startedAt)/1000).toFixed(1)+'s';return ''}
+  function toolBodyBlock(label,text,isError){
+    const json=/^\s*[[{]/.test(text);
+    const body=json?highlight(text,'json'):esc(text);
+    return '<div class="task-block'+(isError?' error':'')+'"><div class="task-block-head"><span class="task-block-label">'+esc(label)+'</span><button class="task-block-copy" type="button">Copy</button></div><pre><code>'+body+'</code></pre></div>';
+  }
+  function toolRowHtml(t){
+    const name=(t.name!==undefined&&t.name!==null)?t.name:t.text;
+    const dur=toolDurationText(t);
+    const hasBody=Boolean(t.args||t.result);
+    return '<span class="task-state">'+taskIconSvg(t.tool,name)+'</span>'+
+      '<div class="task-label">'+markdown(name,false)+'</div>'+
+      (dur?'<span class="task-duration">'+esc(dur)+'</span>':'')+
+      (hasBody?'<button class="task-detail-toggle" type="button" aria-expanded="false">Details</button>':'')+
+      (t.args?toolBodyBlock('Args',t.args,false):'')+
+      (t.result?toolBodyBlock('Result',t.result,Boolean(t.failed)):'');
+  }
   function subagentRoleIcon(role){const I={explorer:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',reviewer:'<path d="M12 3 5 6v5c0 4.6 2.9 8.2 7 10 4.1-1.8 7-5.4 7-10V6z"/><path d="m9 12 2 2 4-4"/>',worker:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'};return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(I[String(role||'').toLowerCase()]||I.worker)+'</svg>'}
-  function buildLiveActivity(a){const d=document.createElement('details');d.className='activity'+(a.loading?' loading':'')+(liveActivityContent(a)?' has-content':'');d.open=a.open;if(a.loading&&!liveActivityContent(a)){d.innerHTML='<summary><span class="activity-status">'+esc(a.summary||'Thinking…')+'</span><button class="activity-stop-btn" type="button" title="Stop running" aria-label="Stop running"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button></summary><div class="activity-body"></div>'}else{d.innerHTML='<summary>'+esc(a.summary||'Thinking…')+'</summary><div class="activity-body"></div>'}const body=d.querySelector('.activity-body');for(const part of a.reasoningParts||[]){const r=document.createElement('div');r.className='reasoning';r.dataset.raw=part;r.innerHTML=markdown(part);body.appendChild(r)}for(const t of (a.tasks||[]).filter(t=>!t.parentId)){const row=document.createElement('div');row.className='tool'+(t.done?' done':'')+(t.failed?' failed':'');row.dataset.task=t.id;row.innerHTML='<span class="task-state">'+taskIconSvg(t.tool,t.name)+'</span><div class="task-label">'+markdown(t.name,false)+'</div>';body.appendChild(row)}for(const sub of a.subagents||[]){const group=document.createElement('details');group.className='subagent-group'+(sub.done?' done':'')+(sub.ok===false?' failed':'');group.dataset.subagent=sub.id;group.dataset.role=sub.role||'worker';group.open=!sub.done;group.innerHTML='<summary class="subagent-summary"><span class="subagent-icon">'+subagentRoleIcon(sub.role)+'</span><span class="subagent-label">'+esc(sub.name||('Subagent ('+(sub.role||'worker')+')'))+'</span><span class="subagent-state">'+(sub.done?(sub.ok===false?'Failed':'Done'):'Running')+'</span></summary><div class="subagent-body"></div>';const subBody=group.querySelector('.subagent-body');for(const t of (a.tasks||[]).filter(t=>t.parentId===sub.id)){const row=document.createElement('div');row.className='tool'+(t.done?' done':'')+(t.failed?' failed':'');row.dataset.task=t.id;row.innerHTML='<span class="task-state">'+taskIconSvg(t.tool,t.name)+'</span><div class="task-label">'+markdown(t.name,false)+'</div>';subBody.appendChild(row)}if(sub.done&&sub.result){const result=document.createElement('div');result.className='subagent-result';result.textContent=sub.result;subBody.appendChild(result)}if(sub.done&&sub.error){const err=document.createElement('div');err.className='subagent-result error';err.textContent=sub.error;subBody.appendChild(err)}body.appendChild(group)}for(const ret of a.retries||[]){const row=document.createElement('div');row.className='tool retry'+(ret.ok?' done':(ret.ok===false?' failed':''));row.dataset.retry=String(ret.attempt);const retLabel='**Reconnecting '+ret.attempt+'/'+ret.max+'**'+(ret.error?' — '+esc(ret.error):'');row.innerHTML='<span class="task-state">'+taskIconSvg('',retLabel)+'</span><div class="task-label">'+markdown(retLabel,false)+'</div>';body.appendChild(row)}let lastPreview=-1;for(let i=0;i<(a.changed||[]).length;i++)if(a.changed[i]&&a.changed[i].preview&&a.changed[i].preview.length)lastPreview=i;for(let i=0;i<(a.changed||[]).length;i++)body.appendChild(liveChangedRow(a.changed[i],i===lastPreview));return d}
+  function buildLiveActivity(a){const d=document.createElement('details');d.className='activity'+(a.loading?' loading':'')+(liveActivityContent(a)?' has-content':'');d.open=a.open;if(a.loading&&!liveActivityContent(a)){d.innerHTML='<summary><span class="activity-status">'+esc(a.summary||'Thinking…')+'</span><button class="activity-stop-btn" type="button" title="Stop running" aria-label="Stop running"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button></summary><div class="activity-body"></div>'}else{d.innerHTML='<summary>'+esc(a.summary||'Thinking…')+'</summary><div class="activity-body"></div>'}const body=d.querySelector('.activity-body');for(const part of a.reasoningParts||[]){const r=document.createElement('div');r.className='reasoning';r.dataset.raw=part;r.innerHTML=markdown(part);body.appendChild(r)}for(const t of (a.tasks||[]).filter(t=>!t.parentId)){const row=document.createElement('div');row.className='tool'+(t.done?' done':'')+(t.failed?' failed':'');row.dataset.task=t.id;row.innerHTML=toolRowHtml(t);body.appendChild(row)}for(const sub of a.subagents||[]){const group=document.createElement('details');group.className='subagent-group'+(sub.done?' done':'')+(sub.ok===false?' failed':'');group.dataset.subagent=sub.id;group.dataset.role=sub.role||'worker';group.open=!sub.done;group.innerHTML='<summary class="subagent-summary"><span class="subagent-icon">'+subagentRoleIcon(sub.role)+'</span><span class="subagent-label">'+esc(sub.name||('Subagent ('+(sub.role||'worker')+')'))+'</span><span class="subagent-state">'+(sub.done?(sub.ok===false?'Failed':'Done'):'Running')+'</span></summary><div class="subagent-body"></div>';const subBody=group.querySelector('.subagent-body');for(const t of (a.tasks||[]).filter(t=>t.parentId===sub.id)){const row=document.createElement('div');row.className='tool'+(t.done?' done':'')+(t.failed?' failed':'');row.dataset.task=t.id;row.innerHTML='<span class="task-state">'+taskIconSvg(t.tool,t.name)+'</span><div class="task-label">'+markdown(t.name,false)+'</div>';subBody.appendChild(row)}if(sub.done&&sub.result){const result=document.createElement('div');result.className='subagent-result';result.textContent=sub.result;subBody.appendChild(result)}if(sub.done&&sub.error){const err=document.createElement('div');err.className='subagent-result error';err.textContent=sub.error;subBody.appendChild(err)}body.appendChild(group)}for(const ret of a.retries||[]){const row=document.createElement('div');row.className='tool retry'+(ret.ok?' done':(ret.ok===false?' failed':''));row.dataset.retry=String(ret.attempt);const retLabel='**Reconnecting '+ret.attempt+'/'+ret.max+'**'+(ret.error?' — '+esc(ret.error):'');row.innerHTML='<span class="task-state">'+taskIconSvg('',retLabel)+'</span><div class="task-label">'+markdown(retLabel,false)+'</div>';body.appendChild(row)}let lastPreview=-1;for(let i=0;i<(a.changed||[]).length;i++)if(a.changed[i]&&a.changed[i].preview&&a.changed[i].preview.length)lastPreview=i;for(let i=0;i<(a.changed||[]).length;i++)body.appendChild(liveChangedRow(a.changed[i],i===lastPreview));return d}
   function renderLive(convId){const s=liveByConversation.get(convId);if(!s)return;const turn=document.querySelector('.turn:last-child');if(!turn)return;currentTurn=turn;if(s.plan)showPlan(s.plan);if(s.errorText){const d=document.createElement('div');d.className='error';d.textContent=s.errorText;if(s.errorRetry)d.appendChild(errorActions());turn.appendChild(d)}for(const closed of s.closedActivities||[])turn.appendChild(buildLiveActivity(closed));if(s.currentRaw){ensureIdentity(turn);current=document.createElement('div');current.className='assistant streaming';current.dataset.raw=s.currentRaw;current.innerHTML=markdown(s.currentRaw);turn.appendChild(current)}if(s.activity&&liveActivityContent(s.activity)){const d=buildLiveActivity(s.activity);turn.appendChild(d);activity=d;activityBody=d.querySelector('.activity-body');const rs=d.querySelectorAll('.reasoning');reasoning=rs.length?rs[rs.length-1]:null;const stopBtn=activity.querySelector('.activity-stop-btn');if(stopBtn)stopBtn.onclick=e=>{e.preventDefault();e.stopPropagation();vscode.postMessage({type:'stop'})}}else if(s.activity&&s.activity.loading){const d=buildLiveActivity(s.activity);turn.appendChild(d);activity=d;activityBody=d.querySelector('.activity-body');const stopBtn=activity.querySelector('.activity-stop-btn');if(stopBtn)stopBtn.onclick=e=>{e.preventDefault();e.stopPropagation();vscode.postMessage({type:'stop'})}}phaseStartedAt=s.activity?.phaseStartedAt||Date.now();taskCount=s.activity?.taskCount||0;followOutput=true;scroll(true)}
   function updateQueuedVisibility(){const list=queuedByConversation.get(activeConversationId)||[];const show=list.length>0;queued.classList.toggle('visible',show);const running=runningSet.has(activeConversationId);queued.innerHTML=list.map((prompt,index)=>{const steer=running&&index===0?'<button data-act="steer" data-id="'+escAttr(prompt.id)+'">Steer</button>':'';return '<div class="queued-item"><span class="queued-text" title="'+escAttr(prompt.text)+'">'+esc(prompt.text)+'</span>'+steer+'<button data-act="edit" data-id="'+escAttr(prompt.id)+'" title="Edit queued prompt"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button><button data-act="remove" data-id="'+escAttr(prompt.id)+'" title="Remove queued prompt">×</button></div>'}).join('');updateJump()}
   function inlineMarkdown(raw,allowMath){const tick=String.fromCharCode(96),tokenStart=String.fromCharCode(57344),tokenEnd=String.fromCharCode(57345),codes=[];let line=protectInlineMath(raw,allowMath);line=esc(line);line=line.replace(new RegExp(tick+'([^'+tick+'\\n]+)'+tick,'g'),(_,code)=>{codes.push(code);return tokenStart+(codes.length-1)+tokenEnd});line=line.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2">$1</a>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/__([^_]+)__/g,'<strong>$1</strong>').replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/_([^_]+)_/g,'<em>$1</em>');line=line.replace(new RegExp(tokenStart+'(\\d+)'+tokenEnd,'g'),(_,index)=>'<code>'+codes[Number(index)]+'</code>');return restoreMath(line)}
   function markdown(raw,allowMath){
-    const fence=String.fromCharCode(96).repeat(3),lines=String(raw).split(/\r?\n/);let html='',inCode=false,code='',list='',paragraph=[],table=[],inMath=false,mathBuf=[];
+    const fence=String.fromCharCode(96).repeat(3),lines=String(raw).split(/\r?\n/);let html='',inCode=false,code='',list='',paragraph=[],table=[],inMath=false,mathBuf=[],fenceLang='';
     const md=line=>inlineMarkdown(line,allowMath);
     const flushParagraph=()=>{if(paragraph.length){html+='<p>'+paragraph.map(md).join(' ')+'</p>';paragraph=[]}};
     const closeList=()=>{if(list){html+='</'+list+'>';list=''}};
-    const flushMath=()=>{if(inMath){html+=allowMath!==false?('<div class="math-block">'+renderMathHtml(mathBuf.join('\n'),true)+'</div>'):('<p>'+md(mathBuf.join('\n'))+'</p>');inMath=false;mathBuf=[]}};
-    const isSep=r=>r.every(c=>/^:?-{1,}:?$/.test(c));
-    const flushTable=()=>{if(!table.length)return;const rows=table.filter(r=>!isSep(r));if(rows.length){html+='<table>';rows.forEach((r,i)=>{const tag=i?'td':'th';html+='<tr>'+r.map(c=>'<'+tag+'>'+md(c)+'</'+tag+'>').join('')+'</tr>'});html+='</table>'}table=[]};
-    for(const rawLine of lines){
-      if(inMath){if(/^\s*(\$\$|\\\])\s*$/.test(rawLine)){flushMath();continue}mathBuf.push(rawLine);continue}
-      if(allowMath!==false){
-        const openDisplay=rawLine.match(/^\s*\$\$(.+?)\$\$\s*$/);if(openDisplay){flushParagraph();closeList();flushTable();html+='<div class="math-block">'+renderMathHtml(openDisplay[1],true)+'</div>';continue}
-        const openInlineBlock=rawLine.match(/^\s*\\\[(.+?)\\\]\s*$/);if(openInlineBlock){flushParagraph();closeList();flushTable();html+='<div class="math-block">'+renderMathHtml(openInlineBlock[1],true)+'</div>';continue}
-        if(/^\s*\$\$\s*$/.test(rawLine)||/^\s*\\\[\s*$/.test(rawLine)){flushParagraph();closeList();flushTable();inMath=true;mathBuf=[];continue}
+    // Emits one fenced block: highlighted (unknown languages fall through to esc, byte-identical
+    // to the old plain <pre><code>), a language label, and a copy button. Long blocks get an expand
+    // toggle so a 400-line log cannot push the rest of the answer off screen. The copy button reads
+    // the text back off the <code> node rather than carrying the source in an attribute — highlight()
+    // escapes everything and only inserts spans, so textContent is exactly the original code.
+    const CODE_TALL_ROWS=24;
+    const closeCode=()=>{
+      if(!inCode)return;
+      const body=code.replace(/\n$/,'');
+      const rowCount=body?body.split('\n').length:0;
+      const lang=highlightLanguageId(fenceLang);
+      const tall=rowCount>=CODE_TALL_ROWS;
+      // The label shows the language the author wrote ("ts"), while the normalized id drives
+      // tokenization and data-lang. Labelling a TypeScript block "js" because they share a tokenizer
+  // would be technically true and needlessly confusing.
+  html += '<div class="code-block' + (tall ? ' tall' : '') + '"' + (lang ? ' data-lang="' + lang + '"' : '') + '>' +
+    '<div class="code-bar"><span class="code-lang">' + esc(fenceLang) + '</span>' +
+    (tall ? '<button class="code-toggle" type="button" aria-expanded="false" data-label="Expand ' + rowCount + ' lines">Expand ' + rowCount + ' lines</button>' : '') +
+    '<button class="code-copy" type="button" aria-label="Copy code">Copy</button></div>' +
+    '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + highlight(body, fenceLang) + '</code></pre></div>';
+  code = ''; inCode = false; fenceLang = '';
+};
+const flushMath = () => { if (inMath) { html += allowMath !== false ? ('<div class="math-block">' + renderMathHtml(mathBuf.join('\n'), true) + '</div>') : ('<p>' + md(mathBuf.join('\n')) + '</p>'); inMath = false; mathBuf = [] } };
+const isSep = r => r.every(c => /^:?-{1,}:?$/.test(c));
+const flushTable = () => { if (!table.length) return; const rows = table.filter(r => !isSep(r)); if (rows.length) { html += '<table>'; rows.forEach((r, i) => { const tag = i ? 'td' : 'th'; html += '<tr>' + r.map(c => '<' + tag + '>' + md(c) + '</' + tag + '>').join('') + '</tr>' }); html += '</table>' } table = [] };
+for (const rawLine of lines) {
+  if (inMath) { if (/^\s*(\$\$|\\\])\s*$/.test(rawLine)) { flushMath(); continue } mathBuf.push(rawLine); continue }
+  if (allowMath !== false) {
+    const openDisplay = rawLine.match(/^\s*\$\$(.+?)\$\$\s*$/); if (openDisplay) { flushParagraph(); closeList(); flushTable(); html += '<div class="math-block">' + renderMathHtml(openDisplay[1], true) + '</div>'; continue }
+    const openInlineBlock = rawLine.match(/^\s*\\\[(.+?)\\\]\s*$/); if (openInlineBlock) { flushParagraph(); closeList(); flushTable(); html += '<div class="math-block">' + renderMathHtml(openInlineBlock[1], true) + '</div>'; continue }
+    if (/^\s*\$\$\s*$/.test(rawLine) || /^\s*\\\[\s*$/.test(rawLine)) { flushParagraph(); closeList(); flushTable(); inMath = true; mathBuf = []; continue }
+  }
+  if (rawLine.trim().startsWith(fence)) { flushParagraph(); closeList(); flushTable(); if (inCode) { closeCode() } else { inCode = true; fenceLang = rawLine.trim().slice(fence.length).replace(/^\.+/, '').split(/\s+/)[0] } continue }
+  if (inCode) { code += rawLine + '\n'; continue }
+  const trow = rawLine.match(/^\s*\|(.*)\|\s*$/); if (trow && trow[1].includes('|')) { if (!table.length) { flushParagraph(); closeList() } table.push(trow[1].split('|').map(c => c.trim())); continue }
+  if (table.length) flushTable();
+  if (/^\s*-{3,}\s*$/.test(rawLine)) { flushParagraph(); closeList(); html += '<hr>'; continue }
+  const item = rawLine.match(/^\s*([-+*]|\d+\.)\s+(.+)$/); if (item) { flushParagraph(); const type = /\d/.test(item[1]) ? 'ol' : 'ul'; if (list !== type) { closeList(); html += '<' + type + '>'; list = type } html += '<li>' + md(item[2]) + '</li>'; continue }
+  closeList(); if (!rawLine.trim()) { flushParagraph(); continue }
+  const heading = rawLine.match(/^(#{1,3})\s+(.+)$/); if (heading) { flushParagraph(); const level = heading[1].length; html += '<h' + level + '>' + md(heading[2]) + '</h' + level + '>'; continue }
+  const quote = rawLine.match(/^>\s?(.*)$/); if (quote) { flushParagraph(); html += '<blockquote>' + md(quote[1]) + '</blockquote>'; continue }
+  paragraph.push(rawLine.trim())
+}
+flushParagraph(); closeList(); flushTable(); flushMath(); closeCode(); return html
+  }
+const STARTERS = [
+  { title: 'Build a feature', desc: 'Plan, implement, and verify a production-ready change.', prompt: 'Build this feature. Inspect the codebase first, make a concise implementation plan, implement it completely, and verify the result:\n\n' },
+  { title: 'Fix a bug', desc: 'Reproduce the failure and fix the root cause.', prompt: 'Fix this bug. Reproduce or trace the failure, identify the root cause, implement the smallest correct fix, and add regression coverage where appropriate:\n\n' },
+  { title: 'Review code', desc: 'Find concrete correctness, security, and regression risks.', prompt: 'Review the current project and recent changes for correctness, security, regressions, maintainability, and missing tests. Prioritize concrete findings and fix high-confidence issues.' },
+  { title: 'Understand project', desc: 'Map architecture, execution paths, and key files.', prompt: 'Inspect this project and explain its architecture, main execution paths, important modules, and the safest places to make changes. Keep the explanation practical and reference file paths.' }
+];
+const emptyState = () => { const recent = conversations.filter(x => !x.archived && x.hasMessages).slice(0, 5); const account = sleepyAccount && sleepyAccount.loggedIn ? ('<div class="empty-account">SleepyAI' + (sleepyAccount.tier ? ' · ' + esc(sleepyAccount.tier) : '') + '</div>') : ''; const project = projectIndicatorFolder && projectIndicatorFolder !== 'No folder open' ? '<div class="empty-project">Workspace <strong title="' + esc(projectIndicatorFolder) + '">' + esc(projectIndicatorFolder) + '</strong></div>' : ''; const indexCard = projectIndicatorPath ? '<button type="button" class="project-index-card ' + esc(projectIndexState.status) + '" data-reindex-project><span class="project-index-dot"></span><span class="project-index-main"><span class="project-index-title">Project intelligence</span><span class="project-index-copy">' + esc(projectIndexNote()) + '</span></span><span class="project-index-action">' + (projectIndexState.status === 'indexing' ? 'Indexing…' : 'Reindex') + '</span></button>' : ''; return '<div class="empty" id="empty"><div class="empty-inner"><img class="empty-mark" src="${markUri}" alt=""><h2>What are we working on?</h2><p class="empty-subtitle">SleepyAI is ready to build, debug, review, or explain this workspace.</p>' + project + account + indexCard + '<div class="composer-hints"><kbd>/</kbd><span>commands</span><kbd>@</kbd><span>files</span><kbd>↑</kbd><span>recall</span></div><div class="starter-grid">' + STARTERS.map((x, index) => '<button type="button" class="starter-card" data-starter="' + index + '"><span class="starter-title">' + esc(x.title) + '</span><span class="starter-desc">' + esc(x.desc) + '</span></button>').join('') + '</div>' + (recent.length ? '<div class="recent"><div class="recent-head"><span>Recent conversations</span><span class="count">' + recent.length + '</span></div><div class="recent-list">' + recent.map(x => '<div class="recent-item" data-open-recent="' + esc(x.id) + '" title="' + esc(x.title) + '">' + (x.pinned ? '<span class="recent-pin">★</span>' : '') + (x.running ? '<span class="spinner"></span>' : '') + '<span class="title">' + esc(x.title) + '</span>' + (x.changeCount ? '<span class="recent-change">' + x.changeCount + ' files</span>' : '') + '<span class="time">' + recentTimeLabel(x.updatedAt) + '</span><button class="archive-action" data-archive-recent="' + esc(x.id) + '" title="Archive" aria-label="Archive ' + esc(x.title) + '"><svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg></button></div>').join('') + '</div></div>' : '') + '</div></div>' };
+function bindRecent(scope) { scope.querySelectorAll('[data-open-recent]').forEach(el => el.onclick = () => vscode.postMessage({ type: 'openConversation', id: el.dataset.openRecent })); scope.querySelectorAll('[data-archive-recent]').forEach(el => el.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'archiveConversation', id: el.dataset.archiveRecent }) }); scope.querySelectorAll('[data-starter]').forEach(el => el.onclick = () => { const starter = STARTERS[Number(el.dataset.starter)]; if (!starter) return; input.value = starter.prompt; resize(); input.focus(); input.setSelectionRange(input.value.length, input.value.length) }); scope.querySelectorAll('[data-reindex-project]').forEach(el => el.onclick = () => { projectIndexState = { status: 'indexing', text: 'Reindexing project…', indexed: 0, total: 0, index: null }; refreshEmpty(); renderContext(); vscode.postMessage({ type: 'reindexProject' }) }) }
+function refreshEmpty() { const el = document.getElementById('empty'); if (!el) return; el.outerHTML = emptyState(); const empty = document.getElementById('empty'); if (empty) bindRecent(empty) }
+const timeLabel = value => new Date(value || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const recentTimeLabel = value => new Date(value || Date.now()).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+function setEditBar(open, item) { if (!composerEditBar) return; composerEditBar.classList.toggle('visible', Boolean(open)); if (composerEditLabel && item) composerEditLabel.textContent = 'Editing message · resending from this point' + (item.attachments?.length ? ' · ' + item.attachments.length + ' attachment' + (item.attachments.length === 1 ? '' : 's') : '') }
+function clearMessageEdit(restoreDraft) { const state = editMessageState; if (!state) return; editMessageState = null; setEditBar(false); if (restoreDraft) { input.value = state.draftText; attachments = state.draftAttachments; includeProjectIndex = state.draftContext.includeProjectIndex; includeActiveFile = state.draftContext.includeActiveFile; includeSelection = state.draftContext.includeSelection; renderAttachments(); resize() } closeMentionMenu(); closeSlashMenu() }
+function startMessageEdit(item) { if (isRunning()) return; if (editMessageState) clearMessageEdit(true); editMessageState = { conversationId: activeConversationId, itemId: item.id, draftText: input.value, draftAttachments: [...attachments], draftContext: { includeProjectIndex, includeActiveFile, includeSelection } }; input.value = item.text || ''; attachments = (item.attachments || []).map(attachment => ({ ...attachment })); renderAttachments(); setEditBar(true, item); resize(); input.focus(); input.setSelectionRange(input.value.length, input.value.length) }
+if (cancelEditMessage) cancelEditMessage.onclick = () => { clearMessageEdit(true); input.focus() };
+function messageFooter(item, isAssistant) {
+  const footer = document.createElement('div');
+  footer.className = 'message-footer' + (isAssistant ? ' assistant-footer' : '');
+  const actions = document.createElement('div');
+  actions.className = 'message-footer-actions';
+  if (isAssistant) {
+    const modelId = item.model || selectedModel || '';
+    const modelName = modelId ? findModelName(modelId) : '';
+    if (modelName) {
+      const modelEl = document.createElement('span');
+      modelEl.className = 'message-model';
+      modelEl.textContent = modelName;
+      modelEl.title = modelId;
+      actions.appendChild(modelEl);
+    }
+  }
+  const time = document.createElement('span');
+  time.textContent = timeLabel(item.timestamp);
+  actions.appendChild(time);
+  const copy = document.createElement('button');
+  copy.className = 'message-action';
+  copy.title = 'Copy';
+  copy.setAttribute('aria-label', 'Copy message');
+  copy.innerHTML = '<svg viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+  copy.onclick = () => vscode.postMessage({ type: 'copyText', text: item.text });
+  actions.appendChild(copy);
+  const branch = document.createElement('button');
+  branch.className = 'message-action';
+  branch.title = 'Branch to new chat';
+  branch.setAttribute('aria-label', 'Branch to new chat');
+  branch.innerHTML = '<svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
+  branch.onclick = () => vscode.postMessage({ type: 'branchConversation', conversationId: activeConversationId, itemId: item.id });
+  actions.appendChild(branch);
+  if (!isAssistant) {
+    const editBtn = document.createElement('button');
+    editBtn.className = 'message-action';
+    editBtn.title = 'Edit and resend from this message';
+    editBtn.setAttribute('aria-label', 'Edit and resend from this message');
+    editBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+    editBtn.onclick = () => startMessageEdit(item);
+    actions.appendChild(editBtn);
+  }
+  if (isAssistant && gitTracked && item.gitTree) {
+    const restore = document.createElement('button');
+    restore.className = 'message-action';
+    restore.title = 'Restore checkpoint';
+    restore.setAttribute('aria-label', 'Restore checkpoint');
+    restore.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
+    restore.onclick = async () => {
+      const choice = await showNotifyModal({ title: 'Restore Checkpoint?', body: 'This will restore your Git workspace files and conversation state to this response. All later messages will be removed.', ok: 'Restore Checkpoint', cancel: 'Cancel', danger: true });
+      if (choice === 'ok') {
+        vscode.postMessage({ type: 'restoreCheckpoint', conversationId: activeConversationId, itemId: item.id });
       }
-      if(rawLine.trim().startsWith(fence)){flushParagraph();closeList();flushTable();if(inCode){html+='<pre><code>'+esc(code.replace(/\n$/,''))+'</code></pre>';code=''}inCode=!inCode;continue}
-      if(inCode){code+=rawLine+'\n';continue}
-      const trow=rawLine.match(/^\s*\|(.*)\|\s*$/);if(trow&&trow[1].includes('|')){if(!table.length){flushParagraph();closeList()}table.push(trow[1].split('|').map(c=>c.trim()));continue}
-      if(table.length)flushTable();
-      if(/^\s*-{3,}\s*$/.test(rawLine)){flushParagraph();closeList();html+='<hr>';continue}
-      const item=rawLine.match(/^\s*([-+*]|\d+\.)\s+(.+)$/);if(item){flushParagraph();const type=/\d/.test(item[1])?'ol':'ul';if(list!==type){closeList();html+='<'+type+'>';list=type}html+='<li>'+md(item[2])+'</li>';continue}
-      closeList();if(!rawLine.trim()){flushParagraph();continue}
-      const heading=rawLine.match(/^(#{1,3})\s+(.+)$/);if(heading){flushParagraph();const level=heading[1].length;html+='<h'+level+'>'+md(heading[2])+'</h'+level+'>';continue}
-      const quote=rawLine.match(/^>\s?(.*)$/);if(quote){flushParagraph();html+='<blockquote>'+md(quote[1])+'</blockquote>';continue}
-      paragraph.push(rawLine.trim())
-    }
-    flushParagraph();closeList();flushTable();flushMath();if(inCode)html+='<pre><code>'+esc(code.replace(/\n$/,''))+'</code></pre>';return html
+    };
+    actions.appendChild(restore);
   }
-  const STARTERS=[
-    {title:'Build a feature',desc:'Plan, implement, and verify a production-ready change.',prompt:'Build this feature. Inspect the codebase first, make a concise implementation plan, implement it completely, and verify the result:\n\n'},
-    {title:'Fix a bug',desc:'Reproduce the failure and fix the root cause.',prompt:'Fix this bug. Reproduce or trace the failure, identify the root cause, implement the smallest correct fix, and add regression coverage where appropriate:\n\n'},
-    {title:'Review code',desc:'Find concrete correctness, security, and regression risks.',prompt:'Review the current project and recent changes for correctness, security, regressions, maintainability, and missing tests. Prioritize concrete findings and fix high-confidence issues.'},
-    {title:'Understand project',desc:'Map architecture, execution paths, and key files.',prompt:'Inspect this project and explain its architecture, main execution paths, important modules, and the safest places to make changes. Keep the explanation practical and reference file paths.'}
-  ];
-  const emptyState=()=>{const recent=conversations.filter(x=>!x.archived&&x.hasMessages).slice(0,5);const account=sleepyAccount&&sleepyAccount.loggedIn?('<div class="empty-account">SleepyAI'+(sleepyAccount.tier?' · '+esc(sleepyAccount.tier):'')+'</div>'):'';const project=projectIndicatorFolder&&projectIndicatorFolder!=='No folder open'?'<div class="empty-project">Workspace <strong title="'+esc(projectIndicatorFolder)+'">'+esc(projectIndicatorFolder)+'</strong></div>':'';const indexCard=projectIndicatorPath?'<button type="button" class="project-index-card '+esc(projectIndexState.status)+'" data-reindex-project><span class="project-index-dot"></span><span class="project-index-main"><span class="project-index-title">Project intelligence</span><span class="project-index-copy">'+esc(projectIndexNote())+'</span></span><span class="project-index-action">'+(projectIndexState.status==='indexing'?'Indexing…':'Reindex')+'</span></button>':'';return '<div class="empty" id="empty"><div class="empty-inner"><img class="empty-mark" src="${markUri}" alt=""><h2>What are we working on?</h2><p class="empty-subtitle">SleepyAI is ready to build, debug, review, or explain this workspace.</p>'+project+account+indexCard+'<div class="composer-hints"><kbd>/</kbd><span>commands</span><kbd>@</kbd><span>files</span><kbd>↑</kbd><span>recall</span></div><div class="starter-grid">'+STARTERS.map((x,index)=>'<button type="button" class="starter-card" data-starter="'+index+'"><span class="starter-title">'+esc(x.title)+'</span><span class="starter-desc">'+esc(x.desc)+'</span></button>').join('')+'</div>'+(recent.length?'<div class="recent"><div class="recent-head"><span>Recent conversations</span><span class="count">'+recent.length+'</span></div><div class="recent-list">'+recent.map(x=>'<div class="recent-item" data-open-recent="'+esc(x.id)+'" title="'+esc(x.title)+'">'+(x.pinned?'<span class="recent-pin">★</span>':'')+(x.running?'<span class="spinner"></span>':'')+'<span class="title">'+esc(x.title)+'</span>'+(x.changeCount?'<span class="recent-change">'+x.changeCount+' files</span>':'')+'<span class="time">'+recentTimeLabel(x.updatedAt)+'</span><button class="archive-action" data-archive-recent="'+esc(x.id)+'" title="Archive" aria-label="Archive '+esc(x.title)+'"><svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg></button></div>').join('')+'</div></div>':'')+'</div></div>'};
-  function bindRecent(scope){scope.querySelectorAll('[data-open-recent]').forEach(el=>el.onclick=()=>vscode.postMessage({type:'openConversation',id:el.dataset.openRecent}));scope.querySelectorAll('[data-archive-recent]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'archiveConversation',id:el.dataset.archiveRecent})});scope.querySelectorAll('[data-starter]').forEach(el=>el.onclick=()=>{const starter=STARTERS[Number(el.dataset.starter)];if(!starter)return;input.value=starter.prompt;resize();input.focus();input.setSelectionRange(input.value.length,input.value.length)});scope.querySelectorAll('[data-reindex-project]').forEach(el=>el.onclick=()=>{projectIndexState={status:'indexing',text:'Reindexing project…',indexed:0,total:0,index:null};refreshEmpty();renderContext();vscode.postMessage({type:'reindexProject'})})}
-  function refreshEmpty(){const el=document.getElementById('empty');if(!el)return;el.outerHTML=emptyState();const empty=document.getElementById('empty');if(empty)bindRecent(empty)}
-  const timeLabel=value=>new Date(value||Date.now()).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-  const recentTimeLabel=value=>new Date(value||Date.now()).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-  function setEditBar(open,item){if(!composerEditBar)return;composerEditBar.classList.toggle('visible',Boolean(open));if(composerEditLabel&&item)composerEditLabel.textContent='Editing message · resending from this point'+(item.attachments?.length?' · '+item.attachments.length+' attachment'+(item.attachments.length===1?'':'s'):'')}
-  function clearMessageEdit(restoreDraft){const state=editMessageState;if(!state)return;editMessageState=null;setEditBar(false);if(restoreDraft){input.value=state.draftText;attachments=state.draftAttachments;includeProjectIndex=state.draftContext.includeProjectIndex;includeActiveFile=state.draftContext.includeActiveFile;includeSelection=state.draftContext.includeSelection;renderAttachments();resize()}closeMentionMenu();closeSlashMenu()}
-  function startMessageEdit(item){if(isRunning())return;if(editMessageState)clearMessageEdit(true);editMessageState={conversationId:activeConversationId,itemId:item.id,draftText:input.value,draftAttachments:[...attachments],draftContext:{includeProjectIndex,includeActiveFile,includeSelection}};input.value=item.text||'';attachments=(item.attachments||[]).map(attachment=>({...attachment}));renderAttachments();setEditBar(true,item);resize();input.focus();input.setSelectionRange(input.value.length,input.value.length)}
-  if(cancelEditMessage)cancelEditMessage.onclick=()=>{clearMessageEdit(true);input.focus()};
-  function messageFooter(item,isAssistant){
-    const footer=document.createElement('div');
-    footer.className='message-footer'+(isAssistant?' assistant-footer':'');
-    const actions=document.createElement('div');
-    actions.className='message-footer-actions';
-    if(isAssistant){
-      const modelId=item.model||selectedModel||'';
-      const modelName=modelId?findModelName(modelId):'';
-      if(modelName){
-        const modelEl=document.createElement('span');
-        modelEl.className='message-model';
-        modelEl.textContent=modelName;
-        modelEl.title=modelId;
-        actions.appendChild(modelEl);
-      }
-    }
-    const time=document.createElement('span');
-    time.textContent=timeLabel(item.timestamp);
-    actions.appendChild(time);
-    const copy=document.createElement('button');
-    copy.className='message-action';
-    copy.title='Copy';
-    copy.setAttribute('aria-label','Copy message');
-    copy.innerHTML='<svg viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
-    copy.onclick=()=>vscode.postMessage({type:'copyText',text:item.text});
-    actions.appendChild(copy);
-    const branch=document.createElement('button');
-    branch.className='message-action';
-    branch.title='Branch to new chat';
-    branch.setAttribute('aria-label','Branch to new chat');
-    branch.innerHTML='<svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
-    branch.onclick=()=>vscode.postMessage({type:'branchConversation',conversationId:activeConversationId,itemId:item.id});
-    actions.appendChild(branch);
-    if(!isAssistant){
-      const editBtn=document.createElement('button');
-      editBtn.className='message-action';
-      editBtn.title='Edit and resend from this message';
-      editBtn.setAttribute('aria-label','Edit and resend from this message');
-      editBtn.innerHTML='<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-      editBtn.onclick=()=>startMessageEdit(item);
-      actions.appendChild(editBtn);
-    }
-    if(isAssistant&&gitTracked&&item.gitTree){
-      const restore=document.createElement('button');
-      restore.className='message-action';
-      restore.title='Restore checkpoint';
-      restore.setAttribute('aria-label','Restore checkpoint');
-      restore.innerHTML='<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
-      restore.onclick=async()=>{
-        const choice=await showNotifyModal({title:'Restore Checkpoint?',body:'This will restore your Git workspace files and conversation state to this response. All later messages will be removed.',ok:'Restore Checkpoint',cancel:'Cancel',danger:true});
-        if(choice==='ok'){
-          vscode.postMessage({type:'restoreCheckpoint',conversationId:activeConversationId,itemId:item.id});
-        }
-      };
-      actions.appendChild(restore);
-    }
-    footer.appendChild(actions);
-    return footer;
+  footer.appendChild(actions);
+  return footer;
+}
+function iterationPauseCard(item, actionable = true) {
+  if (!item || !item.paused) return null;
+  const truncated = item.pauseReason === 'max_tokens';
+  const limit = Number(item.pauseLimit) || 50;
+  const card = document.createElement('div');
+  card.className = 'iteration-paused';
+  card.innerHTML = '<div class="iteration-paused-copy"><strong>' + (truncated ? 'Response truncated' : 'Iteration paused') + '</strong><span>' + (truncated ? 'The model reached its output limit, so this answer is incomplete.' : 'Reached the ' + limit + '-step limit with work still in progress.') + '</span></div>' + (actionable ? '<button type="button" class="iteration-continue">' + (truncated ? 'Continue response' : 'Continue iteration') + '</button>' : '');
+  const btn = card.querySelector('.iteration-continue');
+  if (btn) btn.onclick = () => { btn.disabled = true; btn.textContent = 'Continuing…'; vscode.postMessage({ type: 'continueIteration', conversationId: activeConversationId, itemId: item.id }) };
+  return card;
+}
+function changesCard(item) {
+  const changes = (item && item.changes) || []; if (!changes.length) return null; const card = document.createElement('section'); card.className = 'changes-card';
+  const remaining = changes.filter(x => !x.reverted), staged = remaining.filter(x => x.staged).length;
+  const plus = remaining.reduce((sum, x) => sum + (Number(x.additions) || 0), 0), minus = remaining.reduce((sum, x) => sum + (Number(x.deletions) || 0), 0);
+  const hasStats = remaining.some(x => x.additions != null || x.deletions != null);
+  const fileLabel = remaining.length + (remaining.length === 1 ? ' file' : ' files') + (remaining.length !== changes.length ? ' / ' + changes.length + ' total' : '');
+  card.innerHTML = '<div class="changes-head"><span class="changes-status">✓</span><span class="changes-title">Task changes</span><span class="changes-count">' + fileLabel + '</span>' + (hasStats ? changeStatHtml(plus, minus, true) : '') + '</div>' + (item.commitHash ? '<div class="changes-commit"><span>Committed</span><strong>' + esc(item.commitHash) + '</strong><span>' + esc(item.commitMessage || '') + '</span></div>' : '') + '<div class="changes-list"></div><div class="changes-actions"><button type="button" class="secondary" data-review-changes>Source Control</button>' + (gitTracked && item.gitTree && !item.commitHash && remaining.length ? '<button type="button" class="secondary" data-stage-changes>' + (staged === remaining.length ? 'Staged' : 'Stage all') + '</button><button type="button" class="primary-lite" data-commit-changes>Commit</button><button type="button" class="danger-lite" data-undo-changes>Restore checkpoint</button>' : '') + '</div>';
+  const list = card.querySelector('.changes-list');
+  for (const change of changes) {
+    const row = document.createElement('div'); row.className = 'change-row-wrap' + (change.reverted ? ' reverted' : ''); const preview = changePreviewHtml(change.preview); row.innerHTML = (preview ? '<details class="change-preview"><summary class="change-row">' : '<div class="change-row">') + '<span class="change-action">' + esc(change.reverted ? 'Reverted' : (change.staged ? 'Staged' : (change.action || 'Modified'))) + '</span><button type="button" class="change-path" data-open-change>' + esc(change.path) + '</button>' + changeStatHtml(change.additions, change.deletions) + (preview ? '</summary>' + preview + '</details>' : '</div>') + '<span class="change-row-actions">' + (gitTracked && item.gitTree ? '<button type="button" class="change-mini" data-diff title="Review diff">Diff</button>' : '') + (gitTracked && item.gitTree && !item.commitHash && !change.reverted ? '<button type="button" class="change-mini danger" data-revert title="Revert this file">Revert</button>' : '') + '</span>';
+    const open = row.querySelector('[data-open-change]'); if (open) { open.disabled = change.action === 'Deleted' || change.reverted; open.onclick = e => { e.preventDefault(); e.stopPropagation(); if (!open.disabled) vscode.postMessage({ type: 'openFile', path: change.path }) } };
+    const diff = row.querySelector('[data-diff]'); if (diff) diff.onclick = () => vscode.postMessage({ type: 'gitReviewFile', conversationId: activeConversationId, itemId: item.id, path: change.path });
+    const revert = row.querySelector('[data-revert]'); if (revert) revert.onclick = () => vscode.postMessage({ type: 'gitRevertFile', conversationId: activeConversationId, itemId: item.id, path: change.path });
+    list.appendChild(row)
   }
-  function iterationPauseCard(item,actionable=true){
-    if(!item||!item.paused)return null;
-    const truncated=item.pauseReason==='max_tokens';
-    const limit=Number(item.pauseLimit)||50;
-    const card=document.createElement('div');
-    card.className='iteration-paused';
-    card.innerHTML='<div class="iteration-paused-copy"><strong>'+(truncated?'Response truncated':'Iteration paused')+'</strong><span>'+(truncated?'The model reached its output limit, so this answer is incomplete.':'Reached the '+limit+'-step limit with work still in progress.')+'</span></div>'+(actionable?'<button type="button" class="iteration-continue">'+(truncated?'Continue response':'Continue iteration')+'</button>':'');
-    const btn=card.querySelector('.iteration-continue');
-    if(btn)btn.onclick=()=>{btn.disabled=true;btn.textContent='Continuing…';vscode.postMessage({type:'continueIteration',conversationId:activeConversationId,itemId:item.id})};
-    return card;
+  const review = card.querySelector('[data-review-changes]'); if (review) review.onclick = () => vscode.postMessage({ type: 'reviewChanges', conversationId: activeConversationId, itemId: item.id });
+  const stage = card.querySelector('[data-stage-changes]'); if (stage) stage.onclick = () => vscode.postMessage({ type: 'gitStageChanges', conversationId: activeConversationId, itemId: item.id });
+  const commit = card.querySelector('[data-commit-changes]'); if (commit) commit.onclick = () => vscode.postMessage({ type: 'gitCommit', conversationId: activeConversationId, itemId: item.id });
+  const restore = card.querySelector('[data-undo-changes]'); if (restore) restore.onclick = async () => { const choice = await showNotifyModal({ title: 'Restore this task checkpoint?', body: 'Workspace files will return to the state captured before this response. If this is an older response, later conversation messages will also be removed.', ok: 'Restore checkpoint', cancel: 'Cancel', danger: true }); if (choice === 'ok') vscode.postMessage({ type: 'restoreCheckpoint', conversationId: activeConversationId, itemId: item.id }) }; return card
+}
+function userBubble(item) { const row = document.createElement('div'); row.className = 'user-row'; const wrapper = document.createElement('div'); wrapper.className = 'user-message'; const text = document.createElement('div'); text.className = 'user-text'; text.textContent = item.text; wrapper.append(text); for (const attachment of (item.attachments || [])) { if (attachment.kind === 'image' && attachment.previewDataUrl) { const image = document.createElement('img'); image.className = 'user-image-attachment'; image.src = attachment.previewDataUrl; image.alt = attachment.name || 'Attached image'; image.title = attachment.name || 'Attached image'; wrapper.append(image) } else if (attachment.kind !== 'image') { const chip = document.createElement('div'); chip.className = 'user-attachment'; chip.textContent = (attachment.kind === 'folder' ? '📁 ' : '📄 ') + attachment.path; wrapper.append(chip) } } wrapper.append(messageFooter(item, false)); row.appendChild(wrapper); return row }
+function closeCurrentText() { if (current) { flushStreamPaint(); current.classList.remove('streaming') } current = null }
+function clearActivityRefs() { activity = activityBody = reasoning = null; taskCount = 0 }
+function createActivity() { closeCurrentText(); activity = document.createElement('details'); activity.className = 'activity loading'; activity.open = true; activity.innerHTML = '<summary><span class="activity-status">Thinking…</span><button class="activity-stop-btn" type="button" title="Stop running" aria-label="Stop running"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button></summary><div class="activity-body"></div>'; activityBody = activity.querySelector('.activity-body'); reasoning = document.createElement('div'); reasoning.className = 'reasoning'; reasoning.dataset.raw = ''; activityBody.appendChild(reasoning); const stopBtn = activity.querySelector('.activity-stop-btn'); if (stopBtn) stopBtn.onclick = e => { e.preventDefault(); e.stopPropagation(); vscode.postMessage({ type: 'stop' }) }; currentTurn.appendChild(activity); phaseStartedAt = Date.now(); taskCount = 0 }
+function ensureActivity() { if (!activity) createActivity(); syncSendButton() }
+function createTextSegment() { if (activity) { finishActivity(); clearActivityRefs() } current = document.createElement('div'); current.className = 'assistant streaming'; current.dataset.raw = ''; currentTurn.appendChild(current); return current }
+// Streaming paint: the extension posts one message per token chunk, and re-rendering the whole
+// answer on each one is quadratic. streamRenderer settles every finished top-level markdown
+// block once and re-renders only the trailing partial block; streamPaint collapses however many
+// deltas land between frames into a single DOM write.
+const streamRenderer = createStreamRenderer(markdown);
+const streamPaint = createFrameCoalescer(raw => {
+  if (!currentTurn) { currentTurn = document.querySelector('.turn:last-child'); if (!currentTurn) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; messages.appendChild(currentTurn) } }
+  if (!current) createTextSegment();
+  current.dataset.raw = raw;
+  current.innerHTML = streamRenderer.html(raw, undefined);
+  scroll()
+});
+const flushStreamPaint = () => { if (current) streamPaint.flushNow() };
+function planCard(title, steps, activeStep, doneSteps, interrupted) { const d = document.createElement('div'); d.className = 'plan'; const doneSet = new Set(doneSteps || []), list = steps || [], doneCount = list.filter((_, index) => doneSet.has(index)).length, total = list.length, percent = total ? Math.min(100, Math.round(doneCount / total * 100)) : 0; const head = document.createElement('div'); head.className = 'plan-head'; const h = document.createElement('div'); h.className = 'plan-title'; h.textContent = title || 'Plan'; head.appendChild(h); if (total) { const count = document.createElement('span'); count.className = 'plan-count'; count.textContent = doneCount + ' / ' + total; head.appendChild(count) } if (interrupted) { const badge = document.createElement('span'); badge.className = 'plan-badge'; badge.textContent = 'Interrupted'; head.appendChild(badge) } const collapse = document.createElement('button'); collapse.className = 'plan-collapse'; collapse.title = 'Collapse plan'; collapse.setAttribute('aria-label', 'Collapse or expand plan'); collapse.innerHTML = '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>'; collapse.onclick = () => d.classList.toggle('collapsed'); head.appendChild(collapse); d.appendChild(head); if (total) { const progress = document.createElement('div'); progress.className = 'plan-progress'; progress.innerHTML = '<span class="plan-progress-fill" style="width:' + percent + '%"></span>'; d.appendChild(progress); const currentLabel = list[activeStep]; if (currentLabel && !doneSet.has(activeStep)) { const currentStep = document.createElement('div'); currentStep.className = 'plan-current'; currentStep.textContent = (interrupted ? 'Paused: ' : 'Working: ') + currentLabel; d.appendChild(currentStep) } const ol = document.createElement('ol'); ol.className = 'plan-steps'; list.forEach((s, index) => { const isDone = doneSet.has(index); const isActive = index === activeStep && !isDone && !interrupted; const isPaused = index === activeStep && !isDone && interrupted; const li = document.createElement('li'); li.className = 'plan-step' + (isDone ? ' done' : '') + (isActive ? ' active' : '') + (isPaused ? ' paused' : ''); const state = document.createElement('span'); state.className = 'plan-state'; state.textContent = isDone ? '✓' : (isPaused ? '⏸' : ''); const label = document.createElement('span'); label.className = 'plan-label'; label.textContent = s; li.append(state, label); ol.appendChild(li) }); d.appendChild(ol) } return d }
+function showPlan(m) { plan.classList.add('visible'); plan.classList.toggle('done', Boolean(m.done)); plan.classList.toggle('interrupted', Boolean(m.interrupted)); plan.innerHTML = ''; plan.appendChild(planCard(m.title, m.steps, m.activeStep, m.doneSteps, Boolean(m.interrupted))); scroll() }
+function hidePlan() { plan.classList.remove('visible') }
+function beginTurn(item) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; currentTurn.appendChild(userBubble(item)); messages.appendChild(currentTurn); current = activity = activityBody = reasoning = null; scroll(true) }
+function workActivity(item) { const d = document.createElement('details'); d.className = 'activity has-content'; const tasks = (item.work || []).filter(w => w.kind === 'task'); const seconds = Math.max(1, Math.round(item.seconds || 1)); d.innerHTML = '<summary>Worked for ' + seconds + 's' + (tasks.length ? ' · ' + tasks.length + ' task' + (tasks.length === 1 ? '' : 's') : '') + '</summary><div class="activity-body"></div>'; const body = d.querySelector('.activity-body'); for (const w of item.work || []) { if (w.kind === 'plan') continue; if (w.kind === 'reasoning') { const r = document.createElement('div'); r.className = 'reasoning'; r.innerHTML = markdown(w.text); body.appendChild(r) } else { const row = document.createElement('div'); row.className = 'tool' + (w.done === false ? '' : ' done'); row.innerHTML = toolRowHtml(w); body.appendChild(row) } } return d }
+function runErrorAction(action) {
+  if (action === 'retry') { vscode.postMessage({ type: 'retryMessage', conversationId: activeConversationId }); return }
+  if (action === 'signin') { vscode.postMessage({ type: 'sleepyLogin' }); return }
+  if (action === 'account') { vscode.postMessage({ type: 'openSleepyDashboard' }); return }
+  if (action === 'settings') { vscode.postMessage({ type: 'requestSettings' }); return }
+  if (action === 'models') { closeContextPanel(); if (!modelMenu.classList.contains('open')) toggleModelMenu(); modelButton.focus(); return }
+  if (action === 'context') { if (!contextPanel.classList.contains('open')) toggleContextPanel(); contextSummaryButton.focus() }
+}
+function structuredErrorCard(item) {
+  const info = item && item.errorInfo;
+  if (!info) { const fallback = document.createElement('div'); fallback.className = 'assistant error-card'; fallback.textContent = item && item.text ? item.text : 'Request failed.'; fallback.appendChild(errorActions()); return fallback }
+  const card = document.createElement('div'); card.className = 'assistant error-card structured-error error-' + (info.code || 'unknown');
+  const head = document.createElement('div'); head.className = 'error-head'; head.innerHTML = '<span class="error-symbol">!</span><div class="error-copy"><div class="error-title">' + esc(info.title || 'Request failed') + '</div></div>'; card.appendChild(head);
+  const body = document.createElement('div'); body.className = 'error-message'; body.textContent = info.message || item.text || 'Request failed.'; card.appendChild(body);
+  const actions = document.createElement('div'); actions.className = 'error-actions';
+  const add = (action, label, primary) => { if (!action || !label) return; const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'error-action' + (primary ? ' primary' : ''); btn.textContent = label; btn.onclick = () => runErrorAction(action); actions.appendChild(btn) };
+  add(info.primaryAction, info.primaryLabel, true); add(info.secondaryAction, info.secondaryLabel, false);
+  if (!actions.childElementCount && info.retryable) add('retry', 'Retry', true);
+  if (actions.childElementCount) card.appendChild(actions);
+  return card
+}
+function dividerRow() { const row = document.createElement('div'); row.className = 'compaction-divider'; row.innerHTML = '<span class="compaction-divider-line"></span><span class="compaction-divider-label">Session compacted</span>' + (compactionUndoable ? '<button type="button" class="compaction-divider-undo" title="Undo compaction">Undo</button>' : '') + '<span class="compaction-divider-line"></span>'; const undo = row.querySelector('.compaction-divider-undo'); if (undo) undo.onclick = async () => { const choice = await showNotifyModal({ title: 'Undo compaction?', body: 'This will restore the full conversation that was compacted. You can redo later.', ok: 'Undo', cancel: 'Cancel' }); if (choice === 'ok') vscode.postMessage({ type: 'undoLastTurn', conversationId: activeConversationId }) }; return row }
+// One identity row per assistant turn, inserted directly under the user bubble so it
+// labels the whole agent side (activity + answer) above any tool output. Guarded by a
+// turn flag because the live path re-renders the same turn on every chunk.
+function ensureIdentity(turn) {
+  if (turn.dataset.identity === '1') return;
+  const h = document.createElement('div');
+  h.className = 'assistant-identity';
+  h.innerHTML = '<span class="assistant-identity-mark" aria-hidden="true"></span><span class="assistant-identity-name">SleepyCode</span>';
+  turn.dataset.identity = '1';
+  const anchor = turn.children[1] || null;
+  turn.insertBefore(h, anchor);
+}
+function renderConversation(items) { streamPaint.cancel(); messages.innerHTML = items && items.length ? '' : emptyState(); hidePlan(); currentTurn = current = activity = activityBody = reasoning = null; bindRecent(messages); for (let i = 0; i < (items || []).length; i++) { const item = items[i]; if (item.kind === 'divider') { messages.appendChild(dividerRow()); continue } if (item.role === 'user') { const turn = document.createElement('section'); turn.className = 'turn'; turn.appendChild(userBubble(item)); const next = items[i + 1]; if (next && next.role === 'assistant') { for (const p of (next.work || []).filter(w => w.kind === 'plan')) { const steps = p.steps || []; const allDone = (p.doneSteps || []).length >= steps.length && steps.length > 0; turn.appendChild(planCard(p.title || 'Plan', steps, allDone ? -1 : (p.activeStep ?? -1), p.doneSteps || [], Boolean(p.interrupted))) } if (next.work && next.work.length) turn.appendChild(workActivity(next)); if (next.kind === 'error') { if (next.partialText) { const partial = document.createElement('div'); partial.className = 'assistant'; partial.innerHTML = markdown(next.partialText); turn.appendChild(partial); turn.appendChild(interruptedMarker()) } turn.appendChild(structuredErrorCard(next)) } else { ensureIdentity(turn); const answer = document.createElement('div'); answer.className = 'assistant'; answer.innerHTML = markdown(next.text); turn.appendChild(answer) } const pauseNotice = iterationPauseCard(next, i + 1 === items.length - 1); if (pauseNotice) turn.appendChild(pauseNotice); const changeSummary = changesCard(next); if (changeSummary) turn.appendChild(changeSummary); turn.appendChild(messageFooter(next, true)); i++ } messages.appendChild(turn) } } followOutput = true; scroll(true) }
+function enableActivity() { if (activity) activity.classList.add('has-content') }
+function ensureSubagentGroup(m) {
+  ensureActivity(); enableActivity();
+  let group = activityBody.querySelector('[data-subagent="' + CSS.escape(m.id) + '"]');
+  if (!group) {
+    group = document.createElement('details'); group.className = 'subagent-group'; group.dataset.subagent = m.id; group.dataset.role = m.role || 'worker'; group.open = true;
+    group.innerHTML = '<summary class="subagent-summary"><span class="subagent-icon">' + subagentRoleIcon(m.role) + '</span><span class="subagent-label"></span><span class="subagent-state">Running</span></summary><div class="subagent-body"></div>';
+    activityBody.appendChild(group)
   }
-  function changesCard(item){
-    const changes=(item&&item.changes)||[];if(!changes.length)return null;const card=document.createElement('section');card.className='changes-card';
-    const remaining=changes.filter(x=>!x.reverted),staged=remaining.filter(x=>x.staged).length;
-    const plus=remaining.reduce((sum,x)=>sum+(Number(x.additions)||0),0),minus=remaining.reduce((sum,x)=>sum+(Number(x.deletions)||0),0);
-    const hasStats=remaining.some(x=>x.additions!=null||x.deletions!=null);
-    const fileLabel=remaining.length+(remaining.length===1?' file':' files')+(remaining.length!==changes.length?' / '+changes.length+' total':'');
-    card.innerHTML='<div class="changes-head"><span class="changes-status">✓</span><span class="changes-title">Task changes</span><span class="changes-count">'+fileLabel+'</span>'+(hasStats?changeStatHtml(plus,minus,true):'')+'</div>'+(item.commitHash?'<div class="changes-commit"><span>Committed</span><strong>'+esc(item.commitHash)+'</strong><span>'+esc(item.commitMessage||'')+'</span></div>':'')+'<div class="changes-list"></div><div class="changes-actions"><button type="button" class="secondary" data-review-changes>Source Control</button>'+(gitTracked&&item.gitTree&&!item.commitHash&&remaining.length?'<button type="button" class="secondary" data-stage-changes>'+(staged===remaining.length?'Staged':'Stage all')+'</button><button type="button" class="primary-lite" data-commit-changes>Commit</button><button type="button" class="danger-lite" data-undo-changes>Restore checkpoint</button>':'')+'</div>';
-    const list=card.querySelector('.changes-list');
-    for(const change of changes){const row=document.createElement('div');row.className='change-row-wrap'+(change.reverted?' reverted':'');const preview=changePreviewHtml(change.preview);row.innerHTML=(preview?'<details class="change-preview"><summary class="change-row">':'<div class="change-row">')+'<span class="change-action">'+esc(change.reverted?'Reverted':(change.staged?'Staged':(change.action||'Modified')))+'</span><button type="button" class="change-path" data-open-change>'+esc(change.path)+'</button>'+changeStatHtml(change.additions,change.deletions)+(preview?'</summary>'+preview+'</details>':'</div>')+'<span class="change-row-actions">'+(gitTracked&&item.gitTree?'<button type="button" class="change-mini" data-diff title="Review diff">Diff</button>':'')+(gitTracked&&item.gitTree&&!item.commitHash&&!change.reverted?'<button type="button" class="change-mini danger" data-revert title="Revert this file">Revert</button>':'')+'</span>';
-      const open=row.querySelector('[data-open-change]');if(open){open.disabled=change.action==='Deleted'||change.reverted;open.onclick=e=>{e.preventDefault();e.stopPropagation();if(!open.disabled)vscode.postMessage({type:'openFile',path:change.path})}};
-      const diff=row.querySelector('[data-diff]');if(diff)diff.onclick=()=>vscode.postMessage({type:'gitReviewFile',conversationId:activeConversationId,itemId:item.id,path:change.path});
-      const revert=row.querySelector('[data-revert]');if(revert)revert.onclick=()=>vscode.postMessage({type:'gitRevertFile',conversationId:activeConversationId,itemId:item.id,path:change.path});
-      list.appendChild(row)}
-    const review=card.querySelector('[data-review-changes]');if(review)review.onclick=()=>vscode.postMessage({type:'reviewChanges',conversationId:activeConversationId,itemId:item.id});
-    const stage=card.querySelector('[data-stage-changes]');if(stage)stage.onclick=()=>vscode.postMessage({type:'gitStageChanges',conversationId:activeConversationId,itemId:item.id});
-    const commit=card.querySelector('[data-commit-changes]');if(commit)commit.onclick=()=>vscode.postMessage({type:'gitCommit',conversationId:activeConversationId,itemId:item.id});
-    const restore=card.querySelector('[data-undo-changes]');if(restore)restore.onclick=async()=>{const choice=await showNotifyModal({title:'Restore this task checkpoint?',body:'Workspace files will return to the state captured before this response. If this is an older response, later conversation messages will also be removed.',ok:'Restore checkpoint',cancel:'Cancel',danger:true});if(choice==='ok')vscode.postMessage({type:'restoreCheckpoint',conversationId:activeConversationId,itemId:item.id})};return card
-  }
-  function userBubble(item){const row=document.createElement('div');row.className='user-row';const wrapper=document.createElement('div');wrapper.className='user-message';const text=document.createElement('div');text.className='user-text';text.textContent=item.text;wrapper.append(text);for(const attachment of (item.attachments||[])){if(attachment.kind==='image'&&attachment.previewDataUrl){const image=document.createElement('img');image.className='user-image-attachment';image.src=attachment.previewDataUrl;image.alt=attachment.name||'Attached image';image.title=attachment.name||'Attached image';wrapper.append(image)}else if(attachment.kind!=='image'){const chip=document.createElement('div');chip.className='user-attachment';chip.textContent=(attachment.kind==='folder'?'📁 ':'📄 ')+attachment.path;wrapper.append(chip)}}wrapper.append(messageFooter(item,false));row.appendChild(wrapper);return row}
-  function closeCurrentText(){if(current)current.classList.remove('streaming');current=null}
-  function clearActivityRefs(){activity=activityBody=reasoning=null;taskCount=0}
-  function createActivity(){closeCurrentText();activity=document.createElement('details');activity.className='activity loading';activity.open=true;activity.innerHTML='<summary><span class="activity-status">Thinking…</span><button class="activity-stop-btn" type="button" title="Stop running" aria-label="Stop running"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop</button></summary><div class="activity-body"></div>';activityBody=activity.querySelector('.activity-body');reasoning=document.createElement('div');reasoning.className='reasoning';reasoning.dataset.raw='';activityBody.appendChild(reasoning);const stopBtn=activity.querySelector('.activity-stop-btn');if(stopBtn)stopBtn.onclick=e=>{e.preventDefault();e.stopPropagation();vscode.postMessage({type:'stop'})};currentTurn.appendChild(activity);phaseStartedAt=Date.now();taskCount=0}
-  function ensureActivity(){if(!activity)createActivity();syncSendButton()}
-  function createTextSegment(){if(activity){finishActivity();clearActivityRefs()}current=document.createElement('div');current.className='assistant streaming';current.dataset.raw='';currentTurn.appendChild(current);return current}
-  function planCard(title,steps,activeStep,doneSteps,interrupted){const d=document.createElement('div');d.className='plan';const doneSet=new Set(doneSteps||[]),list=steps||[],doneCount=list.filter((_,index)=>doneSet.has(index)).length,total=list.length,percent=total?Math.min(100,Math.round(doneCount/total*100)):0;const head=document.createElement('div');head.className='plan-head';const h=document.createElement('div');h.className='plan-title';h.textContent=title||'Plan';head.appendChild(h);if(total){const count=document.createElement('span');count.className='plan-count';count.textContent=doneCount+' / '+total;head.appendChild(count)}if(interrupted){const badge=document.createElement('span');badge.className='plan-badge';badge.textContent='Interrupted';head.appendChild(badge)}const collapse=document.createElement('button');collapse.className='plan-collapse';collapse.title='Collapse plan';collapse.setAttribute('aria-label','Collapse or expand plan');collapse.innerHTML='<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>';collapse.onclick=()=>d.classList.toggle('collapsed');head.appendChild(collapse);d.appendChild(head);if(total){const progress=document.createElement('div');progress.className='plan-progress';progress.innerHTML='<span class="plan-progress-fill" style="width:'+percent+'%"></span>';d.appendChild(progress);const currentLabel=list[activeStep];if(currentLabel&&!doneSet.has(activeStep)){const currentStep=document.createElement('div');currentStep.className='plan-current';currentStep.textContent=(interrupted?'Paused: ':'Working: ')+currentLabel;d.appendChild(currentStep)}const ol=document.createElement('ol');ol.className='plan-steps';list.forEach((s,index)=>{const isDone=doneSet.has(index);const isActive=index===activeStep&&!isDone&&!interrupted;const isPaused=index===activeStep&&!isDone&&interrupted;const li=document.createElement('li');li.className='plan-step'+(isDone?' done':'')+(isActive?' active':'')+(isPaused?' paused':'');const state=document.createElement('span');state.className='plan-state';state.textContent=isDone?'✓':(isPaused?'⏸':'');const label=document.createElement('span');label.className='plan-label';label.textContent=s;li.append(state,label);ol.appendChild(li)});d.appendChild(ol)}return d}
-  function showPlan(m){plan.classList.add('visible');plan.classList.toggle('done',Boolean(m.done));plan.classList.toggle('interrupted',Boolean(m.interrupted));plan.innerHTML='';plan.appendChild(planCard(m.title,m.steps,m.activeStep,m.doneSteps,Boolean(m.interrupted)));scroll()}
-  function hidePlan(){plan.classList.remove('visible')}
-  function beginTurn(item){document.getElementById('empty')?.remove();currentTurn=document.createElement('section');currentTurn.className='turn';currentTurn.appendChild(userBubble(item));messages.appendChild(currentTurn);current=activity=activityBody=reasoning=null;scroll(true)}
-  function workActivity(item){const d=document.createElement('details');d.className='activity has-content';const tasks=(item.work||[]).filter(w=>w.kind==='task');const seconds=Math.max(1,Math.round(item.seconds||1));d.innerHTML='<summary>Worked for '+seconds+'s'+(tasks.length?' · '+tasks.length+' task'+(tasks.length===1?'':'s'):'')+'</summary><div class="activity-body"></div>';const body=d.querySelector('.activity-body');for(const w of item.work||[]){if(w.kind==='plan')continue;if(w.kind==='reasoning'){const r=document.createElement('div');r.className='reasoning';r.innerHTML=markdown(w.text);body.appendChild(r)}else{const row=document.createElement('div');row.className='tool'+(w.done===false?'':' done');row.innerHTML='<span class="task-state">'+taskIconSvg(w.tool,w.text)+'</span><div class="task-label">'+markdown(w.text,false)+'</div>';body.appendChild(row)}}return d}
-  function runErrorAction(action){
-    if(action==='retry'){vscode.postMessage({type:'retryMessage',conversationId:activeConversationId});return}
-    if(action==='signin'){vscode.postMessage({type:'sleepyLogin'});return}
-    if(action==='account'){vscode.postMessage({type:'openSleepyDashboard'});return}
-    if(action==='settings'){vscode.postMessage({type:'requestSettings'});return}
-    if(action==='models'){closeContextPanel();if(!modelMenu.classList.contains('open'))toggleModelMenu();modelButton.focus();return}
-    if(action==='context'){if(!contextPanel.classList.contains('open'))toggleContextPanel();contextSummaryButton.focus()}
-  }
-  function structuredErrorCard(item){
-    const info=item&&item.errorInfo;
-    if(!info){const fallback=document.createElement('div');fallback.className='assistant error-card';fallback.textContent=item&&item.text?item.text:'Request failed.';fallback.appendChild(errorActions());return fallback}
-    const card=document.createElement('div');card.className='assistant error-card structured-error error-'+(info.code||'unknown');
-    const head=document.createElement('div');head.className='error-head';head.innerHTML='<span class="error-symbol">!</span><div class="error-copy"><div class="error-title">'+esc(info.title||'Request failed')+'</div></div>';card.appendChild(head);
-    const body=document.createElement('div');body.className='error-message';body.textContent=info.message||item.text||'Request failed.';card.appendChild(body);
-    const actions=document.createElement('div');actions.className='error-actions';
-    const add=(action,label,primary)=>{if(!action||!label)return;const btn=document.createElement('button');btn.type='button';btn.className='error-action'+(primary?' primary':'');btn.textContent=label;btn.onclick=()=>runErrorAction(action);actions.appendChild(btn)};
-    add(info.primaryAction,info.primaryLabel,true);add(info.secondaryAction,info.secondaryLabel,false);
-    if(!actions.childElementCount&&info.retryable)add('retry','Retry',true);
-    if(actions.childElementCount)card.appendChild(actions);
-    return card
-  }
-  function dividerRow(){const row=document.createElement('div');row.className='compaction-divider';row.innerHTML='<span class="compaction-divider-line"></span><span class="compaction-divider-label">Session compacted</span>'+(compactionUndoable?'<button type="button" class="compaction-divider-undo" title="Undo compaction">Undo</button>':'')+'<span class="compaction-divider-line"></span>';const undo=row.querySelector('.compaction-divider-undo');if(undo)undo.onclick=async()=>{const choice=await showNotifyModal({title:'Undo compaction?',body:'This will restore the full conversation that was compacted. You can redo later.',ok:'Undo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'undoLastTurn',conversationId:activeConversationId})};return row}
-  // One identity row per assistant turn, inserted directly under the user bubble so it
-  // labels the whole agent side (activity + answer) above any tool output. Guarded by a
-  // turn flag because the live path re-renders the same turn on every chunk.
-  function ensureIdentity(turn){
-    if(turn.dataset.identity==='1')return;
-    const h=document.createElement('div');
-    h.className='assistant-identity';
-    h.innerHTML='<span class="assistant-identity-mark" aria-hidden="true"></span><span class="assistant-identity-name">SleepyCode</span>';
-    turn.dataset.identity='1';
-    const anchor=turn.children[1]||null;
-    turn.insertBefore(h,anchor);
-  }
-  function renderConversation(items){messages.innerHTML=items&&items.length?'':emptyState();hidePlan();currentTurn=current=activity=activityBody=reasoning=null;bindRecent(messages);for(let i=0;i<(items||[]).length;i++){const item=items[i];if(item.kind==='divider'){messages.appendChild(dividerRow());continue}if(item.role==='user'){const turn=document.createElement('section');turn.className='turn';turn.appendChild(userBubble(item));const next=items[i+1];if(next&&next.role==='assistant'){for(const p of (next.work||[]).filter(w=>w.kind==='plan')){const steps=p.steps||[];const allDone=(p.doneSteps||[]).length>=steps.length&&steps.length>0;turn.appendChild(planCard(p.title||'Plan',steps,allDone?-1:(p.activeStep??-1),p.doneSteps||[],Boolean(p.interrupted)))}if(next.work&&next.work.length)turn.appendChild(workActivity(next));if(next.kind==='error'){if(next.partialText){const partial=document.createElement('div');partial.className='assistant';partial.innerHTML=markdown(next.partialText);turn.appendChild(partial);turn.appendChild(interruptedMarker())}turn.appendChild(structuredErrorCard(next))}else{ensureIdentity(turn);const answer=document.createElement('div');answer.className='assistant';answer.innerHTML=markdown(next.text);turn.appendChild(answer)}const pauseNotice=iterationPauseCard(next,i+1===items.length-1);if(pauseNotice)turn.appendChild(pauseNotice);const changeSummary=changesCard(next);if(changeSummary)turn.appendChild(changeSummary);turn.appendChild(messageFooter(next,true));i++}messages.appendChild(turn)}}followOutput=true;scroll(true)}
-  function enableActivity(){if(activity)activity.classList.add('has-content')}
-  function ensureSubagentGroup(m){
-    ensureActivity();enableActivity();
-    let group=activityBody.querySelector('[data-subagent="'+CSS.escape(m.id)+'"]');
-    if(!group){
-      group=document.createElement('details');group.className='subagent-group';group.dataset.subagent=m.id;group.dataset.role=m.role||'worker';group.open=true;
-      group.innerHTML='<summary class="subagent-summary"><span class="subagent-icon">'+subagentRoleIcon(m.role)+'</span><span class="subagent-label"></span><span class="subagent-state">Running</span></summary><div class="subagent-body"></div>';
-      activityBody.appendChild(group)
-    }
-    const label=group.querySelector('.subagent-label');if(label&&m.name)label.textContent=m.name;else if(label&&!label.textContent)label.textContent='Subagent ('+(m.role||'worker')+')';
-    return group
-  }
-  function updateSubagent(m){
-    const group=ensureSubagentGroup(m);const state=group.querySelector('.subagent-state');
-    if(m.phase==='end'){group.classList.add('done');group.classList.toggle('failed',m.ok===false);group.open=m.ok===false;if(state)state.textContent=m.ok===false?'Failed':'Done';const body=group.querySelector('.subagent-body');if(body&&(m.error||m.result)){let result=body.querySelector('.subagent-result');if(!result){result=document.createElement('div');result.className='subagent-result';body.appendChild(result)}result.classList.toggle('error',m.ok===false);result.textContent=m.ok===false?(m.error||'Subagent failed.'):(m.result||'Completed.')}}else{group.classList.remove('done','failed');group.open=true;if(state)state.textContent='Running'}
-    const statusEl=activity?.querySelector('.activity-status');if(statusEl)statusEl.textContent=m.phase==='start'?(m.name||'Subagent working…'):'Working…';scrollActivity()
-  }
-  function updateTask(m){
-    ensureActivity();enableActivity();
-    const parentId=m.parentId?String(m.parentId):'';
-    const container=parentId?ensureSubagentGroup({id:parentId,role:m.subagentRole}).querySelector('.subagent-body'):activityBody;
-    if(!container)return;
-    let row=container.querySelector('[data-task="'+CSS.escape(m.id)+'"]');
-    if(!row){row=document.createElement('div');row.className='tool';row.dataset.task=m.id;row.innerHTML='<span class="task-state">'+taskIconSvg(m.tool,m.name)+'</span><div class="task-label"></div>';container.appendChild(row);taskCount++}
-    row.querySelector('.task-label').innerHTML=markdown(m.name,false);row.classList.toggle('failed',Boolean(m.failed));if(m.phase==='end')row.classList.add('done');
-    const statusEl=activity.querySelector('.activity-status');if(statusEl)statusEl.textContent=m.phase==='start'?(parentId?'Subagent: ':'')+m.name:'Working…';scrollActivity()
-  }
+  const label = group.querySelector('.subagent-label'); if (label && m.name) label.textContent = m.name; else if (label && !label.textContent) label.textContent = 'Subagent (' + (m.role || 'worker') + ')';
+  return group
+}
+function updateSubagent(m) {
+  const group = ensureSubagentGroup(m); const state = group.querySelector('.subagent-state');
+  if (m.phase === 'end') { group.classList.add('done'); group.classList.toggle('failed', m.ok === false); group.open = m.ok === false; if (state) state.textContent = m.ok === false ? 'Failed' : 'Done'; const body = group.querySelector('.subagent-body'); if (body && (m.error || m.result)) { let result = body.querySelector('.subagent-result'); if (!result) { result = document.createElement('div'); result.className = 'subagent-result'; body.appendChild(result) } result.classList.toggle('error', m.ok === false); result.textContent = m.ok === false ? (m.error || 'Subagent failed.') : (m.result || 'Completed.') } } else { group.classList.remove('done', 'failed'); group.open = true; if (state) state.textContent = 'Running' }
+  const statusEl = activity?.querySelector('.activity-status'); if (statusEl) statusEl.textContent = m.phase === 'start' ? (m.name || 'Subagent working…') : 'Working…'; scrollActivity()
+}
+function updateTask(m) {
+  ensureActivity(); enableActivity();
+  const parentId = m.parentId ? String(m.parentId) : '';
+  const container = parentId ? ensureSubagentGroup({ id: parentId, role: m.subagentRole }).querySelector('.subagent-body') : activityBody;
+  if (!container) return;
+  let row = container.querySelector('[data-task="' + CSS.escape(m.id) + '"]');
+  if (!row) { row = document.createElement('div'); row.className = 'tool'; row.dataset.task = m.id; row.innerHTML = '<span class="task-state">' + taskIconSvg(m.tool, m.name) + '</span><div class="task-label"></div>'; container.appendChild(row); taskCount++ }
+  // Args arrive with the start event and the result with the end event, so both are parked in the
+  // dataset first; otherwise the end render would wipe the args the user may be reading. The
+  // expanded state is preserved across the re-render for the same reason.
+  const wasExpanded = row.classList.contains('expanded');
+  if (typeof m.args === 'string') row.dataset.args = m.args;
+  if (typeof m.result === 'string') row.dataset.result = m.result;
+  row.innerHTML = toolRowHtml({ tool: m.tool, name: m.name, done: m.phase === 'end', failed: Boolean(m.failed), args: row.dataset.args || '', result: row.dataset.result || '', durationMs: typeof m.durationMs === 'number' ? m.durationMs : undefined, startedAt: m.phase === 'start' ? Date.now() : 0 });
+  row.classList.toggle('expanded', wasExpanded);
+  row.classList.toggle('failed', Boolean(m.failed)); if (m.phase === 'end') row.classList.add('done');
+  const statusEl = activity.querySelector('.activity-status'); if (statusEl) statusEl.textContent = m.phase === 'start' ? (parentId ? 'Subagent: ' : '') + m.name : 'Working…'; scrollActivity()
+}
 
-  function showRetry(m){ensureActivity();enableActivity();activityBody.querySelectorAll('.retry:not(.done):not(.failed)').forEach(row=>row.classList.add('done'));const row=document.createElement('div');row.className='tool retry';row.dataset.retry=String(m.attempt);row.innerHTML='<span class="task-state">'+taskIconSvg('','Reconnecting')+'</span><div class="task-label"></div>';const label='**Reconnecting '+m.attempt+'/'+m.max+'**'+(m.error?' — '+esc(m.error):'')+(m.backoffMs?' (retry in '+Math.round(m.backoffMs/1000)+'s)':'');row.querySelector('.task-label').innerHTML=markdown(label,false);activityBody.appendChild(row);taskCount++;const statusEl=activity.querySelector('.activity-status');if(statusEl)statusEl.textContent='Reconnecting '+m.attempt+'/'+m.max;scrollActivity()}
-  function finishRetry(m){const rows=activityBody?.querySelectorAll('.retry');if(!rows?.length)return;const last=rows[rows.length-1];last.classList.add(m.ok?'done':'failed');last.querySelector('.task-label').innerHTML=markdown(m.ok?'**Reconnected '+m.attempt+'/'+m.max+'**':'**Reconnect failed '+m.attempt+'/'+m.max+'**',false);scrollActivity()}
-  function finishActivity(){if(!activity)return;activity.classList.remove('loading');const seconds=Math.max(1,Math.round((Date.now()-phaseStartedAt)/1000));const summaryText='Worked for '+seconds+'s'+(taskCount?' · '+taskCount+' task'+(taskCount===1?'':'s'):'');const statusEl=activity.querySelector('.activity-status');if(statusEl)statusEl.textContent=summaryText;else activity.querySelector('summary').textContent=summaryText;const stopBtn=activity.querySelector('.activity-stop-btn');if(stopBtn)stopBtn.remove();activity.open=false}
-  function nextWorkPhase(){closeCurrentText();if(activity){reasoning=document.createElement('div');reasoning.className='reasoning';reasoning.dataset.raw='';activityBody.appendChild(reasoning)}scroll()}
-  function finish(item){closeCurrentText();finishActivity();if(item&&currentTurn){const pauseNotice=iterationPauseCard(item);if(pauseNotice)currentTurn.appendChild(pauseNotice);const changeSummary=changesCard(item);if(changeSummary)currentTurn.appendChild(changeSummary);currentTurn.appendChild(messageFooter(item,true))}currentTurn=current=activity=activityBody=reasoning=null;runningSet.delete(activeConversationId);syncSendButton();updateJump();scroll()}
-  function renderConversationMenu(){
-    const query=conversationQuery.trim().toLowerCase();const matches=x=>!query||String(x.title||'').toLowerCase().includes(query);const current=conversations.filter(x=>!x.archived&&matches(x)),pinned=current.filter(x=>x.pinned),active=current.filter(x=>!x.pinned),archived=conversations.filter(x=>x.archived&&matches(x));
-    const row=x=>'<div class="conversation-row '+(x.id===activeConversationId?'active':'')+'" data-open="'+esc(x.id)+'">'+(x.running?'<span class="spinner"></span>':'')+'<span class="conversation-row-main"><span class="title">'+esc(x.title)+'</span><span class="conversation-meta">'+(x.status==='stopped'?'Stopped':x.status==='failed'?'Failed':x.status==='paused'?'Paused':x.running?'Running':x.changeCount?x.changeCount+' changed file'+(x.changeCount===1?'':'s'):x.messageCount?x.messageCount+' messages':'Empty')+'</span></span><button class="archive-action pin-action" data-pin="'+esc(x.id)+'" title="'+(x.pinned?'Unpin':'Pin')+'">'+(x.pinned?'★':'☆')+'</button><button class="archive-action rename-action" data-rename="'+esc(x.id)+'" title="Rename">✎</button><button class="archive-action" data-archive="'+esc(x.id)+'" title="'+(x.archived?'Restore':'Archive')+'">'+(x.archived?'↶':'<svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>')+'</button><button class="archive-action delete-action" data-delete="'+esc(x.id)+'" title="'+(x.archived?'Delete permanently':'Delete chat')+'">×</button></div>';
-    const group=(label,items)=>items.length?'<div class="menu-label">'+label+'</div>'+items.map(row).join(''):'';
-    conversationMenu.innerHTML='<div class="conversation-search-wrap"><input class="conversation-search" id="conversationSearch" placeholder="Search conversations…" value="'+esc(conversationQuery)+'"></div>'+group('Pinned',pinned)+group('Conversations',active)+group('Archived',archived)+(!pinned.length&&!active.length&&!archived.length?'<div class="dropdown-empty">No matching conversations.</div>':'');
-    const search=conversationMenu.querySelector('#conversationSearch');if(search){search.oninput=()=>{conversationQuery=search.value;renderConversationMenu();const next=conversationMenu.querySelector('#conversationSearch');if(next){next.focus();next.setSelectionRange(conversationQuery.length,conversationQuery.length)}};search.onclick=e=>e.stopPropagation()}
-    conversationMenu.querySelectorAll('[data-open]').forEach(el=>el.onclick=()=>{vscode.postMessage({type:'openConversation',id:el.dataset.open});setConversationMenuOpen(false)});
-    conversationMenu.querySelectorAll('[data-pin]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'togglePinConversation',id:el.dataset.pin})});
-    conversationMenu.querySelectorAll('[data-rename]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'renameConversation',id:el.dataset.rename})});
-    conversationMenu.querySelectorAll('[data-archive]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'archiveConversation',id:el.dataset.archive})});conversationMenu.querySelectorAll('[data-delete]').forEach(el=>el.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'deleteConversation',id:el.dataset.delete})})
+function showRetry(m) { ensureActivity(); enableActivity(); activityBody.querySelectorAll('.retry:not(.done):not(.failed)').forEach(row => row.classList.add('done')); const row = document.createElement('div'); row.className = 'tool retry'; row.dataset.retry = String(m.attempt); row.innerHTML = '<span class="task-state">' + taskIconSvg('', 'Reconnecting') + '</span><div class="task-label"></div>'; const label = '**Reconnecting ' + m.attempt + '/' + m.max + '**' + (m.error ? ' — ' + esc(m.error) : '') + (m.backoffMs ? ' (retry in ' + Math.round(m.backoffMs / 1000) + 's)' : ''); row.querySelector('.task-label').innerHTML = markdown(label, false); activityBody.appendChild(row); taskCount++; const statusEl = activity.querySelector('.activity-status'); if (statusEl) statusEl.textContent = 'Reconnecting ' + m.attempt + '/' + m.max; scrollActivity() }
+function finishRetry(m) { const rows = activityBody?.querySelectorAll('.retry'); if (!rows?.length) return; const last = rows[rows.length - 1]; last.classList.add(m.ok ? 'done' : 'failed'); last.querySelector('.task-label').innerHTML = markdown(m.ok ? '**Reconnected ' + m.attempt + '/' + m.max + '**' : '**Reconnect failed ' + m.attempt + '/' + m.max + '**', false); scrollActivity() }
+function finishActivity() { if (!activity) return; activity.classList.remove('loading'); const seconds = Math.max(1, Math.round((Date.now() - phaseStartedAt) / 1000)); const summaryText = 'Worked for ' + seconds + 's' + (taskCount ? ' · ' + taskCount + ' task' + (taskCount === 1 ? '' : 's') : ''); const statusEl = activity.querySelector('.activity-status'); if (statusEl) statusEl.textContent = summaryText; else activity.querySelector('summary').textContent = summaryText; const stopBtn = activity.querySelector('.activity-stop-btn'); if (stopBtn) stopBtn.remove(); activity.open = false }
+function nextWorkPhase() { closeCurrentText(); if (activity) { reasoning = document.createElement('div'); reasoning.className = 'reasoning'; reasoning.dataset.raw = ''; activityBody.appendChild(reasoning) } scroll() }
+function finish(item) { closeCurrentText(); finishActivity(); if (item && currentTurn) { const pauseNotice = iterationPauseCard(item); if (pauseNotice) currentTurn.appendChild(pauseNotice); const changeSummary = changesCard(item); if (changeSummary) currentTurn.appendChild(changeSummary); currentTurn.appendChild(messageFooter(item, true)) } currentTurn = current = activity = activityBody = reasoning = null; runningSet.delete(activeConversationId); syncSendButton(); updateJump(); scroll() }
+function renderConversationMenu() {
+  const query = conversationQuery.trim().toLowerCase(); const matches = x => !query || String(x.title || '').toLowerCase().includes(query); const current = conversations.filter(x => !x.archived && matches(x)), pinned = current.filter(x => x.pinned), active = current.filter(x => !x.pinned), archived = conversations.filter(x => x.archived && matches(x));
+  const row = x => '<div class="conversation-row ' + (x.id === activeConversationId ? 'active' : '') + '" data-open="' + esc(x.id) + '">' + (x.running ? '<span class="spinner"></span>' : '') + '<span class="conversation-row-main"><span class="title">' + esc(x.title) + '</span><span class="conversation-meta">' + (x.status === 'stopped' ? 'Stopped' : x.status === 'failed' ? 'Failed' : x.status === 'paused' ? 'Paused' : x.running ? 'Running' : x.changeCount ? x.changeCount + ' changed file' + (x.changeCount === 1 ? '' : 's') : x.messageCount ? x.messageCount + ' messages' : 'Empty') + '</span></span><button class="archive-action pin-action" data-pin="' + esc(x.id) + '" title="' + (x.pinned ? 'Unpin' : 'Pin') + '">' + (x.pinned ? '★' : '☆') + '</button><button class="archive-action rename-action" data-rename="' + esc(x.id) + '" title="Rename">✎</button><button class="archive-action" data-archive="' + esc(x.id) + '" title="' + (x.archived ? 'Restore' : 'Archive') + '">' + (x.archived ? '↶' : '<svg viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>') + '</button><button class="archive-action delete-action" data-delete="' + esc(x.id) + '" title="' + (x.archived ? 'Delete permanently' : 'Delete chat') + '">×</button></div>';
+  const group = (label, items) => items.length ? '<div class="menu-label">' + label + '</div>' + items.map(row).join('') : '';
+  conversationMenu.innerHTML = '<div class="conversation-search-wrap"><input class="conversation-search" id="conversationSearch" placeholder="Search conversations…" value="' + esc(conversationQuery) + '"></div>' + group('Pinned', pinned) + group('Conversations', active) + group('Archived', archived) + (!pinned.length && !active.length && !archived.length ? '<div class="dropdown-empty">No matching conversations.</div>' : '');
+  const search = conversationMenu.querySelector('#conversationSearch'); if (search) { search.oninput = () => { conversationQuery = search.value; renderConversationMenu(); const next = conversationMenu.querySelector('#conversationSearch'); if (next) { next.focus(); next.setSelectionRange(conversationQuery.length, conversationQuery.length) } }; search.onclick = e => e.stopPropagation() }
+  conversationMenu.querySelectorAll('[data-open]').forEach(el => el.onclick = () => { vscode.postMessage({ type: 'openConversation', id: el.dataset.open }); setConversationMenuOpen(false) });
+  conversationMenu.querySelectorAll('[data-pin]').forEach(el => el.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'togglePinConversation', id: el.dataset.pin }) });
+  conversationMenu.querySelectorAll('[data-rename]').forEach(el => el.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'renameConversation', id: el.dataset.rename }) });
+  conversationMenu.querySelectorAll('[data-archive]').forEach(el => el.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'archiveConversation', id: el.dataset.archive }) }); conversationMenu.querySelectorAll('[data-delete]').forEach(el => el.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'deleteConversation', id: el.dataset.delete }) })
+}
+function retryButton() { const btn = document.createElement('button'); btn.className = 'retry-btn'; btn.title = 'Continue from where it stopped'; btn.setAttribute('aria-label', 'Continue the last request'); btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.5L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.5L3 16"/><path d="M3 21v-5h5"/></svg> Continue'; btn.onclick = () => vscode.postMessage({ type: 'retryMessage', conversationId: activeConversationId }); return btn }
+function errorActions() { const actions = document.createElement('div'); actions.className = 'error-actions'; actions.appendChild(retryButton()); return actions }
+function addError(text, retry) { document.getElementById('empty')?.remove(); const d = document.createElement('div'); d.className = 'error'; d.textContent = text; if (retry) d.appendChild(errorActions()); messages.appendChild(d); scroll() }
+function interruptedMarker() { const marker = document.createElement('div'); marker.className = 'interrupted-note'; marker.textContent = 'Response interrupted here — retry continues from this point'; return marker }
+function showGenerationError(item) { if (current) { current.classList.remove('streaming'); current = null } if (currentTurn) { if (item && item.partialText) currentTurn.appendChild(interruptedMarker()); currentTurn.appendChild(structuredErrorCard(item)) } else { document.getElementById('empty')?.remove(); messages.appendChild(structuredErrorCard(item)) } finish(item) }
+let sendState = 'idle'; function setSendMode(state) { if (sendState === state) return; sendState = state; const running = state === 'loading'; send.classList.toggle('loading', running); send.classList.toggle('stop', running); send.classList.toggle('idle', state === 'idle'); send.classList.toggle('ready', state === 'ready'); send.title = running ? 'Stop' : 'Send'; send.setAttribute('aria-label', running ? 'Stop' : 'Send'); const sSvg = send.querySelector('.send-svg'), xSvg = send.querySelector('.stop-svg'); if (sSvg) sSvg.style.removeProperty('display'); if (xSvg) xSvg.style.removeProperty('display'); document.querySelector('.box')?.classList.toggle('working', running) } function updateSendMode() { setSendMode(isRunning() ? 'loading' : (input.value.trim() || attachments.length ? 'ready' : 'idle')) }
+function compactPrice(value) { if (value === undefined || value === null) return ''; const n = Number(value); if (!Number.isFinite(n)) return ''; if (n >= 1) return '$' + trimNum(n.toFixed(2)); if (n >= .01) return '$' + trimNum(n.toFixed(3)); return '$' + trimNum(n.toFixed(4)) }
+function modelMeta(m, mid, providerId) { if (typeof m === 'object' && m && m.isAuto) return 'Cheapest model first · A–Z fallback'; const price = providerId === 'sleepyai' ? (sleepyModelPrices || []).find(p => p.modelId === mid || p.name === mid || p.name === modelNameOf(m)) : undefined; const context = (typeof m === 'object' && m && m.contextWindow) || price?.contextWindow || 0; const parts = []; if (typeof m === 'object' && m && m.recommended) parts.push('Recommended'); if (context) parts.push(fmt(context) + ' context'); if (price && price.inputPrice !== undefined && price.outputPrice !== undefined) parts.push(compactPrice(price.inputPrice) + ' / ' + compactPrice(price.outputPrice) + ' per 1M in/out'); return parts.join(' · ') }
+let modelQuery = '';
+function modelMatches(m, mid, providerName) { const q = modelQuery.trim().toLowerCase(); if (!q) return true; return [modelNameOf(m), mid, providerName].some(v => String(v || '').toLowerCase().includes(q)) }
+function renderModelMenu() {
+  modelMenu.innerHTML = '';
+  if (!modelGroups.length) {
+    const empty = document.createElement('div');
+    empty.className = 'dropdown-empty';
+    empty.textContent = 'No models available yet.';
+    modelMenu.appendChild(empty);
+    return;
   }
-  function retryButton(){const btn=document.createElement('button');btn.className='retry-btn';btn.title='Continue from where it stopped';btn.setAttribute('aria-label','Continue the last request');btn.innerHTML='<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.5L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.5L3 16"/><path d="M3 21v-5h5"/></svg> Continue';btn.onclick=()=>vscode.postMessage({type:'retryMessage',conversationId:activeConversationId});return btn}
-  function errorActions(){const actions=document.createElement('div');actions.className='error-actions';actions.appendChild(retryButton());return actions}
-  function addError(text,retry){document.getElementById('empty')?.remove();const d=document.createElement('div');d.className='error';d.textContent=text;if(retry)d.appendChild(errorActions());messages.appendChild(d);scroll()}
-  function interruptedMarker(){const marker=document.createElement('div');marker.className='interrupted-note';marker.textContent='Response interrupted here — retry continues from this point';return marker}
-  function showGenerationError(item){if(current){current.classList.remove('streaming');current=null}if(currentTurn){if(item&&item.partialText)currentTurn.appendChild(interruptedMarker());currentTurn.appendChild(structuredErrorCard(item))}else{document.getElementById('empty')?.remove();messages.appendChild(structuredErrorCard(item))}finish(item)}
-  let sendState='idle';function setSendMode(state){if(sendState===state)return;sendState=state;const running=state==='loading';send.classList.toggle('loading',running);send.classList.toggle('stop',running);send.classList.toggle('idle',state==='idle');send.classList.toggle('ready',state==='ready');send.title=running?'Stop':'Send';send.setAttribute('aria-label',running?'Stop':'Send');const sSvg=send.querySelector('.send-svg'),xSvg=send.querySelector('.stop-svg');if(sSvg)sSvg.style.removeProperty('display');if(xSvg)xSvg.style.removeProperty('display');document.querySelector('.box')?.classList.toggle('working',running)}function updateSendMode(){setSendMode(isRunning()?'loading':(input.value.trim()||attachments.length?'ready':'idle'))}
-  function compactPrice(value){if(value===undefined||value===null)return'';const n=Number(value);if(!Number.isFinite(n))return'';if(n>=1)return'$'+trimNum(n.toFixed(2));if(n>=.01)return'$'+trimNum(n.toFixed(3));return'$'+trimNum(n.toFixed(4))}
-  function modelMeta(m,mid,providerId){if(typeof m==='object'&&m&&m.isAuto)return'Cheapest model first · A–Z fallback';const price=providerId==='sleepyai'?(sleepyModelPrices||[]).find(p=>p.modelId===mid||p.name===mid||p.name===modelNameOf(m)):undefined;const context=(typeof m==='object'&&m&&m.contextWindow)||price?.contextWindow||0;const parts=[];if(typeof m==='object'&&m&&m.recommended)parts.push('Recommended');if(context)parts.push(fmt(context)+' context');if(price&&price.inputPrice!==undefined&&price.outputPrice!==undefined)parts.push(compactPrice(price.inputPrice)+' / '+compactPrice(price.outputPrice)+' per 1M in/out');return parts.join(' · ')}
-  let modelQuery='';
-  function modelMatches(m,mid,providerName){const q=modelQuery.trim().toLowerCase();if(!q)return true;return [modelNameOf(m),mid,providerName].some(v=>String(v||'').toLowerCase().includes(q))}
-  function renderModelMenu(){
-    modelMenu.innerHTML='';
-    if(!modelGroups.length){
-      const empty=document.createElement('div');
-      empty.className='dropdown-empty';
-      empty.textContent='No models available yet.';
-      modelMenu.appendChild(empty);
-      return;
+  const search = document.createElement('div');
+  search.className = 'model-search-wrap';
+  const searchInput = document.createElement('input');
+  searchInput.className = 'model-search';
+  searchInput.type = 'search';
+  searchInput.placeholder = 'Search models\u2026';
+  searchInput.value = modelQuery;
+  searchInput.setAttribute('aria-label', 'Search models');
+  search.appendChild(searchInput);
+  modelMenu.appendChild(search);
+  const results = document.createElement('div');
+  results.className = 'model-results';
+  modelMenu.appendChild(results);
+  let total = 0;
+  for (const group of modelGroups) {
+    const label = document.createElement('div');
+    label.className = 'dropdown-group-label';
+    label.textContent = group.providerId === 'sleepyai' ? 'SleepyAI' : group.providerName;
+    const matching = [...(group.models || [])].sort(modelA2Z).filter(m => modelMatches(m, modelIdOf(m), group.providerName));
+    if (!matching.length) continue;
+    results.appendChild(label);
+    for (const m of matching) {
+      total++;
+      const mid = modelIdOf(m);
+      const mname = modelNameOf(m);
+      const meta = modelMeta(m, mid, group.providerId);
+      const opt = document.createElement('button');
+      opt.type = 'button';
+      opt.className = 'dropdown-option model-option' + (mid === selectedModel ? ' selected' : '');
+      opt.innerHTML = '<span class="model-option-head"><span class="model-option-name">' + esc(mname) + '</span>' + ((typeof m === 'object' && m && (m.isAuto || m.recommended)) ? '<span class="model-recommended">' + (m.isAuto ? 'Recommended' : 'Preferred') + '</span>' : '') + (mid === selectedModel ? '<span class="model-option-check">✓</span>' : '') + '</span>' + (meta ? '<span class="model-option-meta">' + esc(meta) + '</span>' : '');
+      opt.title = mid + ' (' + group.providerName + ')';
+      opt.onclick = () => selectModel(mid, group.providerId);
+      results.appendChild(opt);
     }
-    const search=document.createElement('div');
-    search.className='model-search-wrap';
-    const searchInput=document.createElement('input');
-    searchInput.className='model-search';
-    searchInput.type='search';
-    searchInput.placeholder='Search models\u2026';
-    searchInput.value=modelQuery;
-    searchInput.setAttribute('aria-label','Search models');
-    search.appendChild(searchInput);
-    modelMenu.appendChild(search);
-    const results=document.createElement('div');
-    results.className='model-results';
-    modelMenu.appendChild(results);
-    let total=0;
-    for(const group of modelGroups){
-      const label=document.createElement('div');
-      label.className='dropdown-group-label';
-      label.textContent=group.providerId==='sleepyai'?'SleepyAI':group.providerName;
-      const matching=[...(group.models||[])].sort(modelA2Z).filter(m=>modelMatches(m,modelIdOf(m),group.providerName));
-      if(!matching.length)continue;
-      results.appendChild(label);
-      for(const m of matching){
-        total++;
-        const mid=modelIdOf(m);
-        const mname=modelNameOf(m);
-        const meta=modelMeta(m,mid,group.providerId);
-        const opt=document.createElement('button');
-        opt.type='button';
-        opt.className='dropdown-option model-option'+(mid===selectedModel?' selected':'');
-        opt.innerHTML='<span class="model-option-head"><span class="model-option-name">'+esc(mname)+'</span>'+((typeof m==='object'&&m&&(m.isAuto||m.recommended))?'<span class="model-recommended">'+(m.isAuto?'Recommended':'Preferred')+'</span>':'')+(mid===selectedModel?'<span class="model-option-check">✓</span>':'')+'</span>'+(meta?'<span class="model-option-meta">'+esc(meta)+'</span>':'');
-        opt.title=mid+' ('+group.providerName+')';
-        opt.onclick=()=>selectModel(mid,group.providerId);
-        results.appendChild(opt);
-      }
-    }
-    if(!total){const none=document.createElement('div');none.className='dropdown-empty';none.textContent='No models match \u201c'+modelQuery+'\u201d.';results.appendChild(none)}
-    if(modelMenu.classList.contains('open'))requestAnimationFrame(()=>placeAnchoredMenu(modelMenu,modelDropdown||modelButton));
-    searchInput.oninput=()=>{modelQuery=searchInput.value;renderModelMenu();const next=modelMenu.querySelector('.model-search');if(next){next.focus();const end=next.value.length;try{next.setSelectionRange(end,end)}catch{}}}
-    searchInput.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();if(modelQuery){modelQuery='';renderModelMenu();const next=modelMenu.querySelector('.model-search');next&&next.focus()}else closeModelMenu()}}
-    if(modelQuery){const end=searchInput.value.length;setTimeout(()=>{try{searchInput.focus();searchInput.setSelectionRange(end,end)}catch{}},0)}
   }
-  // --- Reasoning effort -------------------------------------------------
-  // Always available: every model gets the control. Model ids are open-ended,
-  // so gating on a capability allow-list hid the choice from models it had not
-  // heard of. "none" sends no parameter at all, which stays the safe default.
-  const EFFORTS=[
-    {id:'none',name:'None',desc:'Do not send a reasoning parameter. Default.'},
-    {id:'minimal',name:'Minimal',desc:'Almost no thinking. Fastest.'},
-    {id:'low',name:'Low',desc:'Brief thinking for simple tasks.'},
-    {id:'medium',name:'Medium',desc:'Balanced thinking budget.'},
-    {id:'high',name:'High',desc:'Deep thinking for hard problems.'},
-    {id:'xhigh',name:'Extra high',desc:'Very deep thinking. Slowest per step.'},
-    {id:'max',name:'Max',desc:'Highest budget the model allows.'}
-  ];
-  function findEffort(id){return EFFORTS.find(e=>e.id===id)||EFFORTS[0]}
-  function syncEffortPill(){
-    // Every model can be given a reasoning level, so the pill is never hidden.
-    if(effortDropdown)effortDropdown.style.display='';
-    const e=findEffort(reasoningEffort);
-    if(effortButton){effortButton.textContent='Reasoning: '+e.name;effortButton.title='Reasoning effort: '+e.name}
+  if (!total) { const none = document.createElement('div'); none.className = 'dropdown-empty'; none.textContent = 'No models match \u201c' + modelQuery + '\u201d.'; results.appendChild(none) }
+  if (modelMenu.classList.contains('open')) requestAnimationFrame(() => placeAnchoredMenu(modelMenu, modelDropdown || modelButton));
+  searchInput.oninput = () => { modelQuery = searchInput.value; renderModelMenu(); const next = modelMenu.querySelector('.model-search'); if (next) { next.focus(); const end = next.value.length; try { next.setSelectionRange(end, end) } catch { } } }
+  searchInput.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (modelQuery) { modelQuery = ''; renderModelMenu(); const next = modelMenu.querySelector('.model-search'); next && next.focus() } else closeModelMenu() } }
+  if (modelQuery) { const end = searchInput.value.length; setTimeout(() => { try { searchInput.focus(); searchInput.setSelectionRange(end, end) } catch { } }, 0) }
+}
+// --- Reasoning effort -------------------------------------------------
+// Always available: every model gets the control. Model ids are open-ended,
+// so gating on a capability allow-list hid the choice from models it had not
+// heard of. "none" sends no parameter at all, which stays the safe default.
+const EFFORTS = [
+  { id: 'none', name: 'None', desc: 'Do not send a reasoning parameter. Default.' },
+  { id: 'minimal', name: 'Minimal', desc: 'Almost no thinking. Fastest.' },
+  { id: 'low', name: 'Low', desc: 'Brief thinking for simple tasks.' },
+  { id: 'medium', name: 'Medium', desc: 'Balanced thinking budget.' },
+  { id: 'high', name: 'High', desc: 'Deep thinking for hard problems.' },
+  { id: 'xhigh', name: 'Extra high', desc: 'Very deep thinking. Slowest per step.' },
+  { id: 'max', name: 'Max', desc: 'Highest budget the model allows.' }
+];
+function findEffort(id) { return EFFORTS.find(e => e.id === id) || EFFORTS[0] }
+function syncEffortPill() {
+  // Every model can be given a reasoning level, so the pill is never hidden.
+  if (effortDropdown) effortDropdown.style.display = '';
+  const e = findEffort(reasoningEffort);
+  if (effortButton) { effortButton.textContent = 'Reasoning: ' + e.name; effortButton.title = 'Reasoning effort: ' + e.name }
+}
+function renderEffortMenu() {
+  if (!effortMenu) return;
+  effortMenu.innerHTML = '';
+  for (const e of EFFORTS) {
+    const opt = document.createElement('button');
+    opt.type = 'button';
+    opt.className = 'dropdown-option effort-option' + (e.id === reasoningEffort ? ' selected' : '');
+    opt.innerHTML = '<span class="effort-option-main"><span class="effort-option-name">' + esc(e.name) + (e.id === reasoningEffort ? '<span class="model-option-check">✓</span>' : '') + '</span><span class="effort-option-desc">' + esc(e.desc) + '</span></span>';
+    opt.onclick = () => selectEffort(e.id);
+    effortMenu.appendChild(opt);
   }
-  function renderEffortMenu(){
-    if(!effortMenu)return;
-    effortMenu.innerHTML='';
-    for(const e of EFFORTS){
-      const opt=document.createElement('button');
-      opt.type='button';
-      opt.className='dropdown-option effort-option'+(e.id===reasoningEffort?' selected':'');
-      opt.innerHTML='<span class="effort-option-main"><span class="effort-option-name">'+esc(e.name)+(e.id===reasoningEffort?'<span class="model-option-check">✓</span>':'')+'</span><span class="effort-option-desc">'+esc(e.desc)+'</span></span>';
-      opt.onclick=()=>selectEffort(e.id);
-      effortMenu.appendChild(opt);
-    }
-    if(effortMenu.classList.contains('open'))requestAnimationFrame(()=>placeAnchoredMenu(effortMenu,effortDropdown||effortButton));
-  }
-  function closeEffortMenu(){effortMenu?.classList.remove('open');effortButton?.setAttribute('aria-expanded','false');resetAnchoredMenu(effortMenu)}
-  function toggleEffortMenu(){
-    const open=!effortMenu.classList.contains('open');
-    effortMenu.classList.toggle('open',open);
-    effortButton?.setAttribute('aria-expanded',String(open));
-    if(open){closeModelMenu();closeAgentMenu();closeSafetyMenu();closeContextPanel();renderEffortMenu();requestAnimationFrame(()=>placeAnchoredMenu(effortMenu,effortDropdown||effortButton))}
-    else resetAnchoredMenu(effortMenu);
-  }
-  function selectEffort(id){
-    reasoningEffort=findEffort(id).id;
-    syncEffortPill();
-    closeEffortMenu();
-    vscode.postMessage({type:'selectReasoningEffort',effort:reasoningEffort});
-  }
-  if(effortButton)effortButton.onclick=event=>{event.stopPropagation();toggleEffortMenu()};
-  function closeModelMenu(){modelMenu.classList.remove('open');modelButton?.setAttribute('aria-expanded','false');resetAnchoredMenu(modelMenu)}
-  function toggleModelMenu(){const open=!modelMenu.classList.contains('open');modelMenu.classList.toggle('open',open);modelButton?.setAttribute('aria-expanded',String(open));if(open){closeEffortMenu();closeAgentMenu();closeSafetyMenu();closeContextPanel();renderModelMenu();requestAnimationFrame(()=>placeAnchoredMenu(modelMenu,modelDropdown||modelButton))}else resetAnchoredMenu(modelMenu)}
-  function selectModel(id,providerId){
-    selectedModel=id;
-    const name=findModelName(id);
-    modelButton.textContent=name;
-    modelButton.title=id;
-    closeModelMenu();
-    modelQuery='';
-    vscode.postMessage({type:'selectModel',model:id,provider:providerId});
-    updateSessionStats();
-  }
-  document.getElementById('approvalMode')?.addEventListener('change', ()=>{syncSafetyControl();autosaveNow()});
-  syncSafetyControl();
-  syncAgentPill();
+  if (effortMenu.classList.contains('open')) requestAnimationFrame(() => placeAnchoredMenu(effortMenu, effortDropdown || effortButton));
+}
+function closeEffortMenu() { effortMenu?.classList.remove('open'); effortButton?.setAttribute('aria-expanded', 'false'); resetAnchoredMenu(effortMenu) }
+function toggleEffortMenu() {
+  const open = !effortMenu.classList.contains('open');
+  effortMenu.classList.toggle('open', open);
+  effortButton?.setAttribute('aria-expanded', String(open));
+  if (open) { closeModelMenu(); closeAgentMenu(); closeSafetyMenu(); closeContextPanel(); renderEffortMenu(); requestAnimationFrame(() => placeAnchoredMenu(effortMenu, effortDropdown || effortButton)) }
+  else resetAnchoredMenu(effortMenu);
+}
+function selectEffort(id) {
+  reasoningEffort = findEffort(id).id;
   syncEffortPill();
-  function submit(){let text=input.value.trim();const wasRunning=isRunning();if(wasRunning&&!text&&!attachments.length){vscode.postMessage({type:'stop'});return}if(!text&&!attachments.length)return;if(text.startsWith('/')){const slash=expandSlashPrompt(text);if(slash.handled){input.value='';closeSlashMenu();resize();return}text=slash.text}if(!selectedModel){addError('Choose a model first.');return}recordPromptHistory(text);const sentAttachments=[...attachments];const context={includeProjectIndex,includeActiveFile,includeSelection,activeFile:editorContext.activeFile,selectionLines:editorContext.selectionLines,attachments:sentAttachments};const optimisticText=text||'Please inspect the attached files.';const edit=editMessageState?{...editMessageState}:null;editMessageState=null;setEditBar(false);if(!edit&&!wasRunning)runningSet.add(activeConversationId);input.value='';attachments=[];renderAttachments();closeContextPanel();closeSlashMenu();resize();if(!edit){if(wasRunning){const list=queuedByConversation.get(activeConversationId)||[];list.push({id:'tmp-'+Date.now(),text:optimisticText});queuedByConversation.set(activeConversationId,list);updateQueuedVisibility();vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context});updateSendMode();return}updateJump();try{const now=Date.now(),optimistic={id:'tmp-'+now,role:'user',text:optimisticText,timestamp:now,attachments:sentAttachments};beginTurn(optimistic);createActivity();const st=activity&&activity.querySelector('.activity-status');if(st)st.textContent='Sending…';scroll(true)}catch(e){}vscode.postMessage({type:'send',text:optimisticText,conversationId:activeConversationId,context})}else{vscode.postMessage({type:'editUserMessage',conversationId:edit.conversationId,itemId:edit.itemId,text:optimisticText,context})}}
-  function resize(){input.style.height='auto';const viewportCap=Math.max(72,Math.min(180,Math.floor(window.innerHeight*.28)));input.style.height=Math.min(input.scrollHeight,viewportCap)+'px';updateSendMode();if(followOutput)pinScroll();updateJump()}
-  send.onclick=()=>{if(isRunning()){vscode.postMessage({type:'stop'});return}submit()};
-  input.oninput=resize;
-  input.onkeydown=e=>{
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();return}
-    // Arrow-key carets move through multi-line drafts, so only recall when the
-    // caret sits on the edge that would otherwise move outside the text.
-    if(e.key==='ArrowUp'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&canRecall(true)){
-      e.preventDefault();recallPrompt(true);return;
-    }
-    if(e.key==='ArrowDown'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&historyIndex!==-1&&canRecall(false)){
-      e.preventDefault();recallPrompt(false);return;
-    }
-    if(e.key==='Escape'){
-      if(slashMenu?.classList.contains('open')||mentionMenu.classList.contains('open'))return;
-      e.preventDefault();
-      if(input.value){input.value='';historyDraft=null;resize()}
-      else input.blur();
-    }
-  };
-  messages.addEventListener('scroll',()=>{followOutput=nearBottom();updateJump()});jumpBottom.onclick=()=>{followOutput=true;scroll(true)};projectIndicator.onclick=()=>{if(projectIndicatorPath)vscode.postMessage({type:'revealInOS'})};document.getElementById('statPillGroup')?.addEventListener('click',()=>toggleSessionInfo());document.getElementById('statPillGroup')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleSessionInfo()}});
-    const composerEl=document.querySelector('.composer');if(typeof ResizeObserver!=='undefined'&&composerEl)new ResizeObserver(()=>{updateJump();placeOpenComposerMenus();if(followOutput)pinScroll()}).observe(composerEl);window.addEventListener('resize',()=>{resize();updateJump();placeOpenComposerMenus()});window.visualViewport?.addEventListener('resize',()=>placeOpenComposerMenus());window.visualViewport?.addEventListener('scroll',()=>placeOpenComposerMenus());
-  queued.onclick=(event)=>{const button=event.target.closest('button[data-act]');if(!button)return;const id=button.dataset.id;const act=button.dataset.act;if(act==='steer'){vscode.postMessage({type:'steerQueued',conversationId:activeConversationId,id});return}const list=queuedByConversation.get(activeConversationId)||[];const entry=list.find(item=>item.id===id);if(!entry)return;if(act==='edit'){queuedByConversation.set(activeConversationId,list.filter(item=>item.id!==id));updateQueuedVisibility();vscode.postMessage({type:'removeQueued',conversationId:activeConversationId,id});input.value=entry.text;resize();input.focus();return}if(act==='remove'){vscode.postMessage({type:'removeQueued',conversationId:activeConversationId,id})}};
-  document.getElementById('loginBannerBtn').onclick=()=>vscode.postMessage({type:'requestSettings'});
-  const undoBtn=document.getElementById('undoButton'),redoBtn=document.getElementById('redoButton');if(undoBtn)undoBtn.onclick=async()=>{const choice=await showNotifyModal(compactionUndoable?{title:'Undo compaction?',body:'This will restore the full conversation that was compacted. You can redo later.',ok:'Undo',cancel:'Cancel'}:{title:'Undo last turn?',body:'This will remove the last assistant response and your last message. You can redo later.',ok:'Undo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'undoLastTurn',conversationId:activeConversationId})};if(redoBtn)redoBtn.onclick=async()=>{const choice=await showNotifyModal(compactionRedoable?{title:'Redo compaction?',body:'This will re-apply the compaction you just undid.',ok:'Redo',cancel:'Cancel'}:{title:'Redo last turn?',body:'This will restore the last undone turn.',ok:'Redo',cancel:'Cancel'});if(choice==='ok')vscode.postMessage({type:'redoLastTurn',conversationId:activeConversationId})};
-  const settingsView=document.getElementById('settingsView'),maxSteps=document.getElementById('maxSteps'),maxStepsUnlimited=document.getElementById('maxStepsUnlimited'),approvalMode=document.getElementById('approvalMode'),searxngUrl=document.getElementById('searxngUrl'),mcpServers=document.getElementById('mcpServers'),extraFreeModels=document.getElementById('extraFreeModels'),maxPersistedReasoning=document.getElementById('maxPersistedReasoning'),settingsResult=document.getElementById('settingsResult'),providerList=document.getElementById('providerList'),onlyDefaultModels=document.getElementById('onlyDefaultModels'),confirmDelete=document.getElementById('confirmDelete'),compactionModel=document.getElementById('compactionModel'),subagentModelExplorer=document.getElementById('subagentModelExplorer'),subagentModelReviewer=document.getElementById('subagentModelReviewer'),subagentModelWorker=document.getElementById('subagentModelWorker'),useCli=document.getElementById('useCli');let initialSetup=false,savedApiKeys={},providersList=[],activeProvider='',settingsSavedTimer=null,sleepyAccount=null,sleepyBusy=false,sleepyStatusText='',mcpConnectionsList=[],mcpStatusByName={};
-  const resetSettingsBtn=document.getElementById('resetSettings');let resetClicks=0,autosaveTimer=null;
-  function resetArmGuard(){resetClicks=0;resetSettingsBtn.textContent='Reset Extension to Defaults'}
-  function settingsPayload(){return{maxSteps:maxStepsUnlimited.checked?0:(Number(maxSteps.value)||200),approvalMode:approvalMode.value,searxngUrl:searxngUrl.value,mcpServers:mcpServers.value,extraFreeModels:extraFreeModels.value,maxPersistedReasoning:Number(maxPersistedReasoning&&maxPersistedReasoning.value)||32000,activeProvider:activeProvider,providers:providersList,apiKey:'',onlyDefaultModels:onlyDefaultModels.checked,confirmDelete:confirmDelete.checked,compactionModel:compactionModel.value,useCli:Boolean(useCli&&useCli.checked),subagentModels:{explorer:subagentModelExplorer?.value||'',reviewer:subagentModelReviewer?.value||'',worker:subagentModelWorker?.value||''},initialSetup}}
-  function autosaveNow(){resetArmGuard();clearTimeout(autosaveTimer);vscode.postMessage({type:'saveSettings',...settingsPayload()})}
-  function autosaveLater(){resetArmGuard();clearTimeout(autosaveTimer);autosaveTimer=setTimeout(()=>vscode.postMessage({type:'saveSettings',...settingsPayload()}),350)}
-  function renderSleepyCard(){
-    const loginBanner=document.getElementById('loginBanner');
-    if(loginBanner){loginBanner.classList.toggle('visible',Boolean(!sleepyAccount||!sleepyAccount.loggedIn))}
-    const el=document.getElementById('sleepyCardBody');
-    if(!el)return;
-    if(sleepyBusy){el.innerHTML='<div style="display:flex;align-items:center;gap:8px;font-size:12px"><span class="spinner"></span><span>'+esc(sleepyStatusText||'Connecting to SleepyAI…')+'</span></div>';return}
-    if(sleepyAccount&&sleepyAccount.loggedIn){
-      const fmtMoney=n=>{if(n===undefined||n===null)return'—';return'$'+Number(n).toFixed(2)};
-      const fmtTokens=n=>{if(n===undefined||n===null)return'—';if(n>=1000000)return(n/1000000).toFixed(1)+'M';if(n>=1000)return(n/1000).toFixed(1)+'k';return String(n)};
-      const pctClass=pct=>pct>=80?'danger':pct>=50?'warn':'safe';
-      const makeBar=(used,limit)=>{
-        if(used===undefined||limit===undefined||limit<=0)return'';
-        const pct=Math.min(100,Math.round((used/limit)*100));
-        return'<div class="limit-row"><div class="limit-header"><span class="limit-value">'+fmtMoney(used)+' / '+fmtMoney(limit)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+pctClass(pct)+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'%</div></div>';
-      };
-      const lim=sleepyAccount.limits||{};
-      const sub=sleepyAccount.subscription||{};
-      const bal=sleepyAccount.balances||{};
-      let html='<div style="display:flex;flex-direction:column;gap:14px">';
-      html+='<div class="sleepy-account-head"><div class="sleepy-account-main"><div class="sleepy-account-title">Signed in to SleepyAI</div>'+(sleepyAccount.email?'<div class="sleepy-account-email">'+esc(sleepyAccount.email)+'</div>':'')+'</div>'+(activeProvider==='sleepyai'?'<span class="sleepy-active">Active</span>':'<button type="button" class="primary" id="sleepyUseBtn">Use SleepyAI</button>')+'<button type="button" class="small-btn" id="sleepyLogoutBtn">Sign out</button></div><div class="sleepy-account-links"><button type="button" class="secondary" id="sleepyManageBtn">Manage account</button><button type="button" class="secondary" id="sleepyWebsiteBtn">SleepyAI website ↗</button></div>';
-      html+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
-      if(sub.plan)html+='<span style="padding:3px 10px;border-radius:999px;background:color-mix(in srgb,var(--vscode-focusBorder) 12%,transparent);color:var(--vscode-foreground);font-size:11px;font-weight:500">'+esc(sub.plan)+'</span>';
-      if(sub.status)html+='<span style="padding:3px 10px;border-radius:999px;background:color-mix(in srgb,var(--vscode-testing-iconPassed) 12%,transparent);color:var(--vscode-testing-iconPassed);font-size:11px">'+esc(sub.status)+'</span>';
-      html+='</div>';
-      html+='<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--vscode-descriptionForeground)">';
-      html+='<div><span style="color:var(--vscode-foreground);font-weight:500">Balance</span><br>'+fmtMoney(bal.credits)+'</div>';
-      if(bal.freeCreditsRemaining!==undefined)html+='<div><span style="color:var(--vscode-foreground);font-weight:500">Extra Credits</span><br>'+fmtMoney(bal.freeCreditsRemaining)+'</div>';
-      if(sub.monthlySpend!==undefined)html+='<div><span style="color:var(--vscode-foreground);font-weight:500">Monthly</span><br>'+fmtMoney(sub.monthlySpend)+' / '+fmtMoney(sub.monthlyLimit)+'</div>';
-      html+='</div>';
-      if(lim.usedTokensToday!==undefined&&lim.tokensPerDay!==undefined){
-        const pct=Math.min(100,Math.round((lim.usedTokensToday/lim.tokensPerDay)*100));
-        html+='<div><div class="limit-section-title">Daily Free Model Tokens</div><div class="limit-header"><span class="limit-value">'+fmtTokens(lim.usedTokensToday)+' / '+fmtTokens(lim.tokensPerDay)+'</span></div><div class="limit-bar-track"><div class="limit-bar-fill '+pctClass(pct)+'" style="width:'+pct+'%"></div></div><div class="limit-bar-pct">'+pct+'% used</div></div>';
-      }
-      const hasLimits=lim.limit5h!==undefined||lim.limit24h!==undefined||lim.limitWeekly!==undefined||lim.limitMonthly!==undefined;
-      if(hasLimits){
-        html+='<div class="limit-section"><div class="limit-section-title">Spending Limits</div>';
-        html+=makeBar(lim.cost5h,lim.limit5h);
-        html+=makeBar(lim.cost24h,lim.limit24h);
-        html+=makeBar(lim.costWeekly,lim.limitWeekly);
-        html+=makeBar(lim.costMonthly,lim.limitMonthly);
-        html+='</div>';
-      }
-      html+='</div>';
-      el.innerHTML=html;
-      const useBtn=el.querySelector('#sleepyUseBtn');
-      if(useBtn)useBtn.onclick=()=>{activeProvider='sleepyai';renderSleepyCard();renderProviderList();autosaveNow()};
-      const btn=el.querySelector('#sleepyLogoutBtn');
-      if(btn)btn.onclick=()=>vscode.postMessage({type:'sleepyLogout'});
-      const manageBtn=el.querySelector('#sleepyManageBtn');if(manageBtn)manageBtn.onclick=()=>vscode.postMessage({type:'openSleepyDashboard'});
-      const websiteBtn=el.querySelector('#sleepyWebsiteBtn');if(websiteBtn)websiteBtn.onclick=()=>vscode.postMessage({type:'openSleepyWebsite'});
-    }else{
-      el.innerHTML='<div style="display:flex;flex-direction:column;gap:10px"><div><div style="font-size:13px;font-weight:600">Sign in to SleepyAI</div><div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:3px">Use SleepyAI models with one click. Credentials are stored at <code>~/.sleepy/gateway.json</code>, shared with the Sleepy CLI.</div></div><div class="sleepy-login-actions"><button type="button" class="primary" id="sleepyLoginBtn">Sign in with browser</button><button type="button" class="secondary" id="sleepyDeviceBtn">Use activation code</button><button type="button" class="secondary" id="sleepyWebsiteBtn">Visit SleepyAI ↗</button></div></div>';
-      const lb=el.querySelector('#sleepyLoginBtn');if(lb)lb.onclick=()=>vscode.postMessage({type:'sleepyLogin'});
-      const db=el.querySelector('#sleepyDeviceBtn');if(db)db.onclick=()=>vscode.postMessage({type:'sleepyDeviceLogin'});
-      const wb=el.querySelector('#sleepyWebsiteBtn');if(wb)wb.onclick=()=>vscode.postMessage({type:'openSleepyWebsite'});
-    }
-    renderSleepyPricing();
+  closeEffortMenu();
+  vscode.postMessage({ type: 'selectReasoningEffort', effort: reasoningEffort });
+}
+if (effortButton) effortButton.onclick = event => { event.stopPropagation(); toggleEffortMenu() };
+function closeModelMenu() { modelMenu.classList.remove('open'); modelButton?.setAttribute('aria-expanded', 'false'); resetAnchoredMenu(modelMenu) }
+function toggleModelMenu() { const open = !modelMenu.classList.contains('open'); modelMenu.classList.toggle('open', open); modelButton?.setAttribute('aria-expanded', String(open)); if (open) { closeEffortMenu(); closeAgentMenu(); closeSafetyMenu(); closeContextPanel(); renderModelMenu(); requestAnimationFrame(() => placeAnchoredMenu(modelMenu, modelDropdown || modelButton)) } else resetAnchoredMenu(modelMenu) }
+function selectModel(id, providerId) {
+  selectedModel = id;
+  const name = findModelName(id);
+  modelButton.textContent = name;
+  modelButton.title = id;
+  closeModelMenu();
+  modelQuery = '';
+  vscode.postMessage({ type: 'selectModel', model: id, provider: providerId });
+  updateSessionStats();
+}
+document.getElementById('approvalMode')?.addEventListener('change', () => { syncSafetyControl(); autosaveNow() });
+syncSafetyControl();
+syncAgentPill();
+syncEffortPill();
+function submit() { let text = input.value.trim(); const wasRunning = isRunning(); if (wasRunning && !text && !attachments.length) { vscode.postMessage({ type: 'stop' }); return } if (!text && !attachments.length) return; if (text.startsWith('/')) { const slash = expandSlashPrompt(text); if (slash.handled) { input.value = ''; closeSlashMenu(); resize(); return } text = slash.text } if (!selectedModel) { addError('Choose a model first.'); return } recordPromptHistory(text); const sentAttachments = [...attachments]; const context = { includeProjectIndex, includeActiveFile, includeSelection, activeFile: editorContext.activeFile, selectionLines: editorContext.selectionLines, attachments: sentAttachments }; const optimisticText = text || 'Please inspect the attached files.'; const edit = editMessageState ? { ...editMessageState } : null; editMessageState = null; setEditBar(false); if (!edit && !wasRunning) runningSet.add(activeConversationId); input.value = ''; attachments = []; renderAttachments(); closeContextPanel(); closeSlashMenu(); resize(); if (!edit) { if (wasRunning) { const list = queuedByConversation.get(activeConversationId) || []; list.push({ id: 'tmp-' + Date.now(), text: optimisticText }); queuedByConversation.set(activeConversationId, list); updateQueuedVisibility(); vscode.postMessage({ type: 'send', text: optimisticText, conversationId: activeConversationId, context }); updateSendMode(); return } updateJump(); try { const now = Date.now(), optimistic = { id: 'tmp-' + now, role: 'user', text: optimisticText, timestamp: now, attachments: sentAttachments }; beginTurn(optimistic); createActivity(); const st = activity && activity.querySelector('.activity-status'); if (st) st.textContent = 'Sending…'; scroll(true) } catch (e) { } vscode.postMessage({ type: 'send', text: optimisticText, conversationId: activeConversationId, context }) } else { vscode.postMessage({ type: 'editUserMessage', conversationId: edit.conversationId, itemId: edit.itemId, text: optimisticText, context }) } }
+function resize() { input.style.height = 'auto'; const viewportCap = Math.max(72, Math.min(180, Math.floor(window.innerHeight * .28))); input.style.height = Math.min(input.scrollHeight, viewportCap) + 'px'; updateSendMode(); if (followOutput) pinScroll(); updateJump() }
+send.onclick = () => { if (isRunning()) { vscode.postMessage({ type: 'stop' }); return } submit() };
+input.oninput = resize;
+input.onkeydown = e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return }
+  // Arrow-key carets move through multi-line drafts, so only recall when the
+  // caret sits on the edge that would otherwise move outside the text.
+  if (e.key === 'ArrowUp' && !e.ctrlKey && !e.altKey && !e.metaKey && canRecall(true)) {
+    e.preventDefault(); recallPrompt(true); return;
   }
-  function renderSleepyPricing(){
-    const el=document.getElementById('sleepyPricing');
-    if(!el)return;
-    if(!sleepyAccount||!sleepyAccount.loggedIn){el.innerHTML='<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Sign in to SleepyAI to view account plan and pricing.</div>';return}
-    if(!sleepyModelPrices||!sleepyModelPrices.length){
-      if(sleepyBusy){
-        el.innerHTML='<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0"><span class="spinner"></span> Loading pricing…</div>';
-      }else{
-        el.innerHTML='<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">No model pricing data returned from gateway.</div>';
-      }
-      return;
-    }
-    const fmtPrice=n=>{if(n===undefined||n===null)return'—';if(n>=1)return'$'+n.toFixed(2)+'/M';if(n>=0.001)return'$'+n.toFixed(3)+'/M';return'$'+n.toFixed(4)+'/M'};
-    let html='<table style="width:100%;border-collapse:collapse;font-size:11px">';
-    html+='<thead><tr style="border-bottom:1px solid var(--vscode-widget-border)"><th style="text-align:left;padding:4px 6px;font-weight:600">Model</th><th style="text-align:right;padding:4px 6px;font-weight:600">Input</th><th style="text-align:right;padding:4px 6px;font-weight:600">Output</th><th style="text-align:right;padding:4px 6px;font-weight:600">Cache Read</th><th style="text-align:right;padding:4px 6px;font-weight:600">Cache Write</th></tr></thead><tbody>';
-    for(const p of sleepyModelPrices){
-      html+='<tr style="border-bottom:1px solid color-mix(in srgb,var(--vscode-widget-border) 50%,transparent)"><td style="padding:4px 6px">'+esc(p.name||p.modelId)+'</td><td style="text-align:right;padding:4px 6px">'+fmtPrice(p.inputPrice)+'</td><td style="text-align:right;padding:4px 6px">'+fmtPrice(p.outputPrice)+'</td><td style="text-align:right;padding:4px 6px">'+fmtPrice(p.cacheReadPrice)+'</td><td style="text-align:right;padding:4px 6px">'+fmtPrice(p.cacheWritePrice)+'</td></tr>';
-    }
-    html+='</tbody></table>';
-    el.innerHTML=html;
+  if (e.key === 'ArrowDown' && !e.ctrlKey && !e.altKey && !e.metaKey && historyIndex !== -1 && canRecall(false)) {
+    e.preventDefault(); recallPrompt(false); return;
   }
-  function renderProviderList(){
-    if(!providersList||!providersList.length){
-      providerList.innerHTML='<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 2px">SleepyAI is always available. Add an optional compatibility provider below if needed.</div>';
-      return;
+  if (e.key === 'Escape') {
+    if (slashMenu?.classList.contains('open') || mentionMenu.classList.contains('open')) return;
+    e.preventDefault();
+    if (input.value) { input.value = ''; historyDraft = null; resize() }
+    else input.blur();
+  }
+};
+messages.addEventListener('scroll', () => { followOutput = nearBottom(); updateJump() }); jumpBottom.onclick = () => { followOutput = true; scroll(true) }; projectIndicator.onclick = () => { if (projectIndicatorPath) vscode.postMessage({ type: 'revealInOS' }) }; document.getElementById('statPillGroup')?.addEventListener('click', () => toggleSessionInfo()); document.getElementById('statPillGroup')?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSessionInfo() } });
+if (typeof ResizeObserver !== 'undefined' && composerEl) new ResizeObserver(() => { updateJump(); placeOpenComposerMenus(); if (followOutput) pinScroll() }).observe(composerEl); window.addEventListener('resize', () => { resize(); updateJump(); placeOpenComposerMenus() }); window.visualViewport?.addEventListener('resize', () => placeOpenComposerMenus()); window.visualViewport?.addEventListener('scroll', () => placeOpenComposerMenus());
+queued.onclick = (event) => { const button = event.target.closest('button[data-act]'); if (!button) return; const id = button.dataset.id; const act = button.dataset.act; if (act === 'steer') { vscode.postMessage({ type: 'steerQueued', conversationId: activeConversationId, id }); return } const list = queuedByConversation.get(activeConversationId) || []; const entry = list.find(item => item.id === id); if (!entry) return; if (act === 'edit') { queuedByConversation.set(activeConversationId, list.filter(item => item.id !== id)); updateQueuedVisibility(); vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }); input.value = entry.text; resize(); input.focus(); return } if (act === 'remove') { vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }) } };
+document.getElementById('loginBannerBtn').onclick = () => vscode.postMessage({ type: 'requestSettings' });
+const undoBtn = document.getElementById('undoButton'), redoBtn = document.getElementById('redoButton'); if (undoBtn) undoBtn.onclick = async () => { const choice = await showNotifyModal(compactionUndoable ? { title: 'Undo compaction?', body: 'This will restore the full conversation that was compacted. You can redo later.', ok: 'Undo', cancel: 'Cancel' } : { title: 'Undo last turn?', body: 'This will remove the last assistant response and your last message. You can redo later.', ok: 'Undo', cancel: 'Cancel' }); if (choice === 'ok') vscode.postMessage({ type: 'undoLastTurn', conversationId: activeConversationId }) }; if (redoBtn) redoBtn.onclick = async () => { const choice = await showNotifyModal(compactionRedoable ? { title: 'Redo compaction?', body: 'This will re-apply the compaction you just undid.', ok: 'Redo', cancel: 'Cancel' } : { title: 'Redo last turn?', body: 'This will restore the last undone turn.', ok: 'Redo', cancel: 'Cancel' }); if (choice === 'ok') vscode.postMessage({ type: 'redoLastTurn', conversationId: activeConversationId }) };
+const settingsView = document.getElementById('settingsView'), maxSteps = document.getElementById('maxSteps'), maxStepsUnlimited = document.getElementById('maxStepsUnlimited'), approvalMode = document.getElementById('approvalMode'), searxngUrl = document.getElementById('searxngUrl'), mcpServers = document.getElementById('mcpServers'), extraFreeModels = document.getElementById('extraFreeModels'), maxPersistedReasoning = document.getElementById('maxPersistedReasoning'), settingsResult = document.getElementById('settingsResult'), providerList = document.getElementById('providerList'), onlyDefaultModels = document.getElementById('onlyDefaultModels'), confirmDelete = document.getElementById('confirmDelete'), compactionModel = document.getElementById('compactionModel'), subagentModelExplorer = document.getElementById('subagentModelExplorer'), subagentModelReviewer = document.getElementById('subagentModelReviewer'), subagentModelWorker = document.getElementById('subagentModelWorker'), useCli = document.getElementById('useCli'); let initialSetup = false, savedApiKeys = {}, providersList = [], activeProvider = '', settingsSavedTimer = null, sleepyAccount = null, sleepyBusy = false, sleepyStatusText = '', mcpConnectionsList = [], mcpStatusByName = {};
+const resetSettingsBtn = document.getElementById('resetSettings'); let resetClicks = 0, autosaveTimer = null;
+function resetArmGuard() { resetClicks = 0; resetSettingsBtn.textContent = 'Reset Extension to Defaults' }
+function settingsPayload() { return { maxSteps: maxStepsUnlimited.checked ? 0 : (Number(maxSteps.value) || 200), approvalMode: approvalMode.value, searxngUrl: searxngUrl.value, mcpServers: mcpServers.value, extraFreeModels: extraFreeModels.value, maxPersistedReasoning: Number(maxPersistedReasoning && maxPersistedReasoning.value) || 32000, activeProvider: activeProvider, providers: providersList, apiKey: '', onlyDefaultModels: onlyDefaultModels.checked, confirmDelete: confirmDelete.checked, compactionModel: compactionModel.value, useCli: Boolean(useCli && useCli.checked), subagentModels: { explorer: subagentModelExplorer?.value || '', reviewer: subagentModelReviewer?.value || '', worker: subagentModelWorker?.value || '' }, initialSetup } }
+function autosaveNow() { resetArmGuard(); clearTimeout(autosaveTimer); vscode.postMessage({ type: 'saveSettings', ...settingsPayload() }) }
+function autosaveLater() { resetArmGuard(); clearTimeout(autosaveTimer); autosaveTimer = setTimeout(() => vscode.postMessage({ type: 'saveSettings', ...settingsPayload() }), 350) }
+function renderSleepyCard() {
+  const loginBanner = document.getElementById('loginBanner');
+  if (loginBanner) { loginBanner.classList.toggle('visible', Boolean(!sleepyAccount || !sleepyAccount.loggedIn)) }
+  const el = document.getElementById('sleepyCardBody');
+  if (!el) return;
+  if (sleepyBusy) { el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;font-size:12px"><span class="spinner"></span><span>' + esc(sleepyStatusText || 'Connecting to SleepyAI…') + '</span></div>'; return }
+  if (sleepyAccount && sleepyAccount.loggedIn) {
+    const fmtMoney = n => { if (n === undefined || n === null) return '—'; return '$' + Number(n).toFixed(2) };
+    const fmtTokens = n => { if (n === undefined || n === null) return '—'; if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'; if (n >= 1000) return (n / 1000).toFixed(1) + 'k'; return String(n) };
+    const pctClass = pct => pct >= 80 ? 'danger' : pct >= 50 ? 'warn' : 'safe';
+    const makeBar = (used, limit) => {
+      if (used === undefined || limit === undefined || limit <= 0) return '';
+      const pct = Math.min(100, Math.round((used / limit) * 100));
+      return '<div class="limit-row"><div class="limit-header"><span class="limit-value">' + fmtMoney(used) + ' / ' + fmtMoney(limit) + '</span></div><div class="limit-bar-track"><div class="limit-bar-fill ' + pctClass(pct) + '" style="width:' + pct + '%"></div></div><div class="limit-bar-pct">' + pct + '%</div></div>';
+    };
+    const lim = sleepyAccount.limits || {};
+    const sub = sleepyAccount.subscription || {};
+    const bal = sleepyAccount.balances || {};
+    let html = '<div style="display:flex;flex-direction:column;gap:14px">';
+    html += '<div class="sleepy-account-head"><div class="sleepy-account-main"><div class="sleepy-account-title">Signed in to SleepyAI</div>' + (sleepyAccount.email ? '<div class="sleepy-account-email">' + esc(sleepyAccount.email) + '</div>' : '') + '</div>' + (activeProvider === 'sleepyai' ? '<span class="sleepy-active">Active</span>' : '<button type="button" class="primary" id="sleepyUseBtn">Use SleepyAI</button>') + '<button type="button" class="small-btn" id="sleepyLogoutBtn">Sign out</button></div><div class="sleepy-account-links"><button type="button" class="secondary" id="sleepyManageBtn">Manage account</button><button type="button" class="secondary" id="sleepyWebsiteBtn">SleepyAI website ↗</button></div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    if (sub.plan) html += '<span style="padding:3px 10px;border-radius:999px;background:color-mix(in srgb,var(--vscode-focusBorder) 12%,transparent);color:var(--vscode-foreground);font-size:11px;font-weight:500">' + esc(sub.plan) + '</span>';
+    if (sub.status) html += '<span style="padding:3px 10px;border-radius:999px;background:color-mix(in srgb,var(--vscode-testing-iconPassed) 12%,transparent);color:var(--vscode-testing-iconPassed);font-size:11px">' + esc(sub.status) + '</span>';
+    html += '</div>';
+    html += '<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--vscode-descriptionForeground)">';
+    html += '<div><span style="color:var(--vscode-foreground);font-weight:500">Balance</span><br>' + fmtMoney(bal.credits) + '</div>';
+    if (bal.freeCreditsRemaining !== undefined) html += '<div><span style="color:var(--vscode-foreground);font-weight:500">Extra Credits</span><br>' + fmtMoney(bal.freeCreditsRemaining) + '</div>';
+    if (sub.monthlySpend !== undefined) html += '<div><span style="color:var(--vscode-foreground);font-weight:500">Monthly</span><br>' + fmtMoney(sub.monthlySpend) + ' / ' + fmtMoney(sub.monthlyLimit) + '</div>';
+    html += '</div>';
+    if (lim.usedTokensToday !== undefined && lim.tokensPerDay !== undefined) {
+      const pct = Math.min(100, Math.round((lim.usedTokensToday / lim.tokensPerDay) * 100));
+      html += '<div><div class="limit-section-title">Daily Free Model Tokens</div><div class="limit-header"><span class="limit-value">' + fmtTokens(lim.usedTokensToday) + ' / ' + fmtTokens(lim.tokensPerDay) + '</span></div><div class="limit-bar-track"><div class="limit-bar-fill ' + pctClass(pct) + '" style="width:' + pct + '%"></div></div><div class="limit-bar-pct">' + pct + '% used</div></div>';
     }
-    providerList.innerHTML=(providersList||[]).map(p=>{
-      const isActive=p.id===activeProvider;
-      const isSleepy=p.id==='sleepyai';
-      const hasKey=Boolean(savedApiKeys[p.id]);
-      return '<div class="provider-row'+(isActive?' active':'')+'\" data-provider-id="'+esc(p.id)+'" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px;cursor:pointer;'+(isActive?'border-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground);':'')+'">'+
-        '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">'+esc(p.name)+'</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(p.baseURL)+'</div></div>'+
-        (isSleepy?'<span style="font-size:10px;color:var(--vscode-testing-iconPassed)">First-party'+(sleepyAccount&&sleepyAccount.loggedIn?' · Signed in':'')+'</span>':(hasKey?'<span style="font-size:10px;color:var(--vscode-descriptionForeground)">Key saved</span>':'<span style="font-size:10px;color:var(--vscode-descriptionForeground)">Optional</span>'))+
-        (isSleepy?'':'<button type="button" class="small-btn provider-edit" data-edit="'+esc(p.id)+'" style="margin-left:auto;flex:none">Edit</button>')+
+    const hasLimits = lim.limit5h !== undefined || lim.limit24h !== undefined || lim.limitWeekly !== undefined || lim.limitMonthly !== undefined;
+    if (hasLimits) {
+      html += '<div class="limit-section"><div class="limit-section-title">Spending Limits</div>';
+      html += makeBar(lim.cost5h, lim.limit5h);
+      html += makeBar(lim.cost24h, lim.limit24h);
+      html += makeBar(lim.costWeekly, lim.limitWeekly);
+      html += makeBar(lim.costMonthly, lim.limitMonthly);
+      html += '</div>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+    const useBtn = el.querySelector('#sleepyUseBtn');
+    if (useBtn) useBtn.onclick = () => { activeProvider = 'sleepyai'; renderSleepyCard(); renderProviderList(); autosaveNow() };
+    const btn = el.querySelector('#sleepyLogoutBtn');
+    if (btn) btn.onclick = () => vscode.postMessage({ type: 'sleepyLogout' });
+    const manageBtn = el.querySelector('#sleepyManageBtn'); if (manageBtn) manageBtn.onclick = () => vscode.postMessage({ type: 'openSleepyDashboard' });
+    const websiteBtn = el.querySelector('#sleepyWebsiteBtn'); if (websiteBtn) websiteBtn.onclick = () => vscode.postMessage({ type: 'openSleepyWebsite' });
+  } else {
+    el.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px"><div><div style="font-size:13px;font-weight:600">Sign in to SleepyAI</div><div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:3px">Use SleepyAI models with one click. Credentials are stored at <code>~/.sleepy/gateway.json</code>, shared with the Sleepy CLI.</div></div><div class="sleepy-login-actions"><button type="button" class="primary" id="sleepyLoginBtn">Sign in with browser</button><button type="button" class="secondary" id="sleepyDeviceBtn">Use activation code</button><button type="button" class="secondary" id="sleepyWebsiteBtn">Visit SleepyAI ↗</button></div></div>';
+    const lb = el.querySelector('#sleepyLoginBtn'); if (lb) lb.onclick = () => vscode.postMessage({ type: 'sleepyLogin' });
+    const db = el.querySelector('#sleepyDeviceBtn'); if (db) db.onclick = () => vscode.postMessage({ type: 'sleepyDeviceLogin' });
+    const wb = el.querySelector('#sleepyWebsiteBtn'); if (wb) wb.onclick = () => vscode.postMessage({ type: 'openSleepyWebsite' });
+  }
+  renderSleepyPricing();
+}
+function renderSleepyPricing() {
+  const el = document.getElementById('sleepyPricing');
+  if (!el) return;
+  if (!sleepyAccount || !sleepyAccount.loggedIn) { el.innerHTML = '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Sign in to SleepyAI to view account plan and pricing.</div>'; return }
+  if (!sleepyModelPrices || !sleepyModelPrices.length) {
+    if (sleepyBusy) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0"><span class="spinner"></span> Loading pricing…</div>';
+    } else {
+      el.innerHTML = '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">No model pricing data returned from gateway.</div>';
+    }
+    return;
+  }
+  const fmtPrice = n => { if (n === undefined || n === null) return '—'; if (n >= 1) return '$' + n.toFixed(2) + '/M'; if (n >= 0.001) return '$' + n.toFixed(3) + '/M'; return '$' + n.toFixed(4) + '/M' };
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+  html += '<thead><tr style="border-bottom:1px solid var(--vscode-widget-border)"><th style="text-align:left;padding:4px 6px;font-weight:600">Model</th><th style="text-align:right;padding:4px 6px;font-weight:600">Input</th><th style="text-align:right;padding:4px 6px;font-weight:600">Output</th><th style="text-align:right;padding:4px 6px;font-weight:600">Cache Read</th><th style="text-align:right;padding:4px 6px;font-weight:600">Cache Write</th></tr></thead><tbody>';
+  for (const p of sleepyModelPrices) {
+    html += '<tr style="border-bottom:1px solid color-mix(in srgb,var(--vscode-widget-border) 50%,transparent)"><td style="padding:4px 6px">' + esc(p.name || p.modelId) + '</td><td style="text-align:right;padding:4px 6px">' + fmtPrice(p.inputPrice) + '</td><td style="text-align:right;padding:4px 6px">' + fmtPrice(p.outputPrice) + '</td><td style="text-align:right;padding:4px 6px">' + fmtPrice(p.cacheReadPrice) + '</td><td style="text-align:right;padding:4px 6px">' + fmtPrice(p.cacheWritePrice) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+function renderProviderList() {
+  if (!providersList || !providersList.length) {
+    providerList.innerHTML = '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 2px">SleepyAI is always available. Add an optional compatibility provider below if needed.</div>';
+    return;
+  }
+  providerList.innerHTML = (providersList || []).map(p => {
+    const isActive = p.id === activeProvider;
+    const isSleepy = p.id === 'sleepyai';
+    const hasKey = Boolean(savedApiKeys[p.id]);
+    return '<div class="provider-row' + (isActive ? ' active' : '') + '\" data-provider-id="' + esc(p.id) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px;cursor:pointer;' + (isActive ? 'border-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground);' : '') + '">' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">' + esc(p.name) + '</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(p.baseURL) + '</div></div>' +
+      (isSleepy ? '<span style="font-size:10px;color:var(--vscode-testing-iconPassed)">First-party' + (sleepyAccount && sleepyAccount.loggedIn ? ' · Signed in' : '') + '</span>' : (hasKey ? '<span style="font-size:10px;color:var(--vscode-descriptionForeground)">Key saved</span>' : '<span style="font-size:10px;color:var(--vscode-descriptionForeground)">Optional</span>')) +
+      (isSleepy ? '' : '<button type="button" class="small-btn provider-edit" data-edit="' + esc(p.id) + '" style="margin-left:auto;flex:none">Edit</button>') +
       '</div>';
-    }).join('');
-    providerList.querySelectorAll('[data-provider-id]').forEach(row=>{
-      row.onclick=e=>{if(e.target.closest('.provider-edit'))return;activeProvider=row.dataset.providerId;renderProviderList();autosaveNow()};
-    });
-    providerList.querySelectorAll('[data-edit]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();openProviderForm(btn.dataset.edit)};
-    });
+  }).join('');
+  providerList.querySelectorAll('[data-provider-id]').forEach(row => {
+    row.onclick = e => { if (e.target.closest('.provider-edit')) return; activeProvider = row.dataset.providerId; renderProviderList(); autosaveNow() };
+  });
+  providerList.querySelectorAll('[data-edit]').forEach(btn => {
+    btn.onclick = e => { e.stopPropagation(); openProviderForm(btn.dataset.edit) };
+  });
+}
+const providerForm = document.getElementById('providerForm'), providerFormTitle = document.getElementById('providerFormTitle'), pfName = document.getElementById('pf-name'), pfUrl = document.getElementById('pf-url'), pfModels = document.getElementById('pf-models'), pfHeaders = document.getElementById('pf-headers'), pfApiKey = document.getElementById('pf-api-key'), pfApiKeyStatus = document.getElementById('pf-api-key-status'), pfSave = document.getElementById('pf-save'), pfFetchModels = document.getElementById('pf-fetch-models'), pfCancel = document.getElementById('pf-cancel'), pfDelete = document.getElementById('pf-delete'), pfModelsStatus = document.getElementById('pf-models-status'), pfError = document.getElementById('pf-error');
+let providerFormEditId = null, pendingProviderKeyId = '', pendingProviderKey = '';
+function openProviderForm(editId) {
+  providerFormEditId = editId || null;
+  const p = editId ? providersList.find(x => x.id === editId) : null;
+  providerFormTitle.textContent = editId ? 'Edit provider' : 'Add provider';
+  pfName.value = p ? p.name : '';
+  pfUrl.value = p ? p.baseURL : '';
+  pfModels.value = p && p.modelList ? p.modelList.join(', ') : '';
+  pfHeaders.value = p && p.customHeaders && Object.keys(p.customHeaders).length ? JSON.stringify(p.customHeaders, null, 2) : '';
+  pfApiKey.value = '';
+  pfApiKeyStatus.textContent = p && savedApiKeys[p.id] ? 'A key is already saved. Paste a replacement or leave blank to keep it.' : 'Optional. Leave blank to use no API key.';
+  pfDelete.style.display = editId ? '' : 'none';
+  pfError.textContent = '';
+  pfModelsStatus.textContent = '';
+  pfModelsStatus.className = 'field-hint';
+  providerForm.style.display = '';
+  setTimeout(() => pfName.focus(), 0);
+}
+function closeProviderForm() { providerForm.style.display = 'none'; providerFormEditId = null; pfError.textContent = ''; pfModelsStatus.textContent = ''; pfModelsStatus.className = 'field-hint' }
+function providerFormHeaders() {
+  const raw = pfHeaders.value.trim();
+  if (!raw) return { ok: true, customHeaders: undefined };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.values(parsed).some(v => typeof v !== 'string')) throw new Error('shape');
+    return { ok: true, customHeaders: parsed };
+  } catch {
+    return { ok: false };
   }
-  const providerForm=document.getElementById('providerForm'),providerFormTitle=document.getElementById('providerFormTitle'),pfName=document.getElementById('pf-name'),pfUrl=document.getElementById('pf-url'),pfModels=document.getElementById('pf-models'),pfHeaders=document.getElementById('pf-headers'),pfApiKey=document.getElementById('pf-api-key'),pfApiKeyStatus=document.getElementById('pf-api-key-status'),pfSave=document.getElementById('pf-save'),pfFetchModels=document.getElementById('pf-fetch-models'),pfCancel=document.getElementById('pf-cancel'),pfDelete=document.getElementById('pf-delete'),pfModelsStatus=document.getElementById('pf-models-status'),pfError=document.getElementById('pf-error');
-  let providerFormEditId=null,pendingProviderKeyId='',pendingProviderKey='';
-  function openProviderForm(editId){
-    providerFormEditId=editId||null;
-    const p=editId?providersList.find(x=>x.id===editId):null;
-    providerFormTitle.textContent=editId?'Edit provider':'Add provider';
-    pfName.value=p?p.name:'';
-    pfUrl.value=p?p.baseURL:'';
-    pfModels.value=p&&p.modelList?p.modelList.join(', '):'';
-    pfHeaders.value=p&&p.customHeaders&&Object.keys(p.customHeaders).length?JSON.stringify(p.customHeaders,null,2):'';
-    pfApiKey.value='';
-    pfApiKeyStatus.textContent=p&&savedApiKeys[p.id]?'A key is already saved. Paste a replacement or leave blank to keep it.':'Optional. Leave blank to use no API key.';
-    pfDelete.style.display=editId?'':'none';
-    pfError.textContent='';
-    pfModelsStatus.textContent='';
-    pfModelsStatus.className='field-hint';
-    providerForm.style.display='';
-    setTimeout(()=>pfName.focus(),0);
+}
+function fetchProviderModelsFromForm() {
+  const url = pfUrl.value.trim();
+  if (!url || !/^https?:\/\//i.test(url)) { pfError.textContent = 'Base URL must start with http:// or https://'; pfUrl.focus(); return }
+  const headers = providerFormHeaders();
+  if (!headers.ok) { pfError.textContent = 'Custom headers must be a JSON object with string values.'; pfHeaders.focus(); return }
+  pfError.textContent = '';
+  pfModelsStatus.className = 'field-hint';
+  pfModelsStatus.textContent = 'Fetching models…';
+  if (pfFetchModels) pfFetchModels.disabled = true;
+  // Works for both an existing provider (id set) and a new one that has not
+  // been saved yet: the host builds a transient provider from these fields.
+  vscode.postMessage({ type: 'fetchProviderModels', id: providerFormEditId || undefined, name: pfName.value.trim(), baseURL: url, apiKey: pfApiKey.value.trim() || undefined, customHeaders: headers.customHeaders });
+}
+function saveProviderForm() {
+  const name = pfName.value.trim();
+  const url = pfUrl.value.trim();
+  const modelsRaw = pfModels.value.trim();
+  if (!name) { pfError.textContent = 'Name is required.'; pfName.focus(); return }
+  if (!url || !/^https?:\/\//i.test(url)) { pfError.textContent = 'Base URL must start with http:// or https://'; pfUrl.focus(); return }
+  const modelList = modelsRaw ? modelsRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+  const parsedHeaders = providerFormHeaders();
+  if (!parsedHeaders.ok) { pfError.textContent = 'Custom headers must be a JSON object with string values.'; pfHeaders.focus(); return }
+  const customHeaders = parsedHeaders.customHeaders;
+  let savedProviderId = providerFormEditId;
+  if (providerFormEditId) {
+    const p = providersList.find(x => x.id === providerFormEditId);
+    if (p) { p.name = name; p.baseURL = url; p.modelList = modelList; p.customHeaders = customHeaders }
+  } else {
+    const generated = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || ('provider-' + Date.now());
+    const id = generated === 'sleepyai' ? 'sleepyai-custom' : generated;
+    const finalId = providersList.some(x => x.id === id) ? id + '-' + Date.now() : id;
+    providersList.push({ id: finalId, name, baseURL: url, customHeaders, modelList });
+    savedProviderId = finalId;
+    if (!activeProvider) activeProvider = finalId;
   }
-  function closeProviderForm(){providerForm.style.display='none';providerFormEditId=null;pfError.textContent='';pfModelsStatus.textContent='';pfModelsStatus.className='field-hint'}
-  function providerFormHeaders(){
-    const raw=pfHeaders.value.trim();
-    if(!raw)return{ok:true,customHeaders:undefined};
-    try{
-      const parsed=JSON.parse(raw);
-      if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)||Object.values(parsed).some(v=>typeof v!=='string'))throw new Error('shape');
-      return{ok:true,customHeaders:parsed};
-    }catch{
-      return{ok:false};
-    }
+  if (pfApiKey.value.trim()) {
+    pendingProviderKeyId = savedProviderId;
+    pendingProviderKey = pfApiKey.value.trim();
   }
-  function fetchProviderModelsFromForm(){
-    const url=pfUrl.value.trim();
-    if(!url||!/^https?:\/\//i.test(url)){pfError.textContent='Base URL must start with http:// or https://';pfUrl.focus();return}
-    const headers=providerFormHeaders();
-    if(!headers.ok){pfError.textContent='Custom headers must be a JSON object with string values.';pfHeaders.focus();return}
-    pfError.textContent='';
-    pfModelsStatus.className='field-hint';
-    pfModelsStatus.textContent='Fetching models…';
-    if(pfFetchModels)pfFetchModels.disabled=true;
-    // Works for both an existing provider (id set) and a new one that has not
-    // been saved yet: the host builds a transient provider from these fields.
-    vscode.postMessage({type:'fetchProviderModels',id:providerFormEditId||undefined,name:pfName.value.trim(),baseURL:url,apiKey:pfApiKey.value.trim()||undefined,customHeaders:headers.customHeaders});
+  closeProviderForm();
+  renderProviderList();
+  autosaveNow();
+}
+function deleteProviderFromForm() {
+  if (!providerFormEditId) return;
+  providersList = providersList.filter(x => x.id !== providerFormEditId);
+  if (activeProvider === providerFormEditId) activeProvider = providersList[0]?.id || '';
+  closeProviderForm();
+  renderProviderList();
+  autosaveNow();
+}
+pfSave.onclick = saveProviderForm;
+if (pfFetchModels) pfFetchModels.onclick = fetchProviderModelsFromForm;
+pfCancel.onclick = closeProviderForm;
+pfDelete.onclick = deleteProviderFromForm;
+pfName.onkeydown = pfUrl.onkeydown = pfModels.onkeydown = pfHeaders.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); saveProviderForm() } if (e.key === 'Escape') closeProviderForm() };
+function openProviderEditor(id) { openProviderForm(id) }
+function addProvider() { openProviderForm(null) }
+const mcpConnectionList = document.getElementById('mcpConnectionList'), addMcpConnection = document.getElementById('addMcpConnection'), mcpConnectionForm = document.getElementById('mcpConnectionForm'), mcpConnectionFormTitle = document.getElementById('mcpConnectionFormTitle'), mcName = document.getElementById('mc-name'), mcUrl = document.getElementById('mc-url'), mcTransport = document.getElementById('mc-transport'), mcAuth = document.getElementById('mc-auth'), mcTokenField = document.getElementById('mc-token-field'), mcToken = document.getElementById('mc-token'), mcBasicFields = document.getElementById('mc-basic-fields'), mcUsername = document.getElementById('mc-username'), mcPassword = document.getElementById('mc-password'), mcHeadersField = document.getElementById('mc-headers-field'), mcHeaders = document.getElementById('mc-headers'), mcEnabled = document.getElementById('mc-enabled'), mcSave = document.getElementById('mc-save'), mcCancel = document.getElementById('mc-cancel'), mcDelete = document.getElementById('mc-delete'), mcError = document.getElementById('mc-error');
+const customAgentList = document.getElementById('customAgentList'), addCustomAgent = document.getElementById('addCustomAgent'), customAgentForm = document.getElementById('customAgentForm'), customAgentFormTitle = document.getElementById('customAgentFormTitle'), caName = document.getElementById('ca-name'), caId = document.getElementById('ca-id'), caModel = document.getElementById('ca-model'), caPrompt = document.getElementById('ca-prompt'), caAllow = document.getElementById('ca-allow'), caDeny = document.getElementById('ca-deny'), caSave = document.getElementById('ca-save'), caCancel = document.getElementById('ca-cancel'), caDelete = document.getElementById('ca-delete'), caError = document.getElementById('ca-error');
+let customAgentsList = [], customAgentFormEditId = null;
+function splitList(value) { return String(value || '').split(',').map(x => x.trim()).filter(Boolean) }
+function renderCustomAgents() {
+  if (!customAgentList) return;
+  if (!customAgentsList.length) {
+    customAgentList.innerHTML = '<div class="provider-empty">No custom agents yet. Add one to give a task its own persona, model, or tool policy.</div>';
+    return;
   }
-  function saveProviderForm(){
-    const name=pfName.value.trim();
-    const url=pfUrl.value.trim();
-    const modelsRaw=pfModels.value.trim();
-    if(!name){pfError.textContent='Name is required.';pfName.focus();return}
-    if(!url||!/^https?:\/\//i.test(url)){pfError.textContent='Base URL must start with http:// or https://';pfUrl.focus();return}
-    const modelList=modelsRaw?modelsRaw.split(',').map(s=>s.trim()).filter(Boolean):undefined;
-    const parsedHeaders=providerFormHeaders();
-    if(!parsedHeaders.ok){pfError.textContent='Custom headers must be a JSON object with string values.';pfHeaders.focus();return}
-    const customHeaders=parsedHeaders.customHeaders;
-    let savedProviderId=providerFormEditId;
-    if(providerFormEditId){
-      const p=providersList.find(x=>x.id===providerFormEditId);
-      if(p){p.name=name;p.baseURL=url;p.modelList=modelList;p.customHeaders=customHeaders}
-    }else{
-      const generated=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40)||('provider-'+Date.now());
-      const id=generated==='sleepyai'?'sleepyai-custom':generated;
-      const finalId=providersList.some(x=>x.id===id)?id+'-'+Date.now():id;
-      providersList.push({id:finalId,name,baseURL:url,customHeaders,modelList});
-      savedProviderId=finalId;
-      if(!activeProvider)activeProvider=finalId;
-    }
-    if(pfApiKey.value.trim()){
-      pendingProviderKeyId=savedProviderId;
-      pendingProviderKey=pfApiKey.value.trim();
-    }
-    closeProviderForm();
-    renderProviderList();
-    autosaveNow();
-  }
-  function deleteProviderFromForm(){
-    if(!providerFormEditId)return;
-    providersList=providersList.filter(x=>x.id!==providerFormEditId);
-    if(activeProvider===providerFormEditId)activeProvider=providersList[0]?.id||'';
-    closeProviderForm();
-    renderProviderList();
-    autosaveNow();
-  }
-  pfSave.onclick=saveProviderForm;
-  if(pfFetchModels)pfFetchModels.onclick=fetchProviderModelsFromForm;
-  pfCancel.onclick=closeProviderForm;
-  pfDelete.onclick=deleteProviderFromForm;
-  pfName.onkeydown=pfUrl.onkeydown=pfModels.onkeydown=pfHeaders.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();saveProviderForm()}if(e.key==='Escape')closeProviderForm()};
-  function openProviderEditor(id){openProviderForm(id)}
-  function addProvider(){openProviderForm(null)}
-  const mcpConnectionList=document.getElementById('mcpConnectionList'),addMcpConnection=document.getElementById('addMcpConnection'),mcpConnectionForm=document.getElementById('mcpConnectionForm'),mcpConnectionFormTitle=document.getElementById('mcpConnectionFormTitle'),mcName=document.getElementById('mc-name'),mcUrl=document.getElementById('mc-url'),mcTransport=document.getElementById('mc-transport'),mcAuth=document.getElementById('mc-auth'),mcTokenField=document.getElementById('mc-token-field'),mcToken=document.getElementById('mc-token'),mcBasicFields=document.getElementById('mc-basic-fields'),mcUsername=document.getElementById('mc-username'),mcPassword=document.getElementById('mc-password'),mcHeadersField=document.getElementById('mc-headers-field'),mcHeaders=document.getElementById('mc-headers'),mcEnabled=document.getElementById('mc-enabled'),mcSave=document.getElementById('mc-save'),mcCancel=document.getElementById('mc-cancel'),mcDelete=document.getElementById('mc-delete'),mcError=document.getElementById('mc-error');
-  const customAgentList=document.getElementById('customAgentList'),addCustomAgent=document.getElementById('addCustomAgent'),customAgentForm=document.getElementById('customAgentForm'),customAgentFormTitle=document.getElementById('customAgentFormTitle'),caName=document.getElementById('ca-name'),caId=document.getElementById('ca-id'),caModel=document.getElementById('ca-model'),caPrompt=document.getElementById('ca-prompt'),caAllow=document.getElementById('ca-allow'),caDeny=document.getElementById('ca-deny'),caSave=document.getElementById('ca-save'),caCancel=document.getElementById('ca-cancel'),caDelete=document.getElementById('ca-delete'),caError=document.getElementById('ca-error');
-  let customAgentsList=[],customAgentFormEditId=null;
-  function splitList(value){return String(value||'').split(',').map(x=>x.trim()).filter(Boolean)}
-  function renderCustomAgents(){
-    if(!customAgentList)return;
-    if(!customAgentsList.length){
-      customAgentList.innerHTML='<div class="provider-empty">No custom agents yet. Add one to give a task its own persona, model, or tool policy.</div>';
-      return;
-    }
-    customAgentList.innerHTML=customAgentsList.map(a=>{
-      const policy=a.tools||{};
-      const notes=[];
-      if(a.model)notes.push(a.model);
-      if(policy.allow&&policy.allow.length)notes.push('allow: '+policy.allow.join(', '));
-      if(policy.deny&&policy.deny.length)notes.push('deny: '+policy.deny.join(', '));
-      return '<div class="provider-row" data-custom-agent="'+esc(a.id)+'" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px">'+
-        '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">'+esc(a.name)+'</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc('@'+a.id+' · '+(notes.join(' · ')||'no overrides'))+'</div></div>'+
-        '<button type="button" class="small-btn" data-ca-edit="'+esc(a.id)+'" style="flex:none">Edit</button>'+
-        '<button type="button" class="small-btn" data-ca-delete="'+esc(a.id)+'" style="flex:none;color:var(--vscode-errorForeground)">Remove</button>'+
+  customAgentList.innerHTML = customAgentsList.map(a => {
+    const policy = a.tools || {};
+    const notes = [];
+    if (a.model) notes.push(a.model);
+    if (policy.allow && policy.allow.length) notes.push('allow: ' + policy.allow.join(', '));
+    if (policy.deny && policy.deny.length) notes.push('deny: ' + policy.deny.join(', '));
+    return '<div class="provider-row" data-custom-agent="' + esc(a.id) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px">' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">' + esc(a.name) + '</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc('@' + a.id + ' · ' + (notes.join(' · ') || 'no overrides')) + '</div></div>' +
+      '<button type="button" class="small-btn" data-ca-edit="' + esc(a.id) + '" style="flex:none">Edit</button>' +
+      '<button type="button" class="small-btn" data-ca-delete="' + esc(a.id) + '" style="flex:none;color:var(--vscode-errorForeground)">Remove</button>' +
       '</div>';
-    }).join('');
-    customAgentList.querySelectorAll('[data-ca-edit]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();openCustomAgentForm(btn.dataset.caEdit)}});
-    customAgentList.querySelectorAll('[data-ca-delete]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();vscode.postMessage({type:'deleteAgent',id:btn.dataset.caDelete})}});
-  }
-  function openCustomAgentForm(editId){
-    if(!customAgentForm)return;
-    customAgentFormEditId=editId||null;
-    const a=editId?customAgentsList.find(x=>x.id===editId):null;
-    customAgentFormTitle.textContent=editId?'Edit custom agent':'Add custom agent';
-    caName.value=a?a.name:'';
-    caId.value=a?a.id:'';
-    caId.disabled=Boolean(editId);
-    caModel.value=a&&a.model?a.model:'';
-    caPrompt.value=a&&a.prompt?a.prompt:'';
-    const policy=(a&&a.tools)||{};
-    caAllow.value=(policy.allow||[]).join(', ');
-    caDeny.value=(policy.deny||[]).join(', ');
-    caDelete.style.display=editId?'':'none';
-    caError.textContent='';
-    customAgentForm.style.display='';
-    setTimeout(()=>caName.focus(),0);
-  }
-  function closeCustomAgentForm(){if(!customAgentForm)return;customAgentForm.style.display='none';customAgentFormEditId=null;caError.textContent=''}
-  function saveCustomAgentForm(){
-    const name=caName.value.trim();
-    const id=(caId.value.trim()||name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')).slice(0,40);
-    if(!name){caError.textContent='Name is required.';caName.focus();return}
-    if(!id||!/^[A-Za-z0-9_-]+$/.test(id)){caError.textContent='Agent ID may only contain letters, numbers, hyphens, and underscores.';caId.focus();return}
-    if(AGENTS.some(a=>a.id===id)){caError.textContent='"'+id+'" is a built-in agent. Choose another ID.';caId.focus();return}
-    if(!customAgentFormEditId&&customAgentsList.some(a=>a.id===id)){caError.textContent='An agent with this ID already exists.';caId.focus();return}
-    const allow=splitList(caAllow.value),deny=splitList(caDeny.value);
-    const agent={id,name};
-    if(caModel.value.trim())agent.model=caModel.value.trim();
-    if(caPrompt.value.trim())agent.prompt=caPrompt.value.trim();
-    if(allow.length||deny.length)agent.tools={allow,deny};
-    vscode.postMessage({type:'saveAgent',agent});
-    closeCustomAgentForm();
-  }
-  function deleteCustomAgentFromForm(){
-    if(!customAgentFormEditId)return;
-    vscode.postMessage({type:'deleteAgent',id:customAgentFormEditId});
-    if(selectedAgentId===customAgentFormEditId){selectedAgentId='default';syncAgentPill()}
-    closeCustomAgentForm();
-  }
-  if(caSave)caSave.onclick=saveCustomAgentForm;
-  if(caCancel)caCancel.onclick=closeCustomAgentForm;
-  if(caDelete)caDelete.onclick=deleteCustomAgentFromForm;
-  if(addCustomAgent)addCustomAgent.onclick=()=>openCustomAgentForm(null);
-  if(caName)caName.onkeydown=caId.onkeydown=caModel.onkeydown=caPrompt.onkeydown=caAllow.onkeydown=caDeny.onkeydown=e=>{if(e.key==='Enter'&&e.target.tagName!=='TEXTAREA'){e.preventDefault();saveCustomAgentForm()}if(e.key==='Escape')closeCustomAgentForm()};
-  let mcpConnectionFormEditName=null;
-  const MCP_AUTH_LABELS={none:'No auth','bearer':'Bearer token',basic:'Basic',['api-key']:'API key',custom:'Custom headers',oauth2:'OAuth 2.0'};
-  const MCP_STATUS_LABELS={ok:'Connected','auth_required':'Sign in required',error:'Failed',disabled:'Disabled'};
-  function mcpAuthLabel(type){return MCP_AUTH_LABELS[type]||'No auth'}
-  function renderMcpConnectionRow(c){
-    const status=mcpStatusByName[c.name]||{};
-    const state=status.state||(c.enabled?'unknown':'disabled');
-    const label=MCP_STATUS_LABELS[state]||(c.enabled?'Not tested':'Disabled');
-    const tone=state==='ok'?'var(--vscode-testing-iconPassed)':state==='auth_required'?'var(--vscode-charts-yellow,#eab308)':state==='error'?'var(--vscode-errorForeground)':'var(--vscode-descriptionForeground)';
-    const note=state==='ok'&&status.toolCount?' · '+status.toolCount+' tool'+(status.toolCount===1?'':'s'):'';
-    return '<div class="provider-row" data-mcp-row="'+esc(c.name)+'" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px;opacity:'+(c.enabled?'1':'.6')+'">'+
-      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">'+esc(c.name)+'</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.url)+'</div><div style="font-size:10px;color:var(--vscode-descriptionForeground)">'+esc(mcpAuthLabel(c.auth&&c.auth.type))+' · '+esc((c.transport||'http').toUpperCase())+' · '+(c.enabled?'Enabled':'Disabled')+'</div></div>'+
-      '<span style="flex:none;font-size:10px;white-space:nowrap;color:'+tone+'" title="'+esc(status.error||'')+'">'+esc(label+note)+'</span>'+
-      '<button type="button" class="small-btn" data-mcp-test="'+esc(c.name)+'" style="flex:none">Test</button>'+
-      '<button type="button" class="small-btn" data-mcp-edit="'+esc(c.name)+'" style="flex:none">Edit</button>'+
-      '<button type="button" class="small-btn" data-mcp-delete="'+esc(c.name)+'" style="flex:none;color:var(--vscode-errorForeground)">Remove</button>'+
+  }).join('');
+  customAgentList.querySelectorAll('[data-ca-edit]').forEach(btn => { btn.onclick = e => { e.stopPropagation(); openCustomAgentForm(btn.dataset.caEdit) } });
+  customAgentList.querySelectorAll('[data-ca-delete]').forEach(btn => { btn.onclick = e => { e.stopPropagation(); vscode.postMessage({ type: 'deleteAgent', id: btn.dataset.caDelete }) } });
+}
+function openCustomAgentForm(editId) {
+  if (!customAgentForm) return;
+  customAgentFormEditId = editId || null;
+  const a = editId ? customAgentsList.find(x => x.id === editId) : null;
+  customAgentFormTitle.textContent = editId ? 'Edit custom agent' : 'Add custom agent';
+  caName.value = a ? a.name : '';
+  caId.value = a ? a.id : '';
+  caId.disabled = Boolean(editId);
+  caModel.value = a && a.model ? a.model : '';
+  caPrompt.value = a && a.prompt ? a.prompt : '';
+  const policy = (a && a.tools) || {};
+  caAllow.value = (policy.allow || []).join(', ');
+  caDeny.value = (policy.deny || []).join(', ');
+  caDelete.style.display = editId ? '' : 'none';
+  caError.textContent = '';
+  customAgentForm.style.display = '';
+  setTimeout(() => caName.focus(), 0);
+}
+function closeCustomAgentForm() { if (!customAgentForm) return; customAgentForm.style.display = 'none'; customAgentFormEditId = null; caError.textContent = '' }
+function saveCustomAgentForm() {
+  const name = caName.value.trim();
+  const id = (caId.value.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')).slice(0, 40);
+  if (!name) { caError.textContent = 'Name is required.'; caName.focus(); return }
+  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) { caError.textContent = 'Agent ID may only contain letters, numbers, hyphens, and underscores.'; caId.focus(); return }
+  if (AGENTS.some(a => a.id === id)) { caError.textContent = '"' + id + '" is a built-in agent. Choose another ID.'; caId.focus(); return }
+  if (!customAgentFormEditId && customAgentsList.some(a => a.id === id)) { caError.textContent = 'An agent with this ID already exists.'; caId.focus(); return }
+  const allow = splitList(caAllow.value), deny = splitList(caDeny.value);
+  const agent = { id, name };
+  if (caModel.value.trim()) agent.model = caModel.value.trim();
+  if (caPrompt.value.trim()) agent.prompt = caPrompt.value.trim();
+  if (allow.length || deny.length) agent.tools = { allow, deny };
+  vscode.postMessage({ type: 'saveAgent', agent });
+  closeCustomAgentForm();
+}
+function deleteCustomAgentFromForm() {
+  if (!customAgentFormEditId) return;
+  vscode.postMessage({ type: 'deleteAgent', id: customAgentFormEditId });
+  if (selectedAgentId === customAgentFormEditId) { selectedAgentId = 'default'; syncAgentPill() }
+  closeCustomAgentForm();
+}
+if (caSave) caSave.onclick = saveCustomAgentForm;
+if (caCancel) caCancel.onclick = closeCustomAgentForm;
+if (caDelete) caDelete.onclick = deleteCustomAgentFromForm;
+if (addCustomAgent) addCustomAgent.onclick = () => openCustomAgentForm(null);
+if (caName) caName.onkeydown = caId.onkeydown = caModel.onkeydown = caPrompt.onkeydown = caAllow.onkeydown = caDeny.onkeydown = e => { if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') { e.preventDefault(); saveCustomAgentForm() } if (e.key === 'Escape') closeCustomAgentForm() };
+let mcpConnectionFormEditName = null;
+const MCP_AUTH_LABELS = { none: 'No auth', 'bearer': 'Bearer token', basic: 'Basic', ['api-key']: 'API key', custom: 'Custom headers', oauth2: 'OAuth 2.0' };
+const MCP_STATUS_LABELS = { ok: 'Connected', 'auth_required': 'Sign in required', error: 'Failed', disabled: 'Disabled' };
+function mcpAuthLabel(type) { return MCP_AUTH_LABELS[type] || 'No auth' }
+function renderMcpConnectionRow(c) {
+  const status = mcpStatusByName[c.name] || {};
+  const state = status.state || (c.enabled ? 'unknown' : 'disabled');
+  const label = MCP_STATUS_LABELS[state] || (c.enabled ? 'Not tested' : 'Disabled');
+  const tone = state === 'ok' ? 'var(--vscode-testing-iconPassed)' : state === 'auth_required' ? 'var(--vscode-charts-yellow,#eab308)' : state === 'error' ? 'var(--vscode-errorForeground)' : 'var(--vscode-descriptionForeground)';
+  const note = state === 'ok' && status.toolCount ? ' · ' + status.toolCount + ' tool' + (status.toolCount === 1 ? '' : 's') : '';
+  return '<div class="provider-row" data-mcp-row="' + esc(c.name) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--vscode-widget-border);border-radius:6px;opacity:' + (c.enabled ? '1' : '.6') + '">' +
+    '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12px">' + esc(c.name) + '</div><div style="font-size:10px;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + '</div><div style="font-size:10px;color:var(--vscode-descriptionForeground)">' + esc(mcpAuthLabel(c.auth && c.auth.type)) + ' · ' + esc((c.transport || 'http').toUpperCase()) + ' · ' + (c.enabled ? 'Enabled' : 'Disabled') + '</div></div>' +
+    '<span style="flex:none;font-size:10px;white-space:nowrap;color:' + tone + '" title="' + esc(status.error || '') + '">' + esc(label + note) + '</span>' +
+    '<button type="button" class="small-btn" data-mcp-test="' + esc(c.name) + '" style="flex:none">Test</button>' +
+    '<button type="button" class="small-btn" data-mcp-edit="' + esc(c.name) + '" style="flex:none">Edit</button>' +
+    '<button type="button" class="small-btn" data-mcp-delete="' + esc(c.name) + '" style="flex:none;color:var(--vscode-errorForeground)">Remove</button>' +
     '</div>';
+}
+function renderMcpConnections() {
+  if (!mcpConnectionList) return;
+  if (!mcpConnectionsList.length) {
+    mcpConnectionList.innerHTML = '<div class="provider-empty">No saved MCP connections yet. Add an HTTP or SSE server to expose its tools to the agent.</div>';
+    return;
   }
-  function renderMcpConnections(){
-    if(!mcpConnectionList)return;
-    if(!mcpConnectionsList.length){
-      mcpConnectionList.innerHTML='<div class="provider-empty">No saved MCP connections yet. Add an HTTP or SSE server to expose its tools to the agent.</div>';
-      return;
+  mcpConnectionList.innerHTML = mcpConnectionsList.map(renderMcpConnectionRow).join('');
+  mcpConnectionList.querySelectorAll('[data-mcp-edit]').forEach(btn => { btn.onclick = () => openMcpConnectionForm(btn.dataset.mcpEdit) });
+  mcpConnectionList.querySelectorAll('[data-mcp-test]').forEach(btn => { btn.onclick = () => { setMcpStatus(btn.dataset.mcpTest, { name: btn.dataset.mcpTest, state: 'testing' }); renderMcpConnections(); vscode.postMessage({ type: 'testMcpConnection', name: btn.dataset.mcpTest }) } });
+  mcpConnectionList.querySelectorAll('[data-mcp-delete]').forEach(btn => { btn.onclick = () => vscode.postMessage({ type: 'deleteMcpConnection', name: btn.dataset.mcpDelete }) });
+}
+function setMcpStatus(name, status) { if (status) mcpStatusByName[name] = status; else delete mcpStatusByName[name] }
+function mcpAuthOf(c) { return (c && c.auth) || { type: 'none' } }
+function syncMcpAuthFields() {
+  const type = mcAuth ? mcAuth.value : 'none';
+  if (mcTokenField) mcTokenField.style.display = type === 'bearer' || type === 'api-key' ? '' : 'none';
+  if (mcBasicFields) mcBasicFields.style.display = type === 'basic' ? '' : 'none';
+  if (mcHeadersField) mcHeadersField.style.display = type === 'custom' ? '' : 'none';
+  mcToken?.setAttribute('placeholder', type === 'api-key' ? 'Paste API key…' : 'Paste token…');
+}
+function openMcpConnectionForm(name) {
+  mcpConnectionFormEditName = name || null;
+  const c = name ? mcpConnectionsList.find(x => x.name === name) : null;
+  const auth = mcpAuthOf(c);
+  mcpConnectionFormTitle.textContent = name ? 'Edit MCP connection' : 'Add MCP connection';
+  mcName.value = c ? c.name : '';
+  mcUrl.value = c ? c.url : '';
+  mcTransport.value = (c && c.transport) || 'http';
+  mcAuth.value = auth.type || 'none';
+  mcToken.value = auth.type === 'bearer' ? auth.token || '' : auth.type === 'api-key' ? auth.apiKey || '' : '';
+  mcUsername.value = auth.username || '';
+  mcPassword.value = auth.password || '';
+  mcHeaders.value = auth.customHeaders && Object.keys(auth.customHeaders).length ? JSON.stringify(auth.customHeaders, null, 2) : '';
+  mcEnabled.checked = c ? Boolean(c.enabled) : true;
+  mcDelete.style.display = name ? '' : 'none';
+  mcError.textContent = '';
+  syncMcpAuthFields();
+  mcpConnectionForm.style.display = '';
+  setTimeout(() => mcName.focus(), 0);
+}
+function closeMcpConnectionForm() { mcpConnectionForm.style.display = 'none'; mcpConnectionFormEditName = null; mcError.textContent = '' }
+function buildMcpAuth(type) {
+  if (type === 'bearer') return { type: 'bearer', token: mcToken.value.trim() };
+  if (type === 'api-key') return { type: 'api-key', apiKey: mcToken.value.trim() };
+  if (type === 'basic') return { type: 'basic', username: mcUsername.value.trim(), password: mcPassword.value };
+  if (type === 'custom') {
+    let customHeaders = {};
+    if (mcHeaders.value.trim()) {
+      try { const parsed = JSON.parse(mcHeaders.value); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.values(parsed).some(v => typeof v !== 'string')) throw new Error(); customHeaders = parsed } catch { mcError.textContent = 'Custom headers must be a JSON object with string values.'; mcHeaders.focus(); return null }
     }
-    mcpConnectionList.innerHTML=mcpConnectionsList.map(renderMcpConnectionRow).join('');
-    mcpConnectionList.querySelectorAll('[data-mcp-edit]').forEach(btn=>{btn.onclick=()=>openMcpConnectionForm(btn.dataset.mcpEdit)});
-    mcpConnectionList.querySelectorAll('[data-mcp-test]').forEach(btn=>{btn.onclick=()=>{setMcpStatus(btn.dataset.mcpTest,{name:btn.dataset.mcpTest,state:'testing'});renderMcpConnections();vscode.postMessage({type:'testMcpConnection',name:btn.dataset.mcpTest})}});
-    mcpConnectionList.querySelectorAll('[data-mcp-delete]').forEach(btn=>{btn.onclick=()=>vscode.postMessage({type:'deleteMcpConnection',name:btn.dataset.mcpDelete})});
+    return { type: 'custom', customHeaders };
   }
-  function setMcpStatus(name,status){if(status)mcpStatusByName[name]=status;else delete mcpStatusByName[name]}
-  function mcpAuthOf(c){return (c&&c.auth)||{type:'none'}}
-  function syncMcpAuthFields(){
-    const type=mcAuth?mcAuth.value:'none';
-    if(mcTokenField)mcTokenField.style.display=type==='bearer'||type==='api-key'?'':'none';
-    if(mcBasicFields)mcBasicFields.style.display=type==='basic'?'':'none';
-    if(mcHeadersField)mcHeadersField.style.display=type==='custom'?'':'none';
-    mcToken?.setAttribute('placeholder',type==='api-key'?'Paste API key…':'Paste token…');
-  }
-  function openMcpConnectionForm(name){
-    mcpConnectionFormEditName=name||null;
-    const c=name?mcpConnectionsList.find(x=>x.name===name):null;
-    const auth=mcpAuthOf(c);
-    mcpConnectionFormTitle.textContent=name?'Edit MCP connection':'Add MCP connection';
-    mcName.value=c?c.name:'';
-    mcUrl.value=c?c.url:'';
-    mcTransport.value=(c&&c.transport)||'http';
-    mcAuth.value=auth.type||'none';
-    mcToken.value=auth.type==='bearer'?auth.token||'':auth.type==='api-key'?auth.apiKey||'':'';
-    mcUsername.value=auth.username||'';
-    mcPassword.value=auth.password||'';
-    mcHeaders.value=auth.customHeaders&&Object.keys(auth.customHeaders).length?JSON.stringify(auth.customHeaders,null,2):'';
-    mcEnabled.checked=c?Boolean(c.enabled):true;
-    mcDelete.style.display=name?'':'none';
-    mcError.textContent='';
-    syncMcpAuthFields();
-    mcpConnectionForm.style.display='';
-    setTimeout(()=>mcName.focus(),0);
-  }
-  function closeMcpConnectionForm(){mcpConnectionForm.style.display='none';mcpConnectionFormEditName=null;mcError.textContent=''}
-  function buildMcpAuth(type){
-    if(type==='bearer')return{type:'bearer',token:mcToken.value.trim()};
-    if(type==='api-key')return{type:'api-key',apiKey:mcToken.value.trim()};
-    if(type==='basic')return{type:'basic',username:mcUsername.value.trim(),password:mcPassword.value};
-    if(type==='custom'){
-      let customHeaders={};
-      if(mcHeaders.value.trim()){
-        try{const parsed=JSON.parse(mcHeaders.value);if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)||Object.values(parsed).some(v=>typeof v!=='string'))throw new Error();customHeaders=parsed}catch{mcError.textContent='Custom headers must be a JSON object with string values.';mcHeaders.focus();return null}
-      }
-      return{type:'custom',customHeaders};
-    }
-    return{type:'none'};
-  }
-  function saveMcpConnectionForm(){
-    const name=mcName.value.trim();
-    const url=mcUrl.value.trim();
-    if(!name){mcError.textContent='Name is required.';mcName.focus();return}
-    if(!url||!/^https?:\/\//i.test(url)){mcError.textContent='URL must start with http:// or https://';mcUrl.focus();return}
-    const type=mcAuth.value;
-    const auth=buildMcpAuth(type);
-    if(!auth)return;
-    const existing=mcpConnectionFormEditName?mcpConnectionsList.find(x=>x.name===mcpConnectionFormEditName):null;
-    if(!existing&&mcpConnectionsList.some(x=>x.name===name)){mcError.textContent='A connection with this name already exists.';mcName.focus();return}
-    const order=existing&&typeof existing.order==='number'?existing.order:mcpConnectionsList.length;
-    const connection={name,description:'',url,transport:mcTransport.value==='sse'?'sse':'http',auth,enabled:Boolean(mcEnabled.checked),order};
-    vscode.postMessage({type:'saveMcpConnection',connection});
-    if(type==='oauth2')setTimeout(()=>vscode.postMessage({type:'connectMcpOAuth',name}),0);
-    closeMcpConnectionForm();
-  }
-  addMcpConnection?.addEventListener('click',()=>openMcpConnectionForm(null));
-  mcCancel?.addEventListener('click',closeMcpConnectionForm);
-  mcSave?.addEventListener('click',saveMcpConnectionForm);
-  mcDelete?.addEventListener('click',()=>{if(mcpConnectionFormEditName)vscode.postMessage({type:'deleteMcpConnection',name:mcpConnectionFormEditName})});
-  mcAuth?.addEventListener('change',syncMcpAuthFields);
-  mcName?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveMcpConnectionForm()}if(e.key==='Escape')closeMcpConnectionForm()});
-  mcUrl?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();saveMcpConnectionForm()}if(e.key==='Escape')closeMcpConnectionForm()});
-  function renderCompactionModelOptions(){
-    if(!compactionModel)return;
-    const current=compactionModel.value;
-    const opts=[{id:'',label:'Auto (cheapest available)'}];
-    for(const g of modelGroups){
-      for(const m of g.models||[]){
-        if(typeof m==='object'&&m&&m.isAuto)continue;
-        const id=modelIdOf(m);
-        if(!id||opts.some(o=>o.id===id))continue;
-        opts.push({id,label:modelNameOf(m)});
-      }
-    }
-    compactionModel.innerHTML=opts.map(o=>'<option value="'+esc(o.id)+'">'+esc(o.label)+'</option>').join('');
-    if(opts.some(o=>o.id===current))compactionModel.value=current;
-  }
-  function renderSubagentModelOptions(){
-    const selects=[subagentModelExplorer,subagentModelReviewer,subagentModelWorker];
-    const opts=[];
-    for(const g of modelGroups){
-      for(const m of g.models||[]){
-        if(typeof m==='object'&&m&&m.isAuto)continue;
-        const id=modelIdOf(m);
-        if(!id||opts.some(o=>o.id===id))continue;
-        opts.push({id,label:(g.providerName||g.providerId)+': '+modelNameOf(m)});
-      }
-    }
-    opts.sort((a,b)=>a.label.localeCompare(b.label,undefined,{sensitivity:'base',numeric:true}));
-    for(const sel of selects){
-      if(!sel)continue;
-      const current=sel.value;
-      sel.innerHTML='<option value="">Use main model</option>'+opts.map(o=>'<option value="'+esc(o.id)+'">'+esc(o.label)+'</option>').join('');
-      if(opts.some(o=>o.id===current))sel.value=current;
+  return { type: 'none' };
+}
+function saveMcpConnectionForm() {
+  const name = mcName.value.trim();
+  const url = mcUrl.value.trim();
+  if (!name) { mcError.textContent = 'Name is required.'; mcName.focus(); return }
+  if (!url || !/^https?:\/\//i.test(url)) { mcError.textContent = 'URL must start with http:// or https://'; mcUrl.focus(); return }
+  const type = mcAuth.value;
+  const auth = buildMcpAuth(type);
+  if (!auth) return;
+  const existing = mcpConnectionFormEditName ? mcpConnectionsList.find(x => x.name === mcpConnectionFormEditName) : null;
+  if (!existing && mcpConnectionsList.some(x => x.name === name)) { mcError.textContent = 'A connection with this name already exists.'; mcName.focus(); return }
+  const order = existing && typeof existing.order === 'number' ? existing.order : mcpConnectionsList.length;
+  const connection = { name, description: '', url, transport: mcTransport.value === 'sse' ? 'sse' : 'http', auth, enabled: Boolean(mcEnabled.checked), order };
+  vscode.postMessage({ type: 'saveMcpConnection', connection });
+  if (type === 'oauth2') setTimeout(() => vscode.postMessage({ type: 'connectMcpOAuth', name }), 0);
+  closeMcpConnectionForm();
+}
+addMcpConnection?.addEventListener('click', () => openMcpConnectionForm(null));
+mcCancel?.addEventListener('click', closeMcpConnectionForm);
+mcSave?.addEventListener('click', saveMcpConnectionForm);
+mcDelete?.addEventListener('click', () => { if (mcpConnectionFormEditName) vscode.postMessage({ type: 'deleteMcpConnection', name: mcpConnectionFormEditName }) });
+mcAuth?.addEventListener('change', syncMcpAuthFields);
+mcName?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveMcpConnectionForm() } if (e.key === 'Escape') closeMcpConnectionForm() });
+mcUrl?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveMcpConnectionForm() } if (e.key === 'Escape') closeMcpConnectionForm() });
+function renderCompactionModelOptions() {
+  if (!compactionModel) return;
+  const current = compactionModel.value;
+  const opts = [{ id: '', label: 'Auto (cheapest available)' }];
+  for (const g of modelGroups) {
+    for (const m of g.models || []) {
+      if (typeof m === 'object' && m && m.isAuto) continue;
+      const id = modelIdOf(m);
+      if (!id || opts.some(o => o.id === id)) continue;
+      opts.push({ id, label: modelNameOf(m) });
     }
   }
-  function openSettings(m){initialSetup=Boolean(m.initialSetup);savedApiKeys=m.apiKeys||{};providersList=m.providers||[];activeProvider=m.activeProvider||'';if(!activeProvider&&providersList.length)activeProvider=providersList[0].id;mcpConnectionsList=m.mcpConnections||[];mcpStatusByName={};for(const status of (m.mcpStatuses||[]))mcpStatusByName[status.name]=status;sleepyAccount=m.sleepy||null;if(sleepyAccount&&sleepyAccount.modelPrices&&sleepyAccount.modelPrices.length)sleepyModelPrices=sleepyAccount.modelPrices;sleepyBusy=false;sleepyStatusText='';settingsView.classList.toggle('onboarding',initialSetup);document.getElementById('settingsTitle').textContent=initialSetup?'Set up SleepyCode':'SleepyCode Settings';selectSettingsTab(initialSetup?'sleepyai':activeSettingsTab);renderProviderList();renderCustomAgents();renderMcpConnections();renderSleepyCard();if(sleepyAccount&&sleepyAccount.loggedIn){vscode.postMessage({type:'sleepyAccountData'})}maxSteps.value=m.maxSteps===0?200:(m.maxSteps??200);maxStepsUnlimited.checked=m.maxSteps===0;maxSteps.disabled=maxStepsUnlimited.checked;if(maxPersistedReasoning)maxPersistedReasoning.value=m.maxPersistedReasoning??32000;onlyDefaultModels.checked=Boolean(m.onlyDefaultModels);confirmDelete.checked=m.confirmDelete!==false;if(useCli)useCli.checked=Boolean(m.useCli);compactionModel.value=m.compactionModel||'';renderCompactionModelOptions();if(subagentModelExplorer)subagentModelExplorer.value=(m.subagentModels&&m.subagentModels.explorer)||'';if(subagentModelReviewer)subagentModelReviewer.value=(m.subagentModels&&m.subagentModels.reviewer)||'';if(subagentModelWorker)subagentModelWorker.value=(m.subagentModels&&m.subagentModels.worker)||'';renderSubagentModelOptions();approvalMode.value=m.approvalMode||'ask';syncSafetyControl();searxngUrl.value=m.searxngUrl||'';mcpServers.value=m.mcpServers||'{}';extraFreeModels.value=(m.extraFreeModels||'');if(m.agentId){selectedAgentId=m.agentId;syncAgentPill()}settingsResult.textContent='';settingsResult.className='settings-result';document.querySelector('.app').style.display='none';settingsView.classList.add('visible');resetArmGuard();clearTimeout(autosaveTimer);clearTimeout(settingsSavedTimer);setTimeout(()=>{const target=initialSetup?document.getElementById('sleepyLoginBtn'):maxSteps;if(target)target.focus()},0)}
-  function closeSettings(){settingsView.classList.remove('visible');document.querySelector('.app').style.display='flex'}
-  let activeSettingsTab='sleepyai';
-  function selectSettingsTab(tab){
-    activeSettingsTab=tab;
-    document.querySelectorAll('[data-settings-tab]').forEach(button=>button.classList.toggle('active',button.dataset.settingsTab===tab));
-    document.querySelectorAll('[data-settings-pane]').forEach(pane=>pane.classList.toggle('active',pane.dataset.settingsPane===tab));
-    if(tab==='advanced')vscode.postMessage({type:'requestExtensionLogs'});
+  compactionModel.innerHTML = opts.map(o => '<option value="' + esc(o.id) + '">' + esc(o.label) + '</option>').join('');
+  if (opts.some(o => o.id === current)) compactionModel.value = current;
+}
+function renderSubagentModelOptions() {
+  const selects = [subagentModelExplorer, subagentModelReviewer, subagentModelWorker];
+  const opts = [];
+  for (const g of modelGroups) {
+    for (const m of g.models || []) {
+      if (typeof m === 'object' && m && m.isAuto) continue;
+      const id = modelIdOf(m);
+      if (!id || opts.some(o => o.id === id)) continue;
+      opts.push({ id, label: (g.providerName || g.providerId) + ': ' + modelNameOf(m) });
+    }
   }
-  document.querySelectorAll('[data-settings-tab]').forEach(button=>button.onclick=()=>selectSettingsTab(button.dataset.settingsTab));
-  modelDropdown.onclick=e=>{if(!e.target.closest('#modelMenu'))toggleModelMenu()};if(agentDropdown)agentDropdown.onclick=e=>{if(!e.target.closest('#agentMenu'))toggleAgentMenu()};if(safetyDropdown)safetyDropdown.onclick=e=>{if(!e.target.closest('#safetyMenu'))toggleSafetyMenu()};contextSummaryButton?.addEventListener('click',e=>{e.stopPropagation();toggleContextPanel()});document.getElementById('contextAddButton')?.addEventListener('click',()=>vscode.postMessage({type:'requestFilePicker'}));document.addEventListener('click',e=>{if(!modelDropdown.contains(e.target))closeModelMenu();if(effortDropdown&&!effortDropdown.contains(e.target))closeEffortMenu();if(agentDropdown&&!agentDropdown.contains(e.target))closeAgentMenu();if(safetyDropdown&&!safetyDropdown.contains(e.target))closeSafetyMenu();if(contextPanel&&!contextPanel.contains(e.target)&&contextSummaryButton&&!contextSummaryButton.contains(e.target))closeContextPanel();const conversationButton=document.getElementById('conversationButton');if(conversationMenu&&!conversationMenu.contains(e.target)&&conversationButton&&!conversationButton.contains(e.target))setConversationMenuOpen(false)});// Top-bar overflow: the low-frequency destinations live in a popover so the bar
+  opts.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base', numeric: true }));
+  for (const sel of selects) {
+    if (!sel) continue;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Use main model</option>' + opts.map(o => '<option value="' + esc(o.id) + '">' + esc(o.label) + '</option>').join('');
+    if (opts.some(o => o.id === current)) sel.value = current;
+  }
+}
+function openSettings(m) { initialSetup = Boolean(m.initialSetup); savedApiKeys = m.apiKeys || {}; providersList = m.providers || []; activeProvider = m.activeProvider || ''; if (!activeProvider && providersList.length) activeProvider = providersList[0].id; mcpConnectionsList = m.mcpConnections || []; mcpStatusByName = {}; for (const status of (m.mcpStatuses || [])) mcpStatusByName[status.name] = status; sleepyAccount = m.sleepy || null; if (sleepyAccount && sleepyAccount.modelPrices && sleepyAccount.modelPrices.length) sleepyModelPrices = sleepyAccount.modelPrices; sleepyBusy = false; sleepyStatusText = ''; settingsView.classList.toggle('onboarding', initialSetup); document.getElementById('settingsTitle').textContent = initialSetup ? 'Set up SleepyCode' : 'SleepyCode Settings'; selectSettingsTab(initialSetup ? 'sleepyai' : activeSettingsTab); renderProviderList(); renderCustomAgents(); renderMcpConnections(); renderSleepyCard(); if (sleepyAccount && sleepyAccount.loggedIn) { vscode.postMessage({ type: 'sleepyAccountData' }) } maxSteps.value = m.maxSteps === 0 ? 200 : (m.maxSteps ?? 200); maxStepsUnlimited.checked = m.maxSteps === 0; maxSteps.disabled = maxStepsUnlimited.checked; if (maxPersistedReasoning) maxPersistedReasoning.value = m.maxPersistedReasoning ?? 32000; onlyDefaultModels.checked = Boolean(m.onlyDefaultModels); confirmDelete.checked = m.confirmDelete !== false; if (useCli) useCli.checked = Boolean(m.useCli); compactionModel.value = m.compactionModel || ''; renderCompactionModelOptions(); if (subagentModelExplorer) subagentModelExplorer.value = (m.subagentModels && m.subagentModels.explorer) || ''; if (subagentModelReviewer) subagentModelReviewer.value = (m.subagentModels && m.subagentModels.reviewer) || ''; if (subagentModelWorker) subagentModelWorker.value = (m.subagentModels && m.subagentModels.worker) || ''; renderSubagentModelOptions(); approvalMode.value = m.approvalMode || 'ask'; syncSafetyControl(); searxngUrl.value = m.searxngUrl || ''; mcpServers.value = m.mcpServers || '{}'; extraFreeModels.value = (m.extraFreeModels || ''); if (m.agentId) { selectedAgentId = m.agentId; syncAgentPill() } settingsResult.textContent = ''; settingsResult.className = 'settings-result'; document.querySelector('.app').style.display = 'none'; settingsView.classList.add('visible'); resetArmGuard(); clearTimeout(autosaveTimer); clearTimeout(settingsSavedTimer); setTimeout(() => { const target = initialSetup ? document.getElementById('sleepyLoginBtn') : maxSteps; if (target) target.focus() }, 0) }
+function closeSettings() { settingsView.classList.remove('visible'); document.querySelector('.app').style.display = 'flex' }
+let activeSettingsTab = 'sleepyai';
+function selectSettingsTab(tab) {
+  activeSettingsTab = tab;
+  document.querySelectorAll('[data-settings-tab]').forEach(button => button.classList.toggle('active', button.dataset.settingsTab === tab));
+  document.querySelectorAll('[data-settings-pane]').forEach(pane => pane.classList.toggle('active', pane.dataset.settingsPane === tab));
+  if (tab === 'advanced') vscode.postMessage({ type: 'requestExtensionLogs' });
+}
+document.querySelectorAll('[data-settings-tab]').forEach(button => button.onclick = () => selectSettingsTab(button.dataset.settingsTab));
+modelDropdown.onclick = e => { if (!e.target.closest('#modelMenu')) toggleModelMenu() }; if (agentDropdown) agentDropdown.onclick = e => { if (!e.target.closest('#agentMenu')) toggleAgentMenu() }; if (safetyDropdown) safetyDropdown.onclick = e => { if (!e.target.closest('#safetyMenu')) toggleSafetyMenu() }; contextSummaryButton?.addEventListener('click', e => { e.stopPropagation(); toggleContextPanel() }); document.getElementById('contextAddButton')?.addEventListener('click', () => vscode.postMessage({ type: 'requestFilePicker' })); document.addEventListener('click', e => { if (!modelDropdown.contains(e.target)) closeModelMenu(); if (effortDropdown && !effortDropdown.contains(e.target)) closeEffortMenu(); if (agentDropdown && !agentDropdown.contains(e.target)) closeAgentMenu(); if (safetyDropdown && !safetyDropdown.contains(e.target)) closeSafetyMenu(); if (contextPanel && !contextPanel.contains(e.target) && contextSummaryButton && !contextSummaryButton.contains(e.target)) closeContextPanel(); const conversationButton = document.getElementById('conversationButton'); if (conversationMenu && !conversationMenu.contains(e.target) && conversationButton && !conversationButton.contains(e.target)) setConversationMenuOpen(false) });// Top-bar overflow: the low-frequency destinations live in a popover so the bar
 // stays three actions plus one menu instead of six identical ghost icons.
-const moreBtn=document.getElementById('moreActionsButton'),moreMenu=document.getElementById('moreActionsMenu');
-function setMoreMenuOpen(open){
-  if(!moreBtn||!moreMenu)return;
-  moreMenu.classList.toggle('open',open);
-  moreBtn.setAttribute('aria-expanded',open?'true':'false');
+const moreBtn = document.getElementById('moreActionsButton'), moreMenu = document.getElementById('moreActionsMenu');
+function setMoreMenuOpen(open) {
+  if (!moreBtn || !moreMenu) return;
+  moreMenu.classList.toggle('open', open);
+  moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
-if(moreBtn&&moreMenu){
+if (moreBtn && moreMenu) {
   // Give the icons their text labels now that they render as menu rows.
-  const labels={usageButton:'Usage & billing',marketplaceButton:'Skill marketplace',settingsButton:'Settings'};
-  for(const [id,text] of Object.entries(labels)){
-    const el=document.getElementById(id);
-    if(!el)continue;
-    if(!el.querySelector('.chat-more-label')){
-      const span=document.createElement('span');span.className='chat-more-label';span.textContent=text;el.appendChild(span);
+  const labels = { usageButton: 'Usage & billing', marketplaceButton: 'Skill marketplace', settingsButton: 'Settings' };
+  for (const [id, text] of Object.entries(labels)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (!el.querySelector('.chat-more-label')) {
+      const span = document.createElement('span'); span.className = 'chat-more-label'; span.textContent = text; el.appendChild(span);
     }
   }
-  moreBtn.onclick=e=>{e.stopPropagation();setMoreMenuOpen(!moreMenu.classList.contains('open'))};
-  document.addEventListener('click',e=>{if(!moreMenu.contains(e.target)&&!moreBtn.contains(e.target))setMoreMenuOpen(false)});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')setMoreMenuOpen(false)});
+  moreBtn.onclick = e => { e.stopPropagation(); setMoreMenuOpen(!moreMenu.classList.contains('open')) };
+  document.addEventListener('click', e => { if (!moreMenu.contains(e.target) && !moreBtn.contains(e.target)) setMoreMenuOpen(false) });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') setMoreMenuOpen(false) });
   // Close after picking a destination.
-  moreMenu.addEventListener('click',()=>setMoreMenuOpen(false));
+  moreMenu.addEventListener('click', () => setMoreMenuOpen(false));
 }
-document.getElementById('usageButton').onclick=openUsageView;document.getElementById('usageBack').onclick=closeUsageView;document.getElementById('usageRefresh').onclick=()=>{vscode.postMessage({type:'requestUsage'});vscode.postMessage({type:'sleepyAccountData'})};document.getElementById('marketplaceButton').onclick=()=>{openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'})};document.getElementById('marketplaceBack').onclick=closeMarketplaceView;document.getElementById('marketplaceRefresh').onclick=()=>{if(marketplaceTab==='installed'){vscode.postMessage({type:'requestMarketplaceInstalled'})}else if(marketplaceQuery.value.trim()){marketplaceSearch()}else if(!marketplaceBusy){loadMarketplaceTop(true,marketplaceSort.value)}};document.getElementById('marketplaceSearchBtn').onclick=marketplaceSearch;marketplaceQuery.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();marketplaceSearch()}};marketplaceQuery.oninput=()=>runMarketplaceSearch(true);marketplaceSort.onchange=()=>runMarketplaceSearch(false);document.getElementById('marketplaceRepoBtn').onclick=marketplaceListRepo;marketplaceRepo.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();marketplaceListRepo()}};document.getElementById('previewClose').onclick=closeSkillPreview;previewModal.onclick=e=>{if(e.target===previewModal)closeSkillPreview()};previewInstall.onclick=()=>{if(!previewState)return;const path=previewState.path;startSkillInstall(previewState.origin===null||previewState.origin===undefined?-1:previewState.origin,{install:{source:previewState.source,skill:path?path.split('/').pop():undefined}})};document.getElementById('settingsButton').onclick=()=>vscode.postMessage({type:'requestSettings'});document.getElementById('settingsBack').onclick=closeSettings;document.getElementById('newConversation').onclick=()=>vscode.postMessage({type:'newConversation'});document.getElementById('conversationButton').onclick=()=>setConversationMenuOpen(!conversationMenu.classList.contains('open'));
-  resetSettingsBtn.onclick=()=>{resetClicks++;if(resetClicks>=3){resetClicks=0;resetSettingsBtn.textContent='Reset Extension to Defaults';vscode.postMessage({type:'resetSettings'});return}resetSettingsBtn.textContent=resetClicks===1?'Click 2 more times to reset':'Click 1 more time to reset'};
-  maxStepsUnlimited.onchange=()=>{maxSteps.disabled=maxStepsUnlimited.checked;autosaveNow()};
-  maxSteps.oninput=autosaveLater;
-  document.getElementById('addProvider').onclick=addProvider;
-  onlyDefaultModels.onchange=autosaveNow;
-  if(useCli)useCli.onchange=autosaveNow;
-  confirmDelete.onchange=autosaveNow;
-  compactionModel.onchange=autosaveNow;
-  subagentModelExplorer?.addEventListener('change',autosaveNow);
-  subagentModelReviewer?.addEventListener('change',autosaveNow);
-  subagentModelWorker?.addEventListener('change',autosaveNow);
-  approvalMode.onchange=autosaveNow;
-  searxngUrl.oninput=autosaveLater;
-  mcpServers.oninput=autosaveLater;
-  extraFreeModels.oninput=autosaveLater;
-  if(maxPersistedReasoning)maxPersistedReasoning.oninput=autosaveLater;
-  document.getElementById('refreshExtensionLogs')?.addEventListener('click',()=>vscode.postMessage({type:'requestExtensionLogs'}));
-  document.getElementById('clearExtensionLogs')?.addEventListener('click',()=>vscode.postMessage({type:'clearExtensionLogs'}));
-  window.addEventListener('message',async({data:m})=>{switch(m.type){
-    case'extensionLogs':{const el=document.getElementById('extensionLogs');if(el)el.textContent=(m.logs&&m.logs.length)?m.logs.join('\n'):'No logs yet.';break}
-    case'editorContext':editorContext={activeFile:m.activeFile||'',hasSelection:Boolean(m.hasSelection),selectionLines:m.selectionLines||''};renderContext();renderProjectIndicator();break;
-    case'contextAttachments':attachments.push(...(m.attachments||[]).filter(item=>!attachments.some(existing=>existing.kind===item.kind&&((item.kind==='image'&&existing.name===item.name)||(item.kind!=='image'&&existing.path===item.path)))));renderAttachments();break;
-    case'fileMentionResults':mentionResults=m.results||[];renderMentionMenu(mentionResults);break;
-    case'project':{const nextPath=m.path||'';if(projectIndicatorPath!==nextPath)projectIndexState={status:'idle',text:'Preparing local project index…',indexed:0,total:0,index:null};projectIndicatorFolder=m.name||'No folder open';projectIndicatorPath=nextPath;projectIndicator.classList.toggle('clickable',Boolean(projectIndicatorPath));renderProjectIndicator();renderContext();refreshEmpty();break}
-    case'projectIndex':projectIndexState={status:m.status||'idle',text:m.text||'',indexed:m.indexed||0,total:m.total||0,index:m.index||null};renderContext();refreshEmpty();break;
-    case'conversations':conversations=m.conversations||[];activeConversationId=m.activeId;conversationTitle.textContent=conversations.find(x=>x.id===activeConversationId)?.title||'New conversation';runningSet=new Set(conversations.filter(x=>x.running).map(x=>x.id));queuedByConversation=new Map(conversations.map(x=>[x.id,(x.queued||[]).map((text,index)=>({id:(x.queuedIds||[])[index]||('legacy-'+index),text}))]));renderConversationMenu();refreshEmpty();updateQueuedVisibility();modelButton.disabled=isRunning();syncSendButton();ensureOptimisticActivity();updateSendMode();updateJump();break;
-    case'conversation':if(editMessageState&&editMessageState.conversationId!==m.id){editMessageState=null;setEditBar(false);input.value='';attachments=[];renderAttachments();resize()}if(m.id!==activeConversationId)hideCompactionOverlay();activeConversationId=m.id;activeConversationItems=m.items||[];compactionUndoable=Boolean(m.compactionUndoable);compactionRedoable=Boolean(m.compactionRedoable);if(m.model){selectedModel=m.model;modelButton.textContent=findModelName(m.model);modelButton.title=m.model}if(m.agentId){selectedAgentId=m.agentId;syncAgentPill()}reasoningEffort=findEffort(m.reasoningEffort||'none').id;syncEffortPill();renderConversation(m.items);renderLive(m.id);updateQueuedVisibility();modelButton.disabled=isRunning();updateSendMode();updateJump();updateSessionStats();break;
-    case'restoreDraft':if((!m.conversationId||m.conversationId===activeConversationId)&&!input.value.trim()){input.value=m.text||'';resize();input.focus()}break;
-    case'settings':openSettings(m);break;
-    case'settingsResult':{if(m.ok&&(m.text==='Settings saved.'||String(m.text||'').startsWith('Signed in to SleepyAI'))){initialSetup=false;settingsView.classList.remove('onboarding');if(pendingProviderKeyId&&pendingProviderKey){vscode.postMessage({type:'saveProviderApiKey',providerId:pendingProviderKeyId,apiKey:pendingProviderKey});pendingProviderKeyId='';pendingProviderKey=''}}clearTimeout(settingsSavedTimer);if(m.ok){settingsResult.className='settings-result';void settingsResult.offsetWidth;settingsResult.textContent='Saved';settingsResult.className='settings-result ok';settingsSavedTimer=setTimeout(()=>{settingsResult.textContent='';settingsResult.className='settings-result'},1800)}else{settingsResult.textContent=m.text;settingsResult.className='settings-result bad'}break}
-    case'apiKeyState':savedApiKeys[m.provider]=m.hasApiKey;renderProviderList();break;
-    case'providerModels':{if(pfFetchModels)pfFetchModels.disabled=false;if(providerForm.style.display==='none')break;if(!m.ok){pfModelsStatus.textContent='';pfModelsStatus.className='field-hint';pfError.textContent=m.text;break}const ids=m.models||[];pfModels.value=ids.join(', ');pfError.textContent='';pfModelsStatus.textContent=m.text||('Found '+ids.length+' models');pfModelsStatus.className='field-hint';const target=providerFormEditId&&providersList.find(x=>x.id===providerFormEditId);if(target)target.modelList=ids.length?ids.slice():undefined;break}
-    case'agents':customAgentsList=m.agents||[];renderCustomAgents();break;
-    case'mcpConnections':mcpConnectionsList=m.connections||[];mcpStatusByName={};for(const status of (m.statuses||[]))mcpStatusByName[status.name]=status;renderMcpConnections();break;
-    case'mcpConnectionResult':{if(m.status)setMcpStatus(m.status.name,m.status);else if(m.statuses)for(const status of m.statuses)setMcpStatus(status.name,status);renderMcpConnections();const authHint=m.status&&m.status.state==='auth_required'?' Sign in with OAuth: edit this connection and choose Connect OAuth.':'';if(settingsResult){clearTimeout(settingsSavedTimer);if(m.ok){settingsResult.className='settings-result';void settingsResult.offsetWidth;settingsResult.textContent=m.text||'Saved';settingsResult.className='settings-result ok';settingsSavedTimer=setTimeout(()=>{settingsResult.textContent='';settingsResult.className='settings-result'},1800)}else{settingsResult.textContent=(m.text||'MCP connection failed.')+authHint;settingsResult.className='settings-result bad'}}break}
-    case'sleepyStatus':sleepyAccount={loggedIn:Boolean(m.loggedIn),email:m.email||sleepyAccount?.email||'',tier:m.tier||sleepyAccount?.tier||'',limits:m.limits||sleepyAccount?.limits,balances:m.balances||sleepyAccount?.balances,subscription:m.subscription||sleepyAccount?.subscription,modelPrices:m.modelPrices||sleepyAccount?.modelPrices};sleepyBusy=Boolean(m.busy);sleepyStatusText=m.text||'';if(m.modelPrices&&m.modelPrices.length)sleepyModelPrices=m.modelPrices;if(m.loggedIn&&m.provider){providersList=providersList||[];const existingIndex=providersList.findIndex(p=>p.id==='sleepyai');if(existingIndex>=0)providersList[existingIndex]=m.provider;else providersList.unshift(m.provider);activeProvider='sleepyai'}renderSleepyCard();renderProviderList();renderModelMenu();if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();refreshEmpty();break;
-    case'config':if(m.model){selectedModel=m.model;modelButton.textContent=findModelName(m.model);modelButton.title=m.model}if(m.reasoningEffort)reasoningEffort=findEffort(m.reasoningEffort).id;syncEffortPill();if(m.approvalMode){approvalMode.value=m.approvalMode;syncSafetyControl()}if(m.agentId){selectedAgentId=m.agentId;syncAgentPill()}break;
-    case'models':{modelGroups=m.groups||[];selectedModel=m.selected||'';modelButton.textContent=selectedModel?findModelName(selectedModel):'Choose model…';modelButton.title=selectedModel;renderModelMenu();renderCompactionModelOptions();renderSubagentModelOptions();updateSessionStats();break}
-    case'modelRoute':{if(m.conversationId===activeConversationId){const s=liveState(m.conversationId);ensureLiveActivity(s);s.activity.summary='Auto routed to '+(findModelName(m.model)||m.model);if(currentTurn){ensureActivity();enableActivity();const d=document.createElement('div');d.className='route-note';d.textContent='Auto → '+(findModelName(m.model)||m.model)+(m.reason?' · '+m.reason:'');activityBody.appendChild(d);scrollActivity()}}break}
-    case'modelsError':addError(m.text);break;
-    case'showUsage':openUsageView();break;case'showMarketplace':openMarketplaceView();break;case'showPanel':openPanelView(m.panel);break;case'marketplaceInstalled':installedSkills=m.skills||[];installedSkillsLoaded=true;renderInstalledSkills();if(marketplaceView.classList.contains('visible'))renderMarketplaceResults();if(skillPickerOpen)refreshSkillPicker();break;case'marketplaceResults':{marketplaceBusy=false;marketplaceCards=(m.skills||[]).map(x=>({key:x.githubUrl||x.name,name:x.name,author:x.author||'',description:x.description||'',meta:(x.stars?String(x.stars)+' ★':'')+(x.author?' · '+esc(x.author):''),installed:installedMatch(x.author,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:x.githubUrl?{source:x.githubUrl,path:''}:null,install:x.githubUrl?{source:x.githubUrl,skill:undefined}:null}));marketplaceHeading=m.query?'Search results':'Popular skills';marketplaceHint=m.query?'Try another search to explore more.':'Search above to discover more skills.';marketplaceStatusText(m.query?'Found '+(m.total||(m.skills||[]).length)+' skills for "'+m.query+'".':'',true);renderMarketplaceResults();break}case'marketplaceRepoSkills':{marketplaceBusy=false;const source=m.owner+'/'+m.repo;marketplaceCards=(m.skills||[]).map(x=>({key:source+'/'+x.path,name:x.name,author:source,description:'',meta:'from '+esc(source),installed:installedMatch(source,x.name)}));marketplaceActions=(m.skills||[]).map(x=>({preview:{source,path:x.path},install:{source,skill:x.name}}));marketplaceHeading='Skills in '+source;marketplaceHint='Preview a skill before installing it.';marketplaceStatusText((m.skills||[]).length+' skills found.',true);renderMarketplaceResults();break}case'marketplacePreview':{previewContent.innerHTML=markdown(m.markdown||'');previewInstall.style.display='';document.getElementById('previewTitle').textContent=m.title||'Skill preview';break}case'marketplaceInstallProgress':{const st=marketplaceInstalling[m.key];if(st){st.done=m.done||0;st.total=m.total||0;st.label='Installing… '+(m.done||0)+'/'+(m.total||0)+' files';updateCardProgress(m.key);updatePreviewProgress(m.key)}break}case'marketplaceResult':{if(m.key)delete marketplaceInstalling[m.key];marketplaceStatusText(m.text,!!m.ok);if(m.ok){if(previewState&&previewState.key===m.key){closeSkillPreview()}if(marketplaceView.classList.contains('visible'))vscode.postMessage({type:'requestMarketplaceInstalled'})}else{if(previewState&&previewState.key===m.key){previewProgress.classList.add('visible','error');previewProgressFill.style.width='100%';previewProgressLabel.textContent=m.text||'Install failed.'}renderMarketplaceResults()}break}case'marketplaceError':{marketplaceBusy=false;marketplaceStatusText(m.text||'Request failed.',false);renderMarketplaceResults();break}
-    case'usage':usageData=m;if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break;
-    case'panel':renderPanel(m);break;
-    case'liveUsage':{if(m.conversationId&&m.inputTokens!==undefined&&m.outputTokens!==undefined){liveRuns.set(m.conversationId,{model:m.model||'',provider:m.provider||'',input:m.inputTokens||0,output:m.outputTokens||0,cacheRead:m.cacheReadTokens||0,cacheWrite:m.cacheWriteTokens||0,speed:m.speed||0,contextTokens:m.contextTokens||0})}else if(m.conversationId){liveRuns.delete(m.conversationId)}if(usageView.classList.contains('visible'))renderUsage();updateSessionStats();break}
-    case'cliSettled':{liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId)currentTurn=current=activity=activityBody=reasoning=null;break}
-    case'user':{liveByConversation.set(m.conversationId,freshLive());if(m.conversationId===activeConversationId)activeConversationItems.push(m.item);if(m.conversationId===activeConversationId){const tmpBubble=currentTurn?.querySelector('.user-text');if(currentTurn&&tmpBubble){const footer=currentTurn.querySelector('.message-footer');if(footer)footer.remove();currentTurn.appendChild(messageFooter(m.item,false))}else{beginTurn(m.item)}}break}
-    case'resume':{const s=liveState(m.conversationId);s.phase='thinking';s.activity=null;s.currentRaw=m.partialText||'';if(m.conversationId===activeConversationId){currentTurn=document.querySelector('.turn:last-child')||null;current=activity=activityBody=reasoning=null;followOutput=true;if(m.partialText){current=document.createElement('div');current.className='assistant streaming';current.dataset.raw=m.partialText;current.innerHTML=markdown(m.partialText);currentTurn.appendChild(current)}scroll(true)}break}
-    case'workPhase':{const s=liveState(m.conversationId);s.phase='work';if(s.activity)s.activity.reasoningParts.push('');if(m.conversationId===activeConversationId)nextWorkPhase();break}
-    case'delta':{const s=liveState(m.conversationId);s.currentRaw+=m.text;s.phase='text';closeLiveActivity(s);if(m.conversationId===activeConversationId){if(!currentTurn){currentTurn=document.querySelector('.turn:last-child');if(!currentTurn){document.getElementById('empty')?.remove();currentTurn=document.createElement('section');currentTurn.className='turn';messages.appendChild(currentTurn)}}if(!current)createTextSegment();current.dataset.raw+=m.text;current.innerHTML=markdown(current.dataset.raw);scroll()}break}
-    case'reasoningDelta':{const s=liveState(m.conversationId);ensureLiveActivity(s);const parts=s.activity.reasoningParts;parts[parts.length-1]+=m.text;if(m.conversationId===activeConversationId){if(!currentTurn){currentTurn=document.querySelector('.turn:last-child');if(!currentTurn){document.getElementById('empty')?.remove();currentTurn=document.createElement('section');currentTurn.className='turn';messages.appendChild(currentTurn)}}ensureActivity();enableActivity();reasoning.dataset.raw+=m.text;reasoning.innerHTML=markdown(reasoning.dataset.raw);scrollActivity()}break}
-    case'reasoningEnd':break;
-    case'plan':{const s=liveState(m.conversationId);s.plan={title:m.title,steps:m.steps,activeStep:m.activeStep,doneSteps:m.doneSteps,interrupted:Boolean(m.interrupted),done:Boolean(m.done)};if(m.conversationId===activeConversationId)showPlan(m);break}
-    case'subagent':{const s=liveState(m.conversationId);ensureLiveActivity(s);let sub=(s.activity.subagents||[]).find(x=>x.id===m.id);if(!sub){sub={id:m.id,role:m.role,name:m.name,done:false,ok:null,result:'',error:''};s.activity.subagents.push(sub);s.activity.taskCount++}sub.name=m.name||sub.name;sub.role=m.role||sub.role;sub.done=m.phase==='end';if(m.phase==='end'){sub.ok=m.ok!==false;sub.result=m.result||'';sub.error=m.error||''}s.activity.summary=m.phase==='start'?(m.name||'Subagent working'):'Working';if(m.conversationId===activeConversationId)updateSubagent(m);break}
-    case'tool':{const s=liveState(m.conversationId);ensureLiveActivity(s);let row=s.activity.tasks.find(t=>t.id===m.id);if(row){row.name=m.name;row.tool=m.tool||row.tool;row.done=m.phase==='end';row.failed=Boolean(m.failed);row.parentId=m.parentId||row.parentId;row.subagentRole=m.subagentRole||row.subagentRole}else{s.activity.tasks.push({id:m.id,name:m.name,tool:m.tool,done:m.phase==='end',failed:Boolean(m.failed),parentId:m.parentId||'',subagentRole:m.subagentRole||''});s.activity.taskCount++}s.activity.summary=m.phase==='start'?m.name:'Working';if(m.conversationId===activeConversationId)updateTask(m);break}
-    case'retry':{const s=liveState(m.conversationId);ensureLiveActivity(s);s.activity.retries.push({attempt:m.attempt,max:m.max,ok:null,error:m.error||'',backoffMs:m.backoffMs||0});s.activity.taskCount++;s.activity.summary='Reconnecting '+m.attempt+'/'+m.max+(m.error?' ('+m.error+')':'');if(m.conversationId===activeConversationId)showRetry(m);break}
-    case'retryEnd':{const s=liveState(m.conversationId);if(s.activity&&s.activity.retries.length){const last=s.activity.retries[s.activity.retries.length-1];last.ok=Boolean(m.ok)}if(m.conversationId===activeConversationId)finishRetry(m);break}
-    case'changed':{const s=liveState(m.conversationId);ensureLiveActivity(s);const change={action:m.action||'Changed',path:m.path,additions:m.additions||0,deletions:m.deletions||0,preview:m.preview||[]};s.activity.changed.push(change);if(m.conversationId===activeConversationId){if(!currentTurn)break;ensureActivity();enableActivity();activityBody.appendChild(liveChangedRow(change));scrollActivity()}break}
-    case'command':break;
-    case'contextNotice':{if(m.conversationId&&m.conversationId!==activeConversationId)break;const el=document.createElement('div');el.className='context-notice';el.textContent=m.text||'Conversation history was adjusted.';messages.appendChild(el);scroll(true);break}
-    case'error':{if(m.conversationId){const s=liveState(m.conversationId);s.errorText=m.text;s.errorRetry=false;s.phase='error';if(!m.keepTurn)closeLiveActivity(s);if(m.conversationId===activeConversationId){addError(m.text,!!m.keepTurn);if(!m.keepTurn)finish()}}else{addError(m.text,!!m.keepTurn);if(!m.keepTurn)finish()}break}
-    case'steered':if(m.conversationId===activeConversationId)finish();break;
-    case'generationError':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();showGenerationError(m.item)}break;
-    case'queuedPrompt':{const ids=m.ids||[],texts=m.prompts||[];if(texts.length)queuedByConversation.set(m.conversationId,texts.map((text,index)=>({id:ids[index]||('legacy-'+index),text})));else queuedByConversation.delete(m.conversationId);updateQueuedVisibility();break}
-    case'state':if(m.running)runningSet.add(m.conversationId);else runningSet.delete(m.conversationId);modelButton.disabled=isRunning();updateSendMode();updateJump();break;
-    case'notify':{const choice=await showNotifyModal({title:m.title,body:m.detail,ok:m.okLabel,cancel:m.cancelLabel,secondary:m.secondaryLabel,danger:Boolean(m.danger),risk:m.risk});vscode.postMessage({type:'notifyResponse',id:m.id,choice});break}
-    case'compactProgress':handleCompactProgress(m);break;
-    case'done':liveByConversation.delete(m.conversationId);if(m.conversationId===activeConversationId){activeConversationItems.push(m.item);updateSessionStats();finish(m.item)}break;
-  }})
-  const panelsView=document.getElementById('panelsView'),panelsBody=document.getElementById('panelsBody'),panelsTitle=document.getElementById('panelsTitle');
-  let panelKind='';
-  const PANEL_TITLES={worktrees:'Git Worktrees',index:'Repository Index',agents:'Custom Agents',tasks:'Scheduled Tasks & Hooks',checkpoints:'Undo History'};
-  function openPanelView(panel){panelKind=panel;panelsTitle.textContent='SleepyCode: '+(PANEL_TITLES[panel]||'Panel');panelsBody.innerHTML='<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Loading…</div>';document.querySelector('.app').style.display='none';panelsView.classList.add('visible');vscode.postMessage({type:'requestPanel',panel})}
-  function closePanelView(){panelsView.classList.remove('visible');document.querySelector('.app').style.display='flex'}
-  document.getElementById('panelsBack').onclick=closePanelView;
-  document.getElementById('panelsRefresh').onclick=()=>{if(panelKind)vscode.postMessage({type:'requestPanel',panel:panelKind})};
-  function renderPanelRows(rows){if(!rows||!rows.length)return '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Nothing to show yet.</div>';return rows.map(r=>'<div class="settings-row"><div style="flex:1;min-width:0"><div style="font-weight:600">'+esc(r.title)+'</div><div style="font-size:11px;color:var(--vscode-descriptionForeground);word-break:break-word">'+esc(r.detail||'')+'</div></div></div>').join('')}
-  function renderPanel(m){if(panelKind&&m.panel!==panelKind)return;panelsBody.innerHTML=renderPanelRows(m.rows||[]);const hint=m.hint?'<p class="field-hint" style="margin-top:10px">'+esc(m.hint)+'</p>':'';panelsBody.innerHTML+=hint}
-  vscode.postMessage({type:'ready'});vscode.postMessage({type:'requestMarketplaceInstalled'})
-`;
+document.getElementById('usageButton').onclick = openUsageView; document.getElementById('usageBack').onclick = closeUsageView; document.getElementById('usageRefresh').onclick = () => { vscode.postMessage({ type: 'requestUsage' }); vscode.postMessage({ type: 'sleepyAccountData' }) }; document.getElementById('marketplaceButton').onclick = () => { openMarketplaceView(); vscode.postMessage({ type: 'requestMarketplaceInstalled' }) }; document.getElementById('marketplaceBack').onclick = closeMarketplaceView; document.getElementById('marketplaceRefresh').onclick = () => { if (marketplaceTab === 'installed') { vscode.postMessage({ type: 'requestMarketplaceInstalled' }) } else if (marketplaceQuery.value.trim()) { marketplaceSearch() } else if (!marketplaceBusy) { loadMarketplaceTop(true, marketplaceSort.value) } }; document.getElementById('marketplaceSearchBtn').onclick = marketplaceSearch; marketplaceQuery.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); marketplaceSearch() } }; marketplaceQuery.oninput = () => runMarketplaceSearch(true); marketplaceSort.onchange = () => runMarketplaceSearch(false); document.getElementById('marketplaceRepoBtn').onclick = marketplaceListRepo; marketplaceRepo.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); marketplaceListRepo() } }; document.getElementById('previewClose').onclick = closeSkillPreview; previewModal.onclick = e => { if (e.target === previewModal) closeSkillPreview() }; previewInstall.onclick = () => { if (!previewState) return; const path = previewState.path; startSkillInstall(previewState.origin === null || previewState.origin === undefined ? -1 : previewState.origin, { install: { source: previewState.source, skill: path ? path.split('/').pop() : undefined } }) }; document.getElementById('settingsButton').onclick = () => vscode.postMessage({ type: 'requestSettings' }); document.getElementById('settingsBack').onclick = closeSettings; document.getElementById('newConversation').onclick = () => vscode.postMessage({ type: 'newConversation' }); document.getElementById('conversationButton').onclick = () => setConversationMenuOpen(!conversationMenu.classList.contains('open'));
+resetSettingsBtn.onclick = () => { resetClicks++; if (resetClicks >= 3) { resetClicks = 0; resetSettingsBtn.textContent = 'Reset Extension to Defaults'; vscode.postMessage({ type: 'resetSettings' }); return } resetSettingsBtn.textContent = resetClicks === 1 ? 'Click 2 more times to reset' : 'Click 1 more time to reset' };
+maxStepsUnlimited.onchange = () => { maxSteps.disabled = maxStepsUnlimited.checked; autosaveNow() };
+maxSteps.oninput = autosaveLater;
+document.getElementById('addProvider').onclick = addProvider;
+onlyDefaultModels.onchange = autosaveNow;
+if (useCli) useCli.onchange = autosaveNow;
+confirmDelete.onchange = autosaveNow;
+compactionModel.onchange = autosaveNow;
+subagentModelExplorer?.addEventListener('change', autosaveNow);
+subagentModelReviewer?.addEventListener('change', autosaveNow);
+subagentModelWorker?.addEventListener('change', autosaveNow);
+approvalMode.onchange = autosaveNow;
+searxngUrl.oninput = autosaveLater;
+mcpServers.oninput = autosaveLater;
+extraFreeModels.oninput = autosaveLater;
+if (maxPersistedReasoning) maxPersistedReasoning.oninput = autosaveLater;
+document.getElementById('refreshExtensionLogs')?.addEventListener('click', () => vscode.postMessage({ type: 'requestExtensionLogs' }));
+document.getElementById('clearExtensionLogs')?.addEventListener('click', () => vscode.postMessage({ type: 'clearExtensionLogs' }));
+window.addEventListener('message', async ({ data: m }) => {
+  switch (m.type) {
+    case 'extensionLogs': { const el = document.getElementById('extensionLogs'); if (el) el.textContent = (m.logs && m.logs.length) ? m.logs.join('\n') : 'No logs yet.'; break }
+    case 'editorContext': editorContext = { activeFile: m.activeFile || '', hasSelection: Boolean(m.hasSelection), selectionLines: m.selectionLines || '' }; renderContext(); renderProjectIndicator(); break;
+    case 'contextAttachments': attachments.push(...(m.attachments || []).filter(item => !attachments.some(existing => existing.kind === item.kind && ((item.kind === 'image' && existing.name === item.name) || (item.kind !== 'image' && existing.path === item.path))))); renderAttachments(); break;
+    case 'fileMentionResults': mentionResults = m.results || []; renderMentionMenu(mentionResults); break;
+    case 'project': { const nextPath = m.path || ''; if (projectIndicatorPath !== nextPath) projectIndexState = { status: 'idle', text: 'Preparing local project index…', indexed: 0, total: 0, index: null }; projectIndicatorFolder = m.name || 'No folder open'; projectIndicatorPath = nextPath; projectIndicator.classList.toggle('clickable', Boolean(projectIndicatorPath)); renderProjectIndicator(); renderContext(); refreshEmpty(); break }
+    case 'projectIndex': projectIndexState = { status: m.status || 'idle', text: m.text || '', indexed: m.indexed || 0, total: m.total || 0, index: m.index || null }; renderContext(); refreshEmpty(); break;
+    case 'conversations': conversations = m.conversations || []; activeConversationId = m.activeId; conversationTitle.textContent = conversations.find(x => x.id === activeConversationId)?.title || 'New conversation'; runningSet = new Set(conversations.filter(x => x.running).map(x => x.id)); queuedByConversation = new Map(conversations.map(x => [x.id, (x.queued || []).map((text, index) => ({ id: (x.queuedIds || [])[index] || ('legacy-' + index), text }))])); renderConversationMenu(); refreshEmpty(); updateQueuedVisibility(); modelButton.disabled = isRunning(); syncSendButton(); ensureOptimisticActivity(); updateSendMode(); updateJump(); break;
+    case 'conversation': if (editMessageState && editMessageState.conversationId !== m.id) { editMessageState = null; setEditBar(false); input.value = ''; attachments = []; renderAttachments(); resize() } if (m.id !== activeConversationId) hideCompactionOverlay(); activeConversationId = m.id; activeConversationItems = m.items || []; compactionUndoable = Boolean(m.compactionUndoable); compactionRedoable = Boolean(m.compactionRedoable); if (m.model) { selectedModel = m.model; modelButton.textContent = findModelName(m.model); modelButton.title = m.model } if (m.agentId) { selectedAgentId = m.agentId; syncAgentPill() } reasoningEffort = findEffort(m.reasoningEffort || 'none').id; syncEffortPill(); renderConversation(m.items); renderLive(m.id); updateQueuedVisibility(); modelButton.disabled = isRunning(); updateSendMode(); updateJump(); updateSessionStats(); break;
+    case 'restoreDraft': if ((!m.conversationId || m.conversationId === activeConversationId) && !input.value.trim()) { input.value = m.text || ''; resize(); input.focus() } break;
+    case 'settings': openSettings(m); break;
+    case 'settingsResult': { if (m.ok && (m.text === 'Settings saved.' || String(m.text || '').startsWith('Signed in to SleepyAI'))) { initialSetup = false; settingsView.classList.remove('onboarding'); if (pendingProviderKeyId && pendingProviderKey) { vscode.postMessage({ type: 'saveProviderApiKey', providerId: pendingProviderKeyId, apiKey: pendingProviderKey }); pendingProviderKeyId = ''; pendingProviderKey = '' } } clearTimeout(settingsSavedTimer); if (m.ok) { settingsResult.className = 'settings-result'; void settingsResult.offsetWidth; settingsResult.textContent = 'Saved'; settingsResult.className = 'settings-result ok'; settingsSavedTimer = setTimeout(() => { settingsResult.textContent = ''; settingsResult.className = 'settings-result' }, 1800) } else { settingsResult.textContent = m.text; settingsResult.className = 'settings-result bad' } break }
+    case 'apiKeyState': savedApiKeys[m.provider] = m.hasApiKey; renderProviderList(); break;
+    case 'providerModels': { if (pfFetchModels) pfFetchModels.disabled = false; if (providerForm.style.display === 'none') break; if (!m.ok) { pfModelsStatus.textContent = ''; pfModelsStatus.className = 'field-hint'; pfError.textContent = m.text; break } const ids = m.models || []; pfModels.value = ids.join(', '); pfError.textContent = ''; pfModelsStatus.textContent = m.text || ('Found ' + ids.length + ' models'); pfModelsStatus.className = 'field-hint'; const target = providerFormEditId && providersList.find(x => x.id === providerFormEditId); if (target) target.modelList = ids.length ? ids.slice() : undefined; break }
+    case 'agents': customAgentsList = m.agents || []; renderCustomAgents(); break;
+    case 'mcpConnections': mcpConnectionsList = m.connections || []; mcpStatusByName = {}; for (const status of (m.statuses || [])) mcpStatusByName[status.name] = status; renderMcpConnections(); break;
+    case 'mcpConnectionResult': { if (m.status) setMcpStatus(m.status.name, m.status); else if (m.statuses) for (const status of m.statuses) setMcpStatus(status.name, status); renderMcpConnections(); const authHint = m.status && m.status.state === 'auth_required' ? ' Sign in with OAuth: edit this connection and choose Connect OAuth.' : ''; if (settingsResult) { clearTimeout(settingsSavedTimer); if (m.ok) { settingsResult.className = 'settings-result'; void settingsResult.offsetWidth; settingsResult.textContent = m.text || 'Saved'; settingsResult.className = 'settings-result ok'; settingsSavedTimer = setTimeout(() => { settingsResult.textContent = ''; settingsResult.className = 'settings-result' }, 1800) } else { settingsResult.textContent = (m.text || 'MCP connection failed.') + authHint; settingsResult.className = 'settings-result bad' } } break }
+    case 'sleepyStatus': sleepyAccount = { loggedIn: Boolean(m.loggedIn), email: m.email || sleepyAccount?.email || '', tier: m.tier || sleepyAccount?.tier || '', limits: m.limits || sleepyAccount?.limits, balances: m.balances || sleepyAccount?.balances, subscription: m.subscription || sleepyAccount?.subscription, modelPrices: m.modelPrices || sleepyAccount?.modelPrices }; sleepyBusy = Boolean(m.busy); sleepyStatusText = m.text || ''; if (m.modelPrices && m.modelPrices.length) sleepyModelPrices = m.modelPrices; if (m.loggedIn && m.provider) { providersList = providersList || []; const existingIndex = providersList.findIndex(p => p.id === 'sleepyai'); if (existingIndex >= 0) providersList[existingIndex] = m.provider; else providersList.unshift(m.provider); activeProvider = 'sleepyai' } renderSleepyCard(); renderProviderList(); renderModelMenu(); if (usageView.classList.contains('visible')) renderUsage(); updateSessionStats(); refreshEmpty(); break;
+    case 'config': if (m.model) { selectedModel = m.model; modelButton.textContent = findModelName(m.model); modelButton.title = m.model } if (m.reasoningEffort) reasoningEffort = findEffort(m.reasoningEffort).id; syncEffortPill(); if (m.approvalMode) { approvalMode.value = m.approvalMode; syncSafetyControl() } if (m.agentId) { selectedAgentId = m.agentId; syncAgentPill() } break;
+    case 'models': { modelGroups = m.groups || []; selectedModel = m.selected || ''; modelButton.textContent = selectedModel ? findModelName(selectedModel) : 'Choose model…'; modelButton.title = selectedModel; renderModelMenu(); renderCompactionModelOptions(); renderSubagentModelOptions(); updateSessionStats(); break }
+    case 'modelRoute': { if (m.conversationId === activeConversationId) { const s = liveState(m.conversationId); ensureLiveActivity(s); s.activity.summary = 'Auto routed to ' + (findModelName(m.model) || m.model); if (currentTurn) { ensureActivity(); enableActivity(); const d = document.createElement('div'); d.className = 'route-note'; d.textContent = 'Auto → ' + (findModelName(m.model) || m.model) + (m.reason ? ' · ' + m.reason : ''); activityBody.appendChild(d); scrollActivity() } } break }
+    case 'modelsError': addError(m.text); break;
+    case 'showUsage': openUsageView(); break; case 'showMarketplace': openMarketplaceView(); break; case 'showPanel': openPanelView(m.panel); break; case 'marketplaceInstalled': installedSkills = m.skills || []; installedSkillsLoaded = true; renderInstalledSkills(); if (marketplaceView.classList.contains('visible')) renderMarketplaceResults(); if (skillPickerOpen) refreshSkillPicker(); break; case 'marketplaceResults': { marketplaceBusy = false; marketplaceCards = (m.skills || []).map(x => ({ key: x.githubUrl || x.name, name: x.name, author: x.author || '', description: x.description || '', meta: (x.stars ? String(x.stars) + ' ★' : '') + (x.author ? ' · ' + esc(x.author) : ''), installed: installedMatch(x.author, x.name) })); marketplaceActions = (m.skills || []).map(x => ({ preview: x.githubUrl ? { source: x.githubUrl, path: '' } : null, install: x.githubUrl ? { source: x.githubUrl, skill: undefined } : null })); marketplaceHeading = m.query ? 'Search results' : 'Popular skills'; marketplaceHint = m.query ? 'Try another search to explore more.' : 'Search above to discover more skills.'; marketplaceStatusText(m.query ? 'Found ' + (m.total || (m.skills || []).length) + ' skills for "' + m.query + '".' : '', true); renderMarketplaceResults(); break } case 'marketplaceRepoSkills': { marketplaceBusy = false; const source = m.owner + '/' + m.repo; marketplaceCards = (m.skills || []).map(x => ({ key: source + '/' + x.path, name: x.name, author: source, description: '', meta: 'from ' + esc(source), installed: installedMatch(source, x.name) })); marketplaceActions = (m.skills || []).map(x => ({ preview: { source, path: x.path }, install: { source, skill: x.name } })); marketplaceHeading = 'Skills in ' + source; marketplaceHint = 'Preview a skill before installing it.'; marketplaceStatusText((m.skills || []).length + ' skills found.', true); renderMarketplaceResults(); break } case 'marketplacePreview': { previewContent.innerHTML = markdown(m.markdown || ''); previewInstall.style.display = ''; document.getElementById('previewTitle').textContent = m.title || 'Skill preview'; break } case 'marketplaceInstallProgress': { const st = marketplaceInstalling[m.key]; if (st) { st.done = m.done || 0; st.total = m.total || 0; st.label = 'Installing… ' + (m.done || 0) + '/' + (m.total || 0) + ' files'; updateCardProgress(m.key); updatePreviewProgress(m.key) } break } case 'marketplaceResult': { if (m.key) delete marketplaceInstalling[m.key]; marketplaceStatusText(m.text, !!m.ok); if (m.ok) { if (previewState && previewState.key === m.key) { closeSkillPreview() } if (marketplaceView.classList.contains('visible')) vscode.postMessage({ type: 'requestMarketplaceInstalled' }) } else { if (previewState && previewState.key === m.key) { previewProgress.classList.add('visible', 'error'); previewProgressFill.style.width = '100%'; previewProgressLabel.textContent = m.text || 'Install failed.' } renderMarketplaceResults() } break } case 'marketplaceError': { marketplaceBusy = false; marketplaceStatusText(m.text || 'Request failed.', false); renderMarketplaceResults(); break }
+    case 'usage': usageData = m; if (usageView.classList.contains('visible')) renderUsage(); updateSessionStats(); break;
+    case 'panel': renderPanel(m); break;
+    case 'liveUsage': { if (m.conversationId && m.inputTokens !== undefined && m.outputTokens !== undefined) { liveRuns.set(m.conversationId, { model: m.model || '', provider: m.provider || '', input: m.inputTokens || 0, output: m.outputTokens || 0, cacheRead: m.cacheReadTokens || 0, cacheWrite: m.cacheWriteTokens || 0, speed: m.speed || 0, contextTokens: m.contextTokens || 0 }) } else if (m.conversationId) { liveRuns.delete(m.conversationId) } if (usageView.classList.contains('visible')) renderUsage(); updateSessionStats(); break }
+    case 'cliSettled': { liveByConversation.delete(m.conversationId); if (m.conversationId === activeConversationId) currentTurn = current = activity = activityBody = reasoning = null; break }
+    case 'user': { liveByConversation.set(m.conversationId, freshLive()); if (m.conversationId === activeConversationId) activeConversationItems.push(m.item); if (m.conversationId === activeConversationId) { const tmpBubble = currentTurn?.querySelector('.user-text'); if (currentTurn && tmpBubble) { const footer = currentTurn.querySelector('.message-footer'); if (footer) footer.remove(); currentTurn.appendChild(messageFooter(m.item, false)) } else { beginTurn(m.item) } } break }
+    case 'resume': { const s = liveState(m.conversationId); s.phase = 'thinking'; s.activity = null; s.currentRaw = m.partialText || ''; if (m.conversationId === activeConversationId) { currentTurn = document.querySelector('.turn:last-child') || null; current = activity = activityBody = reasoning = null; followOutput = true; if (m.partialText) { current = document.createElement('div'); current.className = 'assistant streaming'; current.dataset.raw = m.partialText; current.innerHTML = markdown(m.partialText); currentTurn.appendChild(current) } scroll(true) } break }
+    case 'workPhase': { const s = liveState(m.conversationId); s.phase = 'work'; if (s.activity) s.activity.reasoningParts.push(''); if (m.conversationId === activeConversationId) nextWorkPhase(); break }
+    case 'delta': { const s = liveState(m.conversationId); s.currentRaw += m.text; s.phase = 'text'; closeLiveActivity(s); if (m.conversationId === activeConversationId) streamPaint.schedule(s.currentRaw); break }
+    case 'reasoningDelta': { const s = liveState(m.conversationId); ensureLiveActivity(s); const parts = s.activity.reasoningParts; parts[parts.length - 1] += m.text; if (m.conversationId === activeConversationId) { if (!currentTurn) { currentTurn = document.querySelector('.turn:last-child'); if (!currentTurn) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; messages.appendChild(currentTurn) } } ensureActivity(); enableActivity(); reasoning.dataset.raw += m.text; reasoning.innerHTML = markdown(reasoning.dataset.raw); scrollActivity() } break }
+    case 'reasoningEnd': break;
+    case 'plan': { const s = liveState(m.conversationId); s.plan = { title: m.title, steps: m.steps, activeStep: m.activeStep, doneSteps: m.doneSteps, interrupted: Boolean(m.interrupted), done: Boolean(m.done) }; if (m.conversationId === activeConversationId) showPlan(m); break }
+    case 'subagent': { const s = liveState(m.conversationId); ensureLiveActivity(s); let sub = (s.activity.subagents || []).find(x => x.id === m.id); if (!sub) { sub = { id: m.id, role: m.role, name: m.name, done: false, ok: null, result: '', error: '' }; s.activity.subagents.push(sub); s.activity.taskCount++ } sub.name = m.name || sub.name; sub.role = m.role || sub.role; sub.done = m.phase === 'end'; if (m.phase === 'end') { sub.ok = m.ok !== false; sub.result = m.result || ''; sub.error = m.error || '' } s.activity.summary = m.phase === 'start' ? (m.name || 'Subagent working') : 'Working'; if (m.conversationId === activeConversationId) updateSubagent(m); break }
+    case 'tool': { const s = liveState(m.conversationId); ensureLiveActivity(s); let row = s.activity.tasks.find(t => t.id === m.id); if (row) { row.name = m.name; row.tool = m.tool || row.tool; row.done = m.phase === 'end'; row.failed = Boolean(m.failed); row.parentId = m.parentId || row.parentId; row.subagentRole = m.subagentRole || row.subagentRole; if (typeof m.args === 'string') row.args = m.args; if (typeof m.result === 'string') row.result = m.result; if (typeof m.durationMs === 'number') row.durationMs = m.durationMs; row.startedAt = m.phase === 'start' ? Date.now() : 0 } else { s.activity.tasks.push({ id: m.id, name: m.name, tool: m.tool, done: m.phase === 'end', failed: Boolean(m.failed), parentId: m.parentId || '', subagentRole: m.subagentRole || '', args: typeof m.args === 'string' ? m.args : '', result: typeof m.result === 'string' ? m.result : '', durationMs: typeof m.durationMs === 'number' ? m.durationMs : undefined, startedAt: m.phase === 'start' ? Date.now() : 0 }); s.activity.taskCount++ } s.activity.summary = m.phase === 'start' ? m.name : 'Working'; if (m.conversationId === activeConversationId) updateTask(m); break }
+    case 'retry': { const s = liveState(m.conversationId); ensureLiveActivity(s); s.activity.retries.push({ attempt: m.attempt, max: m.max, ok: null, error: m.error || '', backoffMs: m.backoffMs || 0 }); s.activity.taskCount++; s.activity.summary = 'Reconnecting ' + m.attempt + '/' + m.max + (m.error ? ' (' + m.error + ')' : ''); if (m.conversationId === activeConversationId) showRetry(m); break }
+    case 'retryEnd': { const s = liveState(m.conversationId); if (s.activity && s.activity.retries.length) { const last = s.activity.retries[s.activity.retries.length - 1]; last.ok = Boolean(m.ok) } if (m.conversationId === activeConversationId) finishRetry(m); break }
+    case 'changed': { const s = liveState(m.conversationId); ensureLiveActivity(s); const change = { action: m.action || 'Changed', path: m.path, additions: m.additions || 0, deletions: m.deletions || 0, preview: m.preview || [] }; s.activity.changed.push(change); if (m.conversationId === activeConversationId) { if (!currentTurn) break; ensureActivity(); enableActivity(); activityBody.appendChild(liveChangedRow(change)); scrollActivity() } break }
+    case 'command': break;
+    case 'contextNotice': { if (m.conversationId && m.conversationId !== activeConversationId) break; const el = document.createElement('div'); el.className = 'context-notice'; el.textContent = m.text || 'Conversation history was adjusted.'; messages.appendChild(el); scroll(true); break }
+    case 'error': { if (m.conversationId) { const s = liveState(m.conversationId); s.errorText = m.text; s.errorRetry = false; s.phase = 'error'; if (!m.keepTurn) closeLiveActivity(s); if (m.conversationId === activeConversationId) { flushStreamPaint(); addError(m.text, !!m.keepTurn); if (!m.keepTurn) finish() } } else { addError(m.text, !!m.keepTurn); if (!m.keepTurn) finish() } break }
+    case 'steered': if (m.conversationId === activeConversationId) finish(); break;
+    case 'generationError': liveByConversation.delete(m.conversationId); if (m.conversationId === activeConversationId) { flushStreamPaint(); activeConversationItems.push(m.item); updateSessionStats(); showGenerationError(m.item) } break;
+    case 'queuedPrompt': { const ids = m.ids || [], texts = m.prompts || []; if (texts.length) queuedByConversation.set(m.conversationId, texts.map((text, index) => ({ id: ids[index] || ('legacy-' + index), text }))); else queuedByConversation.delete(m.conversationId); updateQueuedVisibility(); break }
+    case 'state': if (m.running) runningSet.add(m.conversationId); else runningSet.delete(m.conversationId); modelButton.disabled = isRunning(); updateSendMode(); updateJump(); break;
+    case 'notify': { const choice = await showNotifyModal({ title: m.title, body: m.detail, ok: m.okLabel, cancel: m.cancelLabel, secondary: m.secondaryLabel, danger: Boolean(m.danger), risk: m.risk }); vscode.postMessage({ type: 'notifyResponse', id: m.id, choice }); break }
+    case 'compactProgress': handleCompactProgress(m); break;
+    case 'done': liveByConversation.delete(m.conversationId); if (m.conversationId === activeConversationId) { activeConversationItems.push(m.item); updateSessionStats(); finish(m.item) } break;
+  }
+})
+const panelsView = document.getElementById('panelsView'), panelsBody = document.getElementById('panelsBody'), panelsTitle = document.getElementById('panelsTitle');
+let panelKind = '';
+const PANEL_TITLES = { worktrees: 'Git Worktrees', index: 'Repository Index', agents: 'Custom Agents', tasks: 'Scheduled Tasks & Hooks', checkpoints: 'Undo History' };
+function openPanelView(panel) { panelKind = panel; panelsTitle.textContent = 'SleepyCode: ' + (PANEL_TITLES[panel] || 'Panel'); panelsBody.innerHTML = '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Loading…</div>'; document.querySelector('.app').style.display = 'none'; panelsView.classList.add('visible'); vscode.postMessage({ type: 'requestPanel', panel }) }
+function closePanelView() { panelsView.classList.remove('visible'); document.querySelector('.app').style.display = 'flex' }
+document.getElementById('panelsBack').onclick = closePanelView;
+document.getElementById('panelsRefresh').onclick = () => { if (panelKind) vscode.postMessage({ type: 'requestPanel', panel: panelKind }) };
+function renderPanelRows(rows) { if (!rows || !rows.length) return '<div style="font-size:11px;color:var(--vscode-descriptionForeground);padding:8px 0">Nothing to show yet.</div>'; return rows.map(r => '<div class="settings-row"><div style="flex:1;min-width:0"><div style="font-weight:600">' + esc(r.title) + '</div><div style="font-size:11px;color:var(--vscode-descriptionForeground);word-break:break-word">' + esc(r.detail || '') + '</div></div></div>').join('') }
+function renderPanel(m) { if (panelKind && m.panel !== panelKind) return; panelsBody.innerHTML = renderPanelRows(m.rows || []); const hint = m.hint ? '<p class="field-hint" style="margin-top:10px">' + esc(m.hint) + '</p>' : ''; panelsBody.innerHTML += hint }
+vscode.postMessage({ type: 'ready' }); vscode.postMessage({ type: 'requestMarketplaceInstalled' })
+  `;
 }

@@ -17,6 +17,7 @@ import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectRe
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage } from './retry-core.ts';
+import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
@@ -2924,6 +2925,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (record.type === 'changed') updatePending(true);
     };
     const activeTasks = new Map<string, WorkItem>();
+    // Tool start timestamps, so the card can show a real duration instead of nothing. Scoped to the
+    // run: a map that outlived it would leak one entry per tool call for the session's lifetime.
+    const toolStartedAt = new Map<string, number>();
     const reasoningLimit = this.config().maxPersistedReasoning;
     let reasoningBuffer = '';
     // Longest streamed text before an interruption; preserved on error items so
@@ -3562,16 +3566,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 activeTasks.set(toolCall.toolCallId, taskEntry);
                 work.push(taskEntry);
                 workStartedAt ||= Date.now();
-                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text });
+                toolStartedAt.set(toolCall.toolCallId, Date.now());
+                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text, args: toolArgsText(toolCall.input) });
                 this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
                 updatePending(true);
               },
-              onToolExecutionEnd: ({ toolCall }) => {
+              onToolExecutionEnd: ({ toolCall, toolOutput }) => {
                 this.notifyHooks('afterTool', { tool: toolCall.toolName });
                 if (toolCall.toolName === 'plan') return;
                 const taskEntry = activeTasks.get(toolCall.toolCallId);
                 if (taskEntry) taskEntry.done = true;
-                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
+                const elapsed = durationMs(toolStartedAt.get(toolCall.toolCallId));
+                toolStartedAt.delete(toolCall.toolCallId);
+                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input), args: toolArgsText(toolCall.input), result: toolResultText(toolOutput), durationMs: elapsed, failed: toolOutput?.type === 'tool-error' });
                 updatePending(true);
               },
               onStepFinish: step => {
