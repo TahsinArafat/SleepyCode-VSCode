@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { assertSource } from './source-assert.mjs';
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 
 test('usage aggregate carries cache read and write tokens', () => {
@@ -33,17 +34,17 @@ test('agent reads provider cache token details', () => {
 
 test('webview cost model bills cache reads at the cache rate', () => {
   const runtime = read('src/webview/runtime.ts');
-  assert.match(runtime, /cacheReadPrice/);
-  assert.match(runtime, /cacheWritePrice/);
-  assert.match(runtime, /cachedRead=Math\.min\(cacheReadTok,inTok\)/);
-  assert.match(runtime, /uncachedInput=Math\.max\(0,inTok-cachedRead\)/);
-  assert.match(runtime, /cacheRead:cacheReadCost/);
-  assert.match(runtime, /total:inputCost\+cacheReadCost\+cacheWriteCost\+outputCost/);
+  assertSource(runtime, /cacheReadPrice/);
+  assertSource(runtime, /cacheWritePrice/);
+  assertSource(runtime, /cachedRead=Math\.min\(cacheReadTok,inTok\)/);
+  assertSource(runtime, /uncachedInput=Math\.max\(0,inTok-cachedRead\)/);
+  assertSource(runtime, /cacheRead:cacheReadCost/);
+  assertSource(runtime, /total:inputCost\+cacheReadCost\+cacheWriteCost\+outputCost/);
 });
 
 test('webview live usage and session info surface cache tokens', () => {
   const runtime = read('src/webview/runtime.ts');
-  assert.match(runtime, /cacheRead:m\.cacheReadTokens\|\|0/);
-  assert.match(runtime, /cacheReadTok\+=live\.cacheRead\|\|0/);
-  assert.match(runtime, /cacheCell/);
+  assertSource(runtime, /cacheRead:m\.cacheReadTokens\|\|0/);
+  assertSource(runtime, /cacheReadTok\+=live\.cacheRead\|\|0/);
+  assertSource(runtime, /cacheCell/);
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { assertSource } from './source-assert.mjs';
 import { droppedMessageCount } from '../src/iteration-core.ts';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
@@ -23,7 +24,7 @@ test('a deliberate stop is not reported as a failure', () => {
   assert.match(agent, /code: 'interrupted'/);
   // Sidebar status must distinguish stopped from failed.
   assert.match(agent, /errorInfo\?\.code === 'interrupted' \? 'stopped' : 'failed'/);
-  assert.match(runtime, /x\.status==='stopped'\?'Stopped'/);
+  assertSource(runtime, /x\.status==='stopped'\?'Stopped'/);
 });
 
 test('an orphaned run failure leaves a persisted, retryable turn', () => {
@@ -38,7 +39,7 @@ test('an orphaned run failure leaves a persisted, retryable turn', () => {
 
 test('the orphaned error renders with a retry action', () => {
   // addError only draws a retry button when passed the flag; the error case passed none.
-  assert.match(runtime, /case'error':[\s\S]{0,400}addError\(m\.text,!!m\.keepTurn\)/);
+  assertSource(runtime, /case'error':[\s\S]{0,400}addError\(m\.text,!!m\.keepTurn\)/);
 });
 
 test('a stopped turn still offers retry so its partial work is recoverable', () => {

@@ -18,6 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { assertSource } from './source-assert.mjs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { ESCAPE_HTML_SOURCE, HTML_ESCAPES_SOURCE } from '../src/webview/runtime-core.ts';
@@ -171,8 +172,8 @@ test('the injected source is safe to splice: no template-literal interpolation o
 
 test('the source is spliced into the runtime template and checked for syntax by the build', () => {
   const runtime = readFileSync(join(root, 'src/webview/runtime.ts'), 'utf8');
-  assert.match(runtime, /import \{ HIGHLIGHT_SOURCE \} from '\.\/highlight';/);
-  assert.match(runtime, /\$\{HIGHLIGHT_SOURCE\}/);
+  assertSource(runtime, /import \{ HIGHLIGHT_SOURCE \} from '\.\/highlight';/);
+  assertSource(runtime, /\$\{HIGHLIGHT_SOURCE\}/);
 });
 
 test("runtime.ts's own template survives a stray backtick or interpolation", () => {

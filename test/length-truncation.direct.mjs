@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { assertSource } from './source-assert.mjs';
 import { resumeFromLastAssistant } from '../src/session-core.ts';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
@@ -37,6 +38,6 @@ test('resume derives a max_tokens reason and does not build an error card', () =
 });
 
 test('the pause card explains a truncation instead of a step limit', () => {
-  assert.match(runtime, /item\.pauseReason==='max_tokens'/);
-  assert.match(runtime, /Response truncated/);
+  assertSource(runtime, /item\.pauseReason==='max_tokens'/);
+  assertSource(runtime, /Response truncated/);
 });

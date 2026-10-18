@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { assertSource } from './source-assert.mjs';
 
 const html = readFileSync(new URL('../src/webview.ts', import.meta.url), 'utf8');
 const runtime = readFileSync(new URL('../src/webview/runtime.ts', import.meta.url), 'utf8');
@@ -33,9 +34,9 @@ test('the top bar keeps three actions inline and the rest behind a menu', () => 
 });
 
 test('the overflow menu opens, closes, and exposes its items as labelled rows', () => {
-  assert.match(runtime, /function setMoreMenuOpen/);
-  assert.match(runtime, /moreBtn\.setAttribute\('aria-expanded'/);
-  assert.match(runtime, /chat-more-label/);
+  assertSource(runtime, /function setMoreMenuOpen/);
+  assertSource(runtime, /moreBtn\.setAttribute\('aria-expanded'/);
+  assertSource(runtime, /chat-more-label/);
   assert.match(styles, /\.chat-more-menu\.open\{display:block\}/);
   assert.match(styles, /\.chat-more-item\{/);
 });
