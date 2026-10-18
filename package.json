@@ -42,6 +42,44 @@
   "main": "./dist/extension.js",
   "icon": "media/icon.png",
   "contributes": {
+    "keybindings": [
+      {
+        "command": "sleepycode.chat.stop",
+        "key": "ctrl+alt+period",
+        "mac": "cmd+alt+period",
+        "when": "view == sleepycode.chat"
+      },
+      {
+        "command": "sleepycode.chat.stop",
+        "key": "ctrl+.",
+        "mac": "cmd+.",
+        "when": "view == sleepycode.chat"
+      },
+      {
+        "command": "sleepycode.chat.clearComposer",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "view == sleepycode.chat && !suggestWidgetVisible"
+      },
+      {
+        "command": "sleepycode.chat.newLine",
+        "key": "ctrl+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "view == sleepycode.chat"
+      },
+      {
+        "command": "sleepycode.chat.copyLast",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "view == sleepycode.chat"
+      },
+      {
+        "command": "sleepycode.chat.shortcuts",
+        "key": "ctrl+/",
+        "mac": "cmd+/",
+        "when": "view == sleepycode.chat"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {

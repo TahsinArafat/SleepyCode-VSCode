@@ -1073,6 +1073,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.newConversation();
   }
 
+  /**
+   * Forward a contributed keyboard shortcut to the webview, which owns the composer and transcript.
+   *
+   * Routing through the extension host rather than reading the keys straight off the DOM is
+   * deliberate. VS Code owns several of these chords — `Ctrl/Cmd+K` is a prefix for its own chord
+   * commands — and would swallow them before the webview ever saw a keydown. Contributing them as
+   * keybindings is what gives the webview the key at all.
+   */
+  shortcut(action: 'stop' | 'clearComposer' | 'newLine' | 'copyLast' | 'shortcuts'): void {
+    this.post({ type: 'shortcut', action });
+  }
+
   dispose(): void {
     this.terminals.dispose();
     this.browserPreview.dispose();

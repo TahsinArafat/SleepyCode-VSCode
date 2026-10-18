@@ -175,14 +175,14 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
     {command:'/usage',label:'Usage',desc:'Open SleepyAI usage and billing.',kind:'action',group:'Workspace'}
   ];
   let slashResults=[],slashSelectedIndex=0,skillPickerOpen=false,installedSkillsLoaded=false;
-  function closeSlashMenu(){skillPickerOpen=false;slashMenu?.classList.remove('open');if(slashMenu)slashMenu.innerHTML='';slashSelectedIndex=0;resetAnchoredMenu(slashMenu)}
-  function syncSlashSelection(){const options=[...slashMenu.querySelectorAll('[data-slash-index]')];options.forEach((option,index)=>option.classList.toggle('selected',index===slashSelectedIndex));options[slashSelectedIndex]?.scrollIntoView({block:'nearest'})}
+  function closeSlashMenu(){skillPickerOpen=false;slashMenu?.classList.remove('open');if(slashMenu)slashMenu.innerHTML='';slashSelectedIndex=0;input.removeAttribute('aria-activedescendant');resetAnchoredMenu(slashMenu)}
+  function syncSlashSelection(){const options=[...slashMenu.querySelectorAll('[data-slash-index]')];options.forEach((option,index)=>{const selected=index===slashSelectedIndex;option.classList.toggle('selected',selected);option.id='slashOption-'+index;option.setAttribute('role','option');option.setAttribute('aria-selected',selected?'true':'false')});const active=options[slashSelectedIndex];if(active)input.setAttribute('aria-activedescendant',active.id);else input.removeAttribute('aria-activedescendant');active?.scrollIntoView({block:'nearest'})}
   function moveSlashSelection(delta){if(!slashResults.length)return;slashSelectedIndex=(slashSelectedIndex+delta+slashResults.length)%slashResults.length;syncSlashSelection()}
   function quoteSlashSkill(name){return /\s/.test(name)?'"'+name.replace(/"/g,'\\"')+'"':name}
   function slashOptionHtml(item,index,selected){return '<button type="button" class="slash-option'+(selected?' selected':'')+'" data-slash-index="'+index+'"><span class="slash-command">'+esc(item.command)+'</span><span class="slash-copy"><span class="slash-label">'+esc(item.label||'')+'</span><span class="slash-desc">'+esc(item.desc||'')+'</span></span></button>'}
   function groupedSlashHtml(results){let html='',last='';results.forEach((item,index)=>{const group=item.group||'';if(group&&group!==last){html+='<div class="slash-group">'+esc(group)+'</div>';last=group}html+=slashOptionHtml(item,index,index===0)});return html}
   function bindSlashOptions(){slashMenu.querySelectorAll('[data-slash-index]').forEach(button=>button.onclick=()=>selectSlash(Number(button.dataset.slashIndex)))}
-  function renderSlashMenu(results){slashResults=results;slashSelectedIndex=0;if(!slashMenu)return;slashMenu.innerHTML=groupedSlashHtml(results);slashMenu.classList.toggle('open',results.length>0);if(results.length)requestAnimationFrame(()=>placeAnchoredMenu(slashMenu,composerBox||input));else resetAnchoredMenu(slashMenu);bindSlashOptions()}
+  function renderSlashMenu(results){slashResults=results;slashSelectedIndex=0;if(!slashMenu)return;slashMenu.innerHTML=groupedSlashHtml(results);slashMenu.classList.toggle('open',results.length>0);if(results.length)requestAnimationFrame(()=>placeAnchoredMenu(slashMenu,composerBox||input));else resetAnchoredMenu(slashMenu);bindSlashOptions();syncSlashSelection()}
   function selectSlash(index){const item=slashResults[index];if(!item||item.kind==='info')return;if(item.skill){input.value='/skill '+quoteSlashSkill(item.skill)+' ';closeSlashMenu()}else if(item.command==='/skill'){input.value='/skill ';input.focus();input.setSelectionRange(input.value.length,input.value.length);resize();updateSlashMenu();return}else{input.value=item.command+(item.kind==='prompt'?' ':'');closeSlashMenu()}input.focus();input.setSelectionRange(input.value.length,input.value.length);resize()}
   function renderSlashCommandsPalette(){if(!slashMenu)return;renderSlashMenu(SLASH_COMMANDS)}
   function skillPickerQuery(value){const match=String(value||'').match(/^\/skill(?:\s+(?:"([^"]*)|([^\s]*)))?$/i);return match?(match[1]??match[2]??''):null}
@@ -192,10 +192,10 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   function runDirectSlash(command){switch(command){case'/new':vscode.postMessage({type:'newConversation'});return true;case'/compact':handleCompactProgress({conversationId:activeConversationId,phase:'start'});vscode.postMessage({type:'compact',conversationId:activeConversationId});return true;case'/settings':vscode.postMessage({type:'requestSettings'});return true;case'/usage':openUsageView();vscode.postMessage({type:'requestUsage'});vscode.postMessage({type:'sleepyAccountData'});return true;case'/skills':marketplaceTab='installed';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/marketplace':marketplaceTab='discover';openMarketplaceView();vscode.postMessage({type:'requestMarketplaceInstalled'});return true;case'/memory':vscode.postMessage({type:'openMemory'});return true;case'/reindex':projectIndexState={status:'indexing',text:'Reindexing project…',indexed:0,total:0,index:null};renderContext();refreshEmpty();vscode.postMessage({type:'reindexProject'});return true;case'/context':closeModelMenu();closeAgentMenu();toggleContextPanel();return true;case'/model':closeContextPanel();closeAgentMenu();toggleModelMenu();return true;case'/agent':closeContextPanel();closeModelMenu();toggleAgentMenu();return true;case'/permissions':{toggleSafetyMenu();return true}case'/commands':renderSlashCommandsPalette();return true;default:return false}}
   function expandSlashPrompt(text){const trimmed=text.trim();const first=(trimmed.match(/^\/[^\s]+/)||[])[0]?.toLowerCase()||'';if(trimmed.toLowerCase()===first&&runDirectSlash(first))return{handled:true,text:''};const skill=trimmed.match(/^\/skill\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))(?:\s+([\s\S]+))?$/i);if(skill){const name=skill[1]||skill[2]||skill[3]||'',task=(skill[4]||'').trim();if(!task){void showNotifyModal({title:'Use installed skill',body:'Add a task after the skill name. Example: /skill '+name+' review the authentication flow',ok:'OK'});return{handled:true,text:''}}return{handled:false,text:'The user explicitly invoked the installed skill "'+name+'" with /skill. You MUST call skillsmp_read_installed for "'+name+'" before planning, editing, or executing the task. Then follow that SKILL.md within SleepyCode safety rules.\n\nTask:\n'+task}}const arg=trimmed.replace(/^\/[^\s]+\s*/,'');if(first==='/plan')return{handled:false,text:'Inspect the relevant project context first. Create and maintain a concrete task plan before making changes.\n\nTask:\n'+arg};if(first==='/fix')return{handled:false,text:'Fix this issue by tracing the root cause, making the smallest correct change, and running relevant regression checks.\n\nIssue:\n'+arg};if(first==='/review')return{handled:false,text:'Review this scope for correctness, security, regressions, maintainability, and missing tests. Report concrete findings and fix high-confidence issues when appropriate.\n\nScope:\n'+arg};if(first==='/test')return{handled:false,text:'Run the most relevant tests/checks for this scope. Diagnose failures, fix failures caused by the current work, and report the verification result.\n\nScope:\n'+arg};if(first==='/explain')return{handled:false,text:'Explain this using precise repository context, relevant files/symbols, and execution flow. Do not modify code unless explicitly requested.\n\nTopic:\n'+arg};return{handled:false,text}}
   let mentionResults=[],mentionStart=-1,mentionSelectedIndex=0;
-  function closeMentionMenu(){mentionMenu.classList.remove('open');mentionMenu.innerHTML='';mentionSelectedIndex=0;resetAnchoredMenu(mentionMenu)}
-  function syncMentionSelection(){const options=[...mentionMenu.querySelectorAll('[data-mention-index]')];options.forEach((option,index)=>option.classList.toggle('selected',index===mentionSelectedIndex));options[mentionSelectedIndex]?.scrollIntoView({block:'nearest'})}
+  function closeMentionMenu(){mentionMenu.classList.remove('open');mentionMenu.innerHTML='';mentionSelectedIndex=0;input.removeAttribute('aria-activedescendant');resetAnchoredMenu(mentionMenu)}
+  function syncMentionSelection(){const options=[...mentionMenu.querySelectorAll('[data-mention-index]')];options.forEach((option,index)=>{const selected=index===mentionSelectedIndex;option.classList.toggle('selected',selected);option.id='mentionOption-'+index;option.setAttribute('role','option');option.setAttribute('aria-selected',selected?'true':'false')});const active=options[mentionSelectedIndex];if(active)input.setAttribute('aria-activedescendant',active.id);else input.removeAttribute('aria-activedescendant');active?.scrollIntoView({block:'nearest'})}
   function moveMentionSelection(delta){if(!mentionResults.length)return;mentionSelectedIndex=(mentionSelectedIndex+delta+mentionResults.length)%mentionResults.length;syncMentionSelection()}
-  function renderMentionMenu(results){mentionSelectedIndex=0;mentionMenu.innerHTML=results.map((item,index)=>'<button type="button" class="mention-option'+(index===mentionSelectedIndex?' selected':'')+'" data-mention-index="'+index+'"><span>'+esc(item.path)+'</span><span class="mention-kind">'+esc(item.kind)+'</span></button>').join('');mentionMenu.classList.toggle('open',results.length>0);if(results.length)requestAnimationFrame(()=>placeAnchoredMenu(mentionMenu,composerBox||input));else resetAnchoredMenu(mentionMenu);mentionMenu.querySelectorAll('[data-mention-index]').forEach(button=>button.onclick=()=>selectMention(Number(button.dataset.mentionIndex)))}
+  function renderMentionMenu(results){mentionSelectedIndex=0;mentionMenu.innerHTML=results.map((item,index)=>'<button type="button" class="mention-option'+(index===mentionSelectedIndex?' selected':'')+'" data-mention-index="'+index+'"><span>'+esc(item.path)+'</span><span class="mention-kind">'+esc(item.kind)+'</span></button>').join('');mentionMenu.classList.toggle('open',results.length>0);if(results.length)requestAnimationFrame(()=>placeAnchoredMenu(mentionMenu,composerBox||input));else resetAnchoredMenu(mentionMenu);mentionMenu.querySelectorAll('[data-mention-index]').forEach(button=>button.onclick=()=>selectMention(Number(button.dataset.mentionIndex)));syncMentionSelection()}
   function selectMention(index){const item=mentionResults[index];if(!item||mentionStart<0)return;const cursor=input.selectionStart;input.value=input.value.slice(0,mentionStart)+'@'+item.path+' '+input.value.slice(cursor);input.selectionStart=input.selectionEnd=mentionStart+item.path.length+2;closeMentionMenu();input.focus();resize()}
   function updateMentionQuery(){const cursor=input.selectionStart;const before=input.value.slice(0,cursor);const match=before.match(/(?:^|\s)@([^\s@]*)$/);if(!match){closeMentionMenu();return}mentionStart=cursor-match[1].length-1;vscode.postMessage({type:'fileMentionQuery',query:match[1]})}
   input.addEventListener('input',()=>{resize();updateMentionQuery();updateSlashMenu()});
@@ -259,6 +259,46 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   ${STREAM_RENDER_SOURCE}
   ${STREAM_FRAME_SOURCE}
   ${HIGHLIGHT_SOURCE}
+  /**
+   * Keyboard support for the disclosure menus, in one place.
+   *
+   * These are disclosure popovers, not ARIA menus: their rows are real <button>s rendered from
+   * changing data, so tabbing through them is legitimate. Claiming role="menu" would promise arrow
+   * navigation, roving tabindex and active-descendant, which would then be wrong for every reader.
+   * So we keep native buttons and honour what aria-expanded actually promises instead.
+   */
+  const MENU_WRAPPER={panel:'#modelMenu,#agentMenu,#safetyMenu,#effortMenu,#conversationMenu,#moreActionsMenu,moreMenu'};
+  function setMenuOpen(trigger,panel,open){if(!trigger||!panel)return;panel.classList.toggle('open',open);trigger.setAttribute('aria-expanded',open?'true':'false');const host=trigger.closest('.dropdown');if(host)host.classList.toggle('menu-open',open)}
+  // Rows are re-rendered from data, so always re-query rather than caching: a stale list would
+  // move focus to an element that is no longer in the document.
+  function menuRows(trigger,panel){return Array.prototype.filter.call(panel.querySelectorAll('button:not([disabled]),[tabindex]:not([tabindex="-1"]),input,a[href]'),el=>!el.closest('[hidden]')&&!el.classList.contains('code-toggle'))}
+  // The model menu leads with a search field. It is a control for filtering, not an item to pick,
+  // so arrow navigation starts at the first real result; Tab still reaches the search box.
+  function menuNavRows(trigger,panel){const rows=menuRows(trigger,panel);const filtered=rows.filter(el=>!el.classList.contains('model-search'));return filtered.length?filtered:rows}
+  function focusRowAt(trigger,panel,index){let rows=null,current=index;for(let guard=0;guard<8;guard++){rows=menuNavRows(trigger,panel);if(!rows.length)break;const el=rows[Math.max(0,Math.min(rows.length-1,current))];if(!el)break;el.focus();if(el===document.activeElement)return el;current=++index}return null}
+  function restoreMenuFocus(trigger){const target=trigger&&trigger.offsetParent!==null?trigger:null;if(target)target.focus()}
+  function openMenuFromKeyboard(trigger,panel,toggle,first){if(!trigger||!panel)return;if(!panel.classList.contains('open'))toggle();const go=()=>{const r=menuNavRows(trigger,panel);const el=first?r[r.length-1]:r[0];if(el)el.focus();else panel.focus()};go();requestAnimationFrame(go)}
+  function bindMenuKeyboard(trigger,panel,toggle,close){if(!trigger||!panel)return;
+    trigger.addEventListener('keydown',event=>{const key=event.key;
+      if(key==='ArrowDown'||key==='ArrowUp'){event.preventDefault();event.stopPropagation();openMenuFromKeyboard(trigger,panel,toggle,key==='ArrowUp');return}
+      // Enter and Space are handled by the native click, which is what the dialog/expanded
+      // semantics document. Escape is a no-op here because a closed button has nothing to dismiss.
+    });
+    panel.addEventListener('keydown',event=>{const key=event.key;const rows=menuNavRows(trigger,panel);const index=rows.indexOf(document.activeElement);
+      if(key==='Escape'){event.preventDefault();event.stopPropagation();close();restoreMenuFocus(trigger);return}
+      if(key==='ArrowDown'||key==='ArrowUp'){event.preventDefault();event.stopPropagation();
+        if(!rows.length)return;
+        const next=key==='ArrowDown'?(index<0?0:(index+1)%rows.length):(index<0?rows.length-1:(index-1+rows.length)%rows.length);
+        rows[next].focus();return}
+      if(key==='Home'||key==='End'){if(!rows.length)return;event.preventDefault();event.stopPropagation();rows[key==='Home'?0:rows.length-1].focus();return}
+      if(key==='Tab'){close();return}
+    });
+    // Focus leaving the whole popover (shift-tab out of the first row, or a click elsewhere) closes
+    // it, so an abandoned menu never stays painted over the transcript.
+    panel.addEventListener('focusout',event=>{const next=event.relatedTarget;if(!next)return;if(panel.contains(next)||trigger.contains(next))return;close()});
+  }
+  // Wiring lives at the end of the module, next to the other document-level handlers, so that every
+  // toggle/close function above is already initialised when these bind.
   const mathTokens=[];
   const mathStart=String.fromCharCode(57346),mathEnd=String.fromCharCode(57347);
   const katexApi=()=>window.katex;
@@ -284,8 +324,14 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   }
   function restoreMath(html){return String(html).replace(new RegExp(mathStart+'(\\d+)'+mathEnd,'g'),(_,index)=>mathTokens[Number(index)]||'')}
   const notifyBackdrop=document.getElementById('notifyBackdrop'),notifyModal=document.getElementById('notifyModal'),notifyTitle=document.getElementById('notifyTitle'),notifyBody=document.getElementById('notifyBody'),notifyIcon=document.getElementById('notifyIcon'),notifyRisk=document.getElementById('notifyRisk'),notifyOk=document.getElementById('notifyOk'),notifyCancel=document.getElementById('notifyCancel'),notifySecondary=document.getElementById('notifySecondary'),notifyClose=document.getElementById('notifyClose');let notifyQueue=[],notifyBusy=false;
-  function showNotifyModal(opts){return new Promise(resolve=>{notifyQueue.push({opts,resolve});drainNotify()})}
-  function drainNotify(){if(notifyBusy||!notifyQueue.length)return;notifyBusy=true;const job=notifyQueue.shift(),opts=job.opts;notifyTitle.textContent=opts.title||'SleepyCode';notifyBody.textContent=opts.body||'';notifyModal.classList.toggle('danger',Boolean(opts.danger));notifyIcon.style.display=opts.icon===false?'none':'';const risk=opts.risk||'';notifyRisk.textContent=risk==='high'?'High risk':risk==='medium'?'Review required':risk==='low'?'Low risk':'';notifyRisk.className='notify-risk'+(risk?' '+risk:'');notifyRisk.style.display=risk?'':'none';notifyOk.textContent=opts.ok||'OK';notifyOk.classList.toggle('danger',Boolean(opts.danger));notifyCancel.textContent=opts.cancel||'Cancel';notifyCancel.style.display=opts.cancel?'':'none';notifySecondary.textContent=opts.secondary||'';notifySecondary.style.display=opts.secondary?'':'none';notifyBackdrop.classList.add('open');setTimeout(()=>{(opts.cancel!==false?notifyCancel:notifyOk).focus()},0);window.__resolveNotify=(choice)=>{notifyBusy=false;notifyBackdrop.classList.remove('open');job.resolve(choice);drainNotify()}}
+  // Focus must come back. An overlay that swallows focus strands keyboard users on <body>, so
+  // every overlay records where focus was and hands it back when it closes. The previous element
+  // can be gone by then (its turn re-rendered), so restoration falls back to the composer.
+  function captureFocus(){const previous=document.activeElement;return previous&&previous!==document.body?previous:null}
+  function restoreFocus(previous){if(previous&&previous.isConnected&&typeof previous.focus==='function'){previous.focus();if(document.activeElement===previous)return}
+    if(input&&typeof input.focus==='function')input.focus()}
+  function showNotifyModal(opts){return new Promise(resolve=>{notifyQueue.push({opts,resolve,previous:captureFocus()});drainNotify()})}
+  function drainNotify(){if(notifyBusy||!notifyQueue.length)return;notifyBusy=true;const job=notifyQueue.shift(),opts=job.opts;notifyTitle.textContent=opts.title||'SleepyCode';notifyBody.textContent=opts.body||'';notifyModal.classList.toggle('danger',Boolean(opts.danger));notifyIcon.style.display=opts.icon===false?'none':'';const risk=opts.risk||'';notifyRisk.textContent=risk==='high'?'High risk':risk==='medium'?'Review required':risk==='low'?'Low risk':'';notifyRisk.className='notify-risk'+(risk?' '+risk:'');notifyRisk.style.display=risk?'':'none';notifyOk.textContent=opts.ok||'OK';notifyOk.classList.toggle('danger',Boolean(opts.danger));notifyCancel.textContent=opts.cancel||'Cancel';notifyCancel.style.display=opts.cancel?'':'none';notifySecondary.textContent=opts.secondary||'';notifySecondary.style.display=opts.secondary?'':'none';notifyBackdrop.classList.add('open');setTimeout(()=>{(opts.cancel!==false?notifyCancel:notifyOk).focus()},0);window.__resolveNotify=(choice)=>{notifyBusy=false;notifyBackdrop.classList.remove('open');if(!notifyQueue.length)restoreFocus(job.previous);job.resolve(choice);drainNotify()}}
   notifyOk.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('ok')};notifyCancel.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifySecondary.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('secondary')};notifyClose.onclick=()=>{if(window.__resolveNotify)window.__resolveNotify('cancel')};notifyBackdrop.onclick=e=>{if(e.target===notifyBackdrop&&window.__resolveNotify)window.__resolveNotify('cancel')};document.addEventListener('keydown',e=>{if(e.key==='Escape'&&window.__resolveNotify)window.__resolveNotify('cancel')});
   function approvalLanguage(kind,command){const file=String(command||'');if(kind==='command')return'shell';const m=file.match(/\.([a-z0-9]+)$/i);return m&&highlightLanguageId(m[1])?m[1].toLowerCase():'diff'}
   function approvalRiskLabel(risk){return risk==='high'?'High risk':risk==='medium'?'Review required':risk==='low'?'Low risk':''}
@@ -297,9 +343,9 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   // different conversation, a collapsed sidebar, a hidden view — keeps the modal, so the set of
   // things that can execute is identical either way. The reply is the same notifyResponse either path.
   function approvalCanRenderInline(a){return Boolean(a&&a.conversationId&&a.conversationId===activeConversationId)&&Boolean(messages&&messages.isConnected&&messages.getClientRects().length)}
-  function showInlineApproval(o){return new Promise(resolve=>{const card=document.createElement('div');card.className='approval-card pending'+(o.danger?' danger':'');card.setAttribute('role','group');card.setAttribute('aria-live','assertive');card.innerHTML=approvalCardHead(o)+'<div class="approval-actions"><button type="button" class="approval-ok">'+esc(o.ok||'Allow once')+'</button>'+(o.secondary?'<button type="button" class="approval-secondary">'+esc(o.secondary)+'</button>':'')+'<button type="button" class="approval-cancel">'+esc(o.cancel||'Cancel')+'</button></div>';
+  function showInlineApproval(o){return new Promise(resolve=>{const previous=captureFocus();const card=document.createElement('div');card.className='approval-card pending'+(o.danger?' danger':'');card.setAttribute('role','group');card.setAttribute('aria-live','assertive');card.innerHTML=approvalCardHead(o)+'<div class="approval-actions"><button type="button" class="approval-ok">'+esc(o.ok||'Allow once')+'</button>'+(o.secondary?'<button type="button" class="approval-secondary">'+esc(o.secondary)+'</button>':'')+'<button type="button" class="approval-cancel">'+esc(o.cancel||'Cancel')+'</button></div>';
     let settled=false;
-    const settle=choice=>{if(settled)return;settled=true;card.classList.remove('pending');card.classList.add('decided');card.dataset.approvalDecision=choice==='ok'?'once':choice==='secondary'?'session':'rejected';const actions=card.querySelector('.approval-actions');if(actions)actions.remove();const line=document.createElement('div');line.className='approval-decision';line.textContent=approvalDecisionLabel(card.dataset.approvalDecision);card.appendChild(line);resolve(choice)};
+    const settle=choice=>{if(settled)return;settled=true;card.classList.remove('pending');card.classList.add('decided');card.dataset.approvalDecision=choice==='ok'?'once':choice==='secondary'?'session':'rejected';const actions=card.querySelector('.approval-actions');if(actions)actions.remove();const line=document.createElement('div');line.className='approval-decision';line.textContent=approvalDecisionLabel(card.dataset.approvalDecision);card.appendChild(line);restoreFocus(previous);resolve(choice)};
     const ok=card.querySelector('.approval-ok');if(ok)ok.onclick=()=>settle('ok');
     const secondary=card.querySelector('.approval-secondary');if(secondary)secondary.onclick=()=>settle('secondary');
     const cancel=card.querySelector('.approval-cancel');if(cancel)cancel.onclick=()=>settle('cancel');
@@ -919,7 +965,10 @@ function errorActions() { const actions = document.createElement('div'); actions
 function addError(text, retry) { document.getElementById('empty')?.remove(); const d = document.createElement('div'); d.className = 'error'; d.textContent = text; if (retry) d.appendChild(errorActions()); messages.appendChild(d); scroll() }
 function interruptedMarker() { const marker = document.createElement('div'); marker.className = 'interrupted-note'; marker.textContent = 'Response interrupted here — retry continues from this point'; return marker }
 function showGenerationError(item) { if (current) { current.classList.remove('streaming'); current = null } if (currentTurn) { if (item && item.partialText) currentTurn.appendChild(interruptedMarker()); currentTurn.appendChild(structuredErrorCard(item)) } else { document.getElementById('empty')?.remove(); messages.appendChild(structuredErrorCard(item)) } finish(item) }
-let sendState = 'idle'; function setSendMode(state) { if (sendState === state) return; sendState = state; const running = state === 'loading'; send.classList.toggle('loading', running); send.classList.toggle('stop', running); send.classList.toggle('idle', state === 'idle'); send.classList.toggle('ready', state === 'ready'); send.title = running ? 'Stop' : 'Send'; send.setAttribute('aria-label', running ? 'Stop' : 'Send'); const sSvg = send.querySelector('.send-svg'), xSvg = send.querySelector('.stop-svg'); if (sSvg) sSvg.style.removeProperty('display'); if (xSvg) xSvg.style.removeProperty('display'); document.querySelector('.box')?.classList.toggle('working', running) } function updateSendMode() { setSendMode(isRunning() ? 'loading' : (input.value.trim() || attachments.length ? 'ready' : 'idle')) }
+// Turns are the thing a screen-reader user is waiting on, and nothing announced them before: the
+// spinner and the send/stop icon are both purely visual. This says what changed, once.
+function announceTurn(text){const el=document.getElementById('turnStatus');if(el)el.textContent=text}
+let sendState = 'idle'; function setSendMode(state) { if (sendState === state) return; const wasState=sendState; sendState = state; if(state==='loading')announceTurn('Working…'); else if(wasState==='loading')announceTurn('Response complete.'); const running = state === 'loading'; send.classList.toggle('loading', running); send.classList.toggle('stop', running); send.classList.toggle('idle', state === 'idle'); send.classList.toggle('ready', state === 'ready'); send.title = running ? 'Stop' : 'Send'; send.setAttribute('aria-label', running ? 'Stop' : 'Send'); const sSvg = send.querySelector('.send-svg'), xSvg = send.querySelector('.stop-svg'); if (sSvg) sSvg.style.removeProperty('display'); if (xSvg) xSvg.style.removeProperty('display'); document.querySelector('.box')?.classList.toggle('working', running) } function updateSendMode() { setSendMode(isRunning() ? 'loading' : (input.value.trim() || attachments.length ? 'ready' : 'idle')) }
 function compactPrice(value) { if (value === undefined || value === null) return ''; const n = Number(value); if (!Number.isFinite(n)) return ''; if (n >= 1) return '$' + trimNum(n.toFixed(2)); if (n >= .01) return '$' + trimNum(n.toFixed(3)); return '$' + trimNum(n.toFixed(4)) }
 function modelMeta(m, mid, providerId) { if (typeof m === 'object' && m && m.isAuto) return 'Cheapest model first · A–Z fallback'; const price = providerId === 'sleepyai' ? (sleepyModelPrices || []).find(p => p.modelId === mid || p.name === mid || p.name === modelNameOf(m)) : undefined; const context = (typeof m === 'object' && m && m.contextWindow) || price?.contextWindow || 0; const parts = []; if (typeof m === 'object' && m && m.recommended) parts.push('Recommended'); if (context) parts.push(fmt(context) + ' context'); if (price && price.inputPrice !== undefined && price.outputPrice !== undefined) parts.push(compactPrice(price.inputPrice) + ' / ' + compactPrice(price.outputPrice) + ' per 1M in/out'); return parts.join(' · ') }
 let modelQuery = '';
@@ -1056,9 +1105,39 @@ input.onkeydown = e => {
     if (slashMenu?.classList.contains('open') || mentionMenu.classList.contains('open')) return;
     e.preventDefault();
     if (input.value) { input.value = ''; historyDraft = null; resize() }
+    // An Esc ladder, so the same key degrades instead of doing nothing. Order matters: a draft the
+    // user may still want is cleared first, then a runaway turn is stopped, and only a composer with
+    // nothing left to lose falls through to blurring (which discards the caret position).
+    else if (runningSet.has(activeConversationId)) { vscode.postMessage({ type: 'stop' }) }
     else input.blur();
   }
 };
+  // Keyboard-first shell actions forwarded from the extension host. These chords are the ones VS
+  // Code would otherwise claim for itself — Ctrl/Cmd+K is a prefix for its own chords — so they
+  // arrive as messages rather than as keydowns the webview would never see.
+  const SHORTCUT_HELP=[['Enter','Send'],['Shift+Enter','New line'],['Cmd/Ctrl+Shift+Enter','Force a new line'],['Cmd/Ctrl+.','Stop the running turn'],['Cmd/Ctrl+K','Clear the composer'],['Cmd/Ctrl+Shift+C','Copy the last answer'],['Cmd/Ctrl+/','This list'],['Esc','Dismiss menus, cancel an edit, then stop the turn']];
+  let shortcutPanel=null;
+  function closeShortcutHelp(){if(shortcutPanel){shortcutPanel.remove();shortcutPanel=null}}
+  function toggleShortcutHelp(){
+    if(shortcutPanel){closeShortcutHelp();return}
+    const panel=document.createElement('div');panel.className='shortcut-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-label','Keyboard shortcuts');
+    panel.innerHTML='<div class="shortcut-head" tabindex="-1">Keyboard shortcuts</div>'+SHORTCUT_HELP.map(row=>'<div class="shortcut-row"><kbd>'+esc(row[0])+'</kbd><span>'+esc(row[1])+'</span></div>').join('');
+    (composerEl||messages).appendChild(panel);shortcutPanel=panel;panel.querySelector('.shortcut-head').focus();
+  }
+  function insertNewline(){const start=input.selectionStart??input.value.length;const end=input.selectionEnd??start;input.value=input.value.slice(0,start)+'\n'+input.value.slice(end);input.selectionStart=input.selectionEnd=start+1;resize()}
+  function copyLastAssistant(){const answers=messages.querySelectorAll('.assistant');const last=answers[answers.length-1];if(!last)return;const text=last.innerText||last.textContent||'';if(navigator.clipboard&&navigator.clipboard.writeText)void navigator.clipboard.writeText(text)}
+  function handleShortcut(action){
+    if(action==='stop'){if(runningSet.has(activeConversationId))vscode.postMessage({type:'stop'});return}
+    if(action==='clearComposer'){if(input.value){input.value='';historyDraft=null;resize()}return}
+    if(action==='newLine'){insertNewline();return}
+    if(action==='copyLast'){copyLastAssistant();return}
+    if(action==='shortcuts'){toggleShortcutHelp();return}
+  }
+  // The caption is onboarding rather than chrome: it fades once the composer holds a draft, and
+  // returns on focus so it stays discoverable later in the session.
+  const composerCaption=document.getElementById('composerCaption');
+  input.addEventListener('focus',()=>composerCaption?.classList.remove('faded'));
+  input.addEventListener('blur',()=>{if(input.value)composerCaption?.classList.add('faded');closeShortcutHelp()});
 messages.addEventListener('scroll', () => { followOutput = nearBottom(); updateJump() }); jumpBottom.onclick = () => { followOutput = true; scroll(true) }; projectIndicator.onclick = () => { if (projectIndicatorPath) vscode.postMessage({ type: 'revealInOS' }) }; document.getElementById('statPillGroup')?.addEventListener('click', () => toggleSessionInfo()); document.getElementById('statPillGroup')?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSessionInfo() } });
 if (typeof ResizeObserver !== 'undefined' && composerEl) new ResizeObserver(() => { updateJump(); placeOpenComposerMenus(); if (followOutput) pinScroll() }).observe(composerEl); window.addEventListener('resize', () => { resize(); updateJump(); placeOpenComposerMenus() }); window.visualViewport?.addEventListener('resize', () => placeOpenComposerMenus()); window.visualViewport?.addEventListener('scroll', () => placeOpenComposerMenus());
 queued.onclick = (event) => { const button = event.target.closest('button[data-act]'); if (!button) return; const id = button.dataset.id; const act = button.dataset.act; if (act === 'steer') { vscode.postMessage({ type: 'steerQueued', conversationId: activeConversationId, id }); return } const list = queuedByConversation.get(activeConversationId) || []; const entry = list.find(item => item.id === id); if (!entry) return; if (act === 'edit') { queuedByConversation.set(activeConversationId, list.filter(item => item.id !== id)); updateQueuedVisibility(); vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }); input.value = entry.text; resize(); input.focus(); return } if (act === 'remove') { vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }) } };
@@ -1493,6 +1572,30 @@ if (moreBtn && moreMenu) {
   // Close after picking a destination.
   moreMenu.addEventListener('click', () => setMoreMenuOpen(false));
 }
+  // Keyboard parity for every disclosure menu: arrows open and move, Escape closes and hands focus
+  // back to the trigger. Kept outside the More-menu guard above so it runs even when that popover
+  // is absent, which is the failure this block had the first time round.
+  {
+    const wireDisclosure = (trigger, panel, toggle, close) => {
+      if (!trigger || !panel) return;
+      bindMenuKeyboard(trigger, panel, toggle, close);
+      // A click that lands inside the menu must not be read as "clicked outside" and close it
+      // before the row's own handler runs — that bug makes every menu row unclickable by mouse.
+      panel.addEventListener('click', event => event.stopPropagation());
+    };
+    const byId = id => document.getElementById(id);
+    wireDisclosure(modelButton, modelMenu, () => toggleModelMenu(), () => closeModelMenu());
+    wireDisclosure(effortButton, effortMenu, () => toggleEffortMenu(), () => closeEffortMenu());
+    wireDisclosure(agentButton, agentMenu, () => toggleAgentMenu(), () => closeAgentMenu());
+    wireDisclosure(safetyButton, safetyMenu, () => toggleSafetyMenu(), () => closeSafetyMenu());
+    // Conversation and More manage their own open state, so their toggle delegates to the setter.
+    wireDisclosure(byId('conversationButton'), conversationMenu,
+      () => setConversationMenuOpen(!conversationMenu.classList.contains('open')),
+      () => setConversationMenuOpen(false));
+    wireDisclosure(byId('moreActionsButton'), byId('moreActionsMenu'),
+      () => setMoreMenuOpen(!document.getElementById('moreActionsMenu').classList.contains('open')),
+      () => setMoreMenuOpen(false));
+  }
 document.getElementById('usageButton').onclick = openUsageView; document.getElementById('usageBack').onclick = closeUsageView; document.getElementById('usageRefresh').onclick = () => { vscode.postMessage({ type: 'requestUsage' }); vscode.postMessage({ type: 'sleepyAccountData' }) }; document.getElementById('marketplaceButton').onclick = () => { openMarketplaceView(); vscode.postMessage({ type: 'requestMarketplaceInstalled' }) }; document.getElementById('marketplaceBack').onclick = closeMarketplaceView; document.getElementById('marketplaceRefresh').onclick = () => { if (marketplaceTab === 'installed') { vscode.postMessage({ type: 'requestMarketplaceInstalled' }) } else if (marketplaceQuery.value.trim()) { marketplaceSearch() } else if (!marketplaceBusy) { loadMarketplaceTop(true, marketplaceSort.value) } }; document.getElementById('marketplaceSearchBtn').onclick = marketplaceSearch; marketplaceQuery.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); marketplaceSearch() } }; marketplaceQuery.oninput = () => runMarketplaceSearch(true); marketplaceSort.onchange = () => runMarketplaceSearch(false); document.getElementById('marketplaceRepoBtn').onclick = marketplaceListRepo; marketplaceRepo.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); marketplaceListRepo() } }; document.getElementById('previewClose').onclick = closeSkillPreview; previewModal.onclick = e => { if (e.target === previewModal) closeSkillPreview() }; previewInstall.onclick = () => { if (!previewState) return; const path = previewState.path; startSkillInstall(previewState.origin === null || previewState.origin === undefined ? -1 : previewState.origin, { install: { source: previewState.source, skill: path ? path.split('/').pop() : undefined } }) }; document.getElementById('settingsButton').onclick = () => vscode.postMessage({ type: 'requestSettings' }); document.getElementById('settingsBack').onclick = closeSettings; document.getElementById('newConversation').onclick = () => vscode.postMessage({ type: 'newConversation' }); document.getElementById('conversationButton').onclick = () => setConversationMenuOpen(!conversationMenu.classList.contains('open'));
 resetSettingsBtn.onclick = () => { resetClicks++; if (resetClicks >= 3) { resetClicks = 0; resetSettingsBtn.textContent = 'Reset Extension to Defaults'; vscode.postMessage({ type: 'resetSettings' }); return } resetSettingsBtn.textContent = resetClicks === 1 ? 'Click 2 more times to reset' : 'Click 1 more time to reset' };
 maxStepsUnlimited.onchange = () => { maxSteps.disabled = maxStepsUnlimited.checked; autosaveNow() };
@@ -1561,6 +1664,7 @@ window.addEventListener('message', async ({ data: m }) => {
     case 'state': if (m.running) runningSet.add(m.conversationId); else runningSet.delete(m.conversationId); modelButton.disabled = isRunning(); updateSendMode(); updateJump(); break;
     case 'notify': { const approval=m.approval&&typeof m.approval==='object'?m.approval:null; const notifyOpts={ title: m.title, body: m.detail, ok: m.okLabel, cancel: m.cancelLabel, secondary: m.secondaryLabel, danger: Boolean(m.danger), risk: m.risk, kind: approval?approval.kind:undefined, command: approval?approval.command:undefined }; const choice = approvalCanRenderInline(approval) ? await showInlineApproval(notifyOpts) : await showNotifyModal(notifyOpts); vscode.postMessage({ type: 'notifyResponse', id: m.id, choice }); break }
     case 'compactProgress': handleCompactProgress(m); break;
+    case 'shortcut': handleShortcut(m.action); break;
     case 'done': liveByConversation.delete(m.conversationId); if (m.conversationId === activeConversationId) { activeConversationItems.push(m.item); updateSessionStats(); finish(m.item) } break;
   }
 })

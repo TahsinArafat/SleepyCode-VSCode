@@ -36,6 +36,12 @@ export function activate(context: vscode.ExtensionContext) {
       void vscode.window.showInformationMessage('Test system notification sent. (Notifications only appear when VS Code is not focused.)');
     }),
   );
+  // Keyboard-first shell actions. Each is a thin forwarder into the webview, which owns the
+  // composer and the transcript; the matching keybindings are contributed in package.json so the
+  // editor hands these chords over instead of consuming them itself.
+  for (const action of ['stop', 'clearComposer', 'newLine', 'copyLast', 'shortcuts'] as const) {
+    context.subscriptions.push(vscode.commands.registerCommand(`sleepycode.chat.${action}`, () => provider.shortcut(action)));
+  }
 }
 
 export function deactivate() { }

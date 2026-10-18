@@ -158,4 +158,52 @@ check(/kind\s*\?\s*:\s*['"]error['"]\s*\|\s*['"]divider['"]\s*\|\s*['"]approval[
   && /decision:\s*['"]once['"]\s*\|\s*['"]session['"]\s*\|\s*['"]rejected['"]/.test(types),
   'the approval record carries the full three-way decision vocabulary, so history can show what was granted');
 
+// --- Keyboard-first shell ----------------------------------------------------------
+// The bug this phase fixed was "works by mouse, silently not by keyboard". These stop it returning.
+check(/function bindMenuKeyboard/.test(webviewRuntime) && /restoreMenuFocus\(trigger\)/.test(webviewRuntime)
+  && /function menuNavRows/.test(webviewRuntime),
+  'disclosure menus share one keyboard model, and Escape hands focus back to the trigger');
+check(/function captureFocus/.test(webviewRuntime) && /function restoreFocus/.test(webviewRuntime)
+  && /restoreFocus\(job\.previous\)/.test(webviewRuntime) && /restoreFocus\(previous\)/.test(webviewRuntime),
+  'every overlay restores focus when it closes, so a decision cannot strand the keyboard');
+check(/function announceTurn/.test(webviewRuntime) && /turnStatus/.test(webviewRuntime) && /id="turnStatus"[^>]*role="status"[^>]*aria-live="polite"/.test(webview),
+  'turn progress is announced in a live region rather than only shown with a spinner');
+// A focus ring that depends on a bare theme variable vanishes when the variable is undefined.
+check(!/:focus-visible\{outline:[^}]*var\(--vscode-focusBorder\)[^,}]/.test(webviewStyles),
+  'focus outlines fall back when the theme variable is missing, so the ring cannot silently disappear');
+check(/forced-colors: active/.test(webviewStyles) && /outline:2px solid Highlight/.test(webviewStyles),
+  'forced-colors mode keeps a visible focus ring');
+check(!/id="moreActionsMenu" role="menu"/.test(webview),
+  'popovers do not claim role=menu when they do not implement arrow navigation and roving tabindex');
+check(/id="modelButton"[^>]*aria-label=/.test(webview) && /id="agentButton"[^>]*aria-label=/.test(webview),
+  'the model and agent triggers have accessible names rather than relying on changing text');
+
+// --- Keyboard-first shell & accessibility --------------------------------------------------
+// The chat shell is reachable without a mouse. These pin the shape, not the styling.
+const webviewMarkup = read('src/webview.ts');
+const extensionHost = read('src/extension.ts');
+const bindings = (packageJson.contributes && packageJson.contributes.keybindings) || [];
+check(Array.isArray(bindings) && bindings.length >= 4, 'the chat view contributes keyboard shortcuts, so the shell is not mouse-only');
+check(bindings.every(b => /sleepycode/.test(b.when || ''))
+  && bindings.some(b => /chat\.stop$/.test(b.command))
+  && bindings.some(b => /chat\.clearComposer$/.test(b.command)),
+  'contributed shortcuts are scoped to the chat view, and stop/clear are actually bound');
+check(/for \(const action of \['stop', 'clearComposer'/.test(extensionHost) && /provider\.shortcut\(action\)/.test(extensionHost) && /sleepycode\.chat\.\$\{action\}/.test(extensionHost),
+  'every contributed shortcut command is registered by the extension host and forwarded to the webview');
+check(/shortcut\(action: 'stop' \| 'clearComposer'/.test(agent), 'the chat provider exposes the shortcut forwarder the commands call');
+check(/id="conversationButton"[^>]*aria-controls="conversationMenu"/.test(webviewMarkup) && /id="moreActionsButton"[^>]*aria-controls="moreActionsMenu"/.test(webviewMarkup),
+  'every disclosure trigger names the popover it controls with aria-controls');
+check(/aria-activedescendant/.test(webviewRuntime) && /id="slashMenu" role="listbox"/.test(webviewMarkup) && /id="mentionMenu" role="listbox"/.test(webviewMarkup),
+  'the slash and mention menus name their highlighted option, because focus stays in the textarea there');
+check(/aria-selected/.test(webviewRuntime) && /role','option'/.test(webviewRuntime),
+  'composer popover options carry listbox option semantics, not just a CSS highlight class');
+check(/else if \(runningSet\.has\(activeConversationId\)\) \{ vscode\.postMessage\(\{ type: 'stop' \}\) \}/.test(webviewRuntime),
+  'Escape stops a running turn instead of only blurring the composer');
+check(/id="composerCaption"/.test(webviewMarkup) && /Shift\+Enter for a new line/.test(webviewMarkup),
+  'the composer states its own Enter and Shift+Enter contract');
+// The disclosure popovers move real focus, so claiming role=menu would promise roving tabindex and
+// arrow handling they deliberately do not implement. Guard against that regression.
+check(!/id="(modelMenu|effortMenu|agentMenu|safetyMenu|conversationMenu|moreActionsMenu)"[^>]*role="menu"/.test(webviewMarkup),
+  'disclosure popovers do not claim role=menu, because they move real focus instead of roving tabindex');
+
 console.log(`LOGIC CHECK OK (${checks.length} checks)`);
