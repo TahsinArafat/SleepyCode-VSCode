@@ -282,4 +282,11 @@ export const WEBVIEW_STYLES = String.raw`
   .shortcut-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--vscode-descriptionForeground);margin-bottom:4px;outline:none}
   .shortcut-row{display:flex;align-items:baseline;gap:10px;font-size:12px;padding:2px 0;color:var(--vscode-foreground)}
   .shortcut-row kbd{flex:0 0 auto;min-width:132px;font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-descriptionForeground)}
+  /* Compact density. Reasoning is clamped rather than hidden: a density preference that deletes text
+     you cannot get back is a content preference wearing a disguise, and this one has to survive a
+     user who never opens settings again. */
+  body.compact #messages>*{padding-top:3px;padding-bottom:3px}
+  body.compact .reasoning{-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
+  body.compact .activity-body{gap:2px}
+  body.compact .message-footer{margin-top:1px}
 `;

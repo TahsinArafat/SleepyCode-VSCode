@@ -240,4 +240,23 @@ check(/function errorActions\(errorText\)/.test(webviewRuntime) && /appendChild\
 check(/type: 'requestExtensionLogs'/.test(webviewRuntime) && /getElementById\('extensionLogs'\)/.test(webviewRuntime),
   'Open logs reveals the existing log view instead of adding a second place to read the same thing');
 
+// --- Density -------------------------------------------------------------------------------------
+// The round trip has three legs: webview payload -> host globalState -> config() -> webview restore.
+// A gap in any one of them is a setting that silently forgets itself on the next launch, which is the
+// failure mode users describe as "the toggle doesn't work" rather than "the setting isn't saved".
+check(webviewRuntime.includes('compact: Boolean(compactDensity && compactDensity.checked),')
+  && agent.includes("globalState.update('sleepycode.compact', Boolean(message.compact))")
+  && agent.includes("globalState.get<boolean>('sleepycode.compact', false)"),
+  'compact density round-trips through saveSettings and comes back on the next session');
+// It is a view preference, so it must not wait for a settings round trip to become visible.
+check(/function applyDensity\(compact\)/.test(webviewRuntime)
+  && /document\.body\.classList\.toggle\('compact'/.test(webviewRuntime)
+  && /compactDensity\.addEventListener\('change', \(\) => \{ applyDensity\(compactDensity\.checked\)/.test(webviewRuntime),
+  'compact density applies to the document immediately rather than after a reload');
+// Clamped, not removed. A density preference that hides text the user cannot get back is a content
+// preference wearing a disguise, and this one has to survive someone who never opens settings again.
+check(/body\.compact \.reasoning\{[^}]*-webkit-line-clamp/.test(webviewStyles)
+  && !/body\.compact \.reasoning\{[^}]*display:none/.test(webviewStyles),
+  'compact density clamps reasoning instead of hiding it');
+
 console.log(`LOGIC CHECK OK (${checks.length} checks)`);

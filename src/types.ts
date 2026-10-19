@@ -30,7 +30,7 @@ export type WebMessage =
   | { type: 'requestExtensionLogs' }
   | { type: 'clearExtensionLogs' }
   | { type: 'extensionLogs'; logs: string[] }
-  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number; useCli?: boolean }
+  | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number; useCli?: boolean; compact?: boolean }
   | { type: 'fetchProviderModels'; id?: string; name?: string; baseURL: string; apiKey?: string; customHeaders?: Record<string, string> }
   | { type: 'providerModels'; id?: string; ok: boolean; text: string; models?: string[] }
   | { type: 'saveProviderApiKey'; providerId: string; apiKey: string }

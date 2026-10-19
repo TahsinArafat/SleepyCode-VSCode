@@ -239,13 +239,17 @@ Add an `Esc`-ladder so the same key degrades gracefully instead of doing nothing
 
 **Problem:** §2-E, §2-H.
 
-**Status: the linkify and error-card items landed; turn-timeline chips, the density toggle and the developer-grade empty state did not.** Recording that rather than letting the header imply the phase is done.
+**Status: linkify, error cards and density have landed. Turn-timeline phase chips have not. The developer-grade empty state was audited and found to already exist.**
 
 **Landed — linkify in prose.** The interesting part was not the regexes, it was the ordering. `inlineMarkdown` already swapped inline-code spans for sentinel placeholders before anything else ran, so a new pass placed after that step simply cannot see code. The second hazard was self-inflicted: a new pass must not reach inside markup an earlier pass generated, or `[see src/a.ts](https://x)` nests an anchor inside an anchor. So generated HTML now goes into a **second** placeholder channel and is substituted back only after every pass has run. The extension list is deliberate rather than "anything with a dot" — prose is full of dotted tokens (`i.e.`, `e.g.`, `and/or`, `foo/bar/baz`), and a false link is worse than a missed one because it turns a sentence into something clickable that opens the wrong file. A reference now carries its position through to the editor: `openFile` grew optional `line`/`column`, and the host opens a `Range` there.
 
 **Landed — error cards, extended not replaced.** `errorActions()` kept its Retry button and gained Copy error and Open logs. "Open logs" deliberately reveals the existing `#extensionLogs` view rather than adding a second place to read the same lines.
 
-**Not landed:** turn-timeline phase chips, the Comfortable/Compact density toggle, and the developer-grade empty state (workspace file count, index status, starters). All three are additive and unblocked by the above; none was started.
+**Landed — density.** A `compact` boolean round-tripping through the existing `saveSettings` path (payload → `globalState` → `config()` → restore). It applies to `<body>` on change rather than after a reload, because it is a view preference and waiting for a settings round trip makes the control feel broken. Reasoning is **clamped to two lines with `-webkit-line-clamp`, not `display:none`**: a density preference that deletes text the user cannot get back is not a density preference, and the full text has to survive someone who never opens settings again. A gate contract asserts the clamp rather than asserting that `.reasoning` exists, because the failure mode being prevented is specifically someone later "simplifying" the clamp into a hide.
+
+**Audited, not built — the empty state was already developer-grade.** This item described work that did not exist. `emptyState()` already renders the indexed file count ("137 files indexed"), the index status with its reindex affordance, the detected languages and frameworks, and a set of clickable starters that fill the composer. So `test/density.direct.mjs` pins what is already there rather than adding to it — the point is that a plan item reading "done" is now actually pinned, and a future edit cannot quietly drop the file count without a test failing.
+
+**Not landed:** turn-timeline phase chips. The activity panel already carries a phase label (`<summary>` renders `a.summary`, "Thinking…" / "Working…"), so what remains is a visual Plan → Tools → Answer timeline rather than missing information. It was not started.
 
 **Files:** `src/webview/runtime.ts` (`inlineMarkdown` 546), `src/webview/styles.ts`.
 
