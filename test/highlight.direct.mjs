@@ -190,7 +190,7 @@ test("runtime.ts's own template survives a stray backtick or interpolation", () 
     `runtime.ts contains a literal backtick at offset ${strayBacktick}, which truncates the webview template: ` +
     JSON.stringify(template.slice(Math.max(0, strayBacktick - 60), strayBacktick + 20)));
 
-  const allowed = ['ESCAPE_HTML_SOURCE', 'STREAM_RENDER_SOURCE', 'STREAM_FRAME_SOURCE', 'HIGHLIGHT_SOURCE', 'gitTracked', 'markUri'];
+  const allowed = ['ESCAPE_HTML_SOURCE', 'STREAM_RENDER_SOURCE', 'STREAM_FRAME_SOURCE', 'HIGHLIGHT_SOURCE', 'CONTEXT_WINDOW_INFER_SOURCE', 'gitTracked', 'markUri'];
   for (const match of template.matchAll(/\$\{([^}]*)\}/g)) {
     assert.ok(allowed.includes(match[1]),
       'runtime.ts interpolates an identifier that verify.mjs does not substitute, so it would survive into the shipped webview: ' + match[1]);

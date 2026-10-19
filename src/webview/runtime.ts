@@ -1,4 +1,5 @@
 import { ESCAPE_HTML_SOURCE } from './runtime-core';
+import { CONTEXT_WINDOW_INFER_SOURCE } from '../context-window-core';
 import { HIGHLIGHT_SOURCE } from './highlight';
 import { STREAM_FRAME_SOURCE, STREAM_RENDER_SOURCE } from './stream-render';
 
@@ -259,6 +260,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   ${STREAM_RENDER_SOURCE}
   ${STREAM_FRAME_SOURCE}
   ${HIGHLIGHT_SOURCE}
+  ${CONTEXT_WINDOW_INFER_SOURCE}
   /**
    * Keyboard support for the disclosure menus, in one place.
    *
@@ -473,12 +475,10 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
           if(p.modelId===effectiveModel||p.name===effectiveModel){ctxLimit=p.contextWindow||0;break}
         }
       }
-      if(!ctxLimit){
-        const low=effectiveModel.toLowerCase();
-        if(low.includes('256k')||low.includes('quick')||low.includes('deepseek')||low.includes('mimo')||low.includes('macaron'))ctxLimit=256000;
-        else if(low.includes('flash')||low.includes('gemini')||low.includes('pro'))ctxLimit=1000000;
-        else ctxLimit=128000;
-      }
+      // Nothing authoritative: the same family guess the host budgets against, so the
+      // meter cannot promise a window the send budget will never spend. 128k is the
+      // display default for a model no source knows anything about.
+      if(!ctxLimit)ctxLimit=inferContextWindow(effectiveModel)||128000;
     }
     let cost=null;
     if(providerId==='sleepyai'){

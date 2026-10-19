@@ -6,14 +6,37 @@ import * as path from 'node:path';
 // exercised directly by the strip-types test runner.
 const MAX_TOOL_OUTPUT = 40_000;
 
+/**
+ * Whether a workspace is inside a Git work tree.
+ *
+ * This answers a question that never changes mid-operation but is asked from
+ * every send, edit, undo and webview render. `spawnSync` blocks the whole
+ * extension host for the duration of the process (~15ms locally, far longer on
+ * a cold or network filesystem), and a single edit of a past message asks
+ * twice. Memoize per root for a few seconds so a burst of calls collapses into
+ * one probe while a `git init` still takes effect almost immediately.
+ */
+const GIT_TRACKED_TTL_MS = 5_000;
+const gitTrackedCache = new Map<string, { value: boolean; expiresAt: number }>();
+
 export function isGitTrackedWorkspace(rootPath?: string): boolean {
   if (!rootPath) return false;
+  const cached = gitTrackedCache.get(rootPath);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
   const result = spawnSync('git', ['-C', rootPath, 'rev-parse', '--is-inside-work-tree'], {
     encoding: 'utf8',
     timeout: 2_000,
     windowsHide: true,
   });
-  return result.status === 0 && result.stdout.trim() === 'true';
+  const value = result.status === 0 && result.stdout.trim() === 'true';
+  gitTrackedCache.set(rootPath, { value, expiresAt: Date.now() + GIT_TRACKED_TTL_MS });
+  return value;
+}
+
+/** Drop the memoized probe so a repository change is observed immediately. */
+export function invalidateGitTrackedCache(rootPath?: string): void {
+  if (rootPath) gitTrackedCache.delete(rootPath);
+  else gitTrackedCache.clear();
 }
 
 function runGit(args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}, input?: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<string> {

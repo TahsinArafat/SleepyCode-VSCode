@@ -34,8 +34,16 @@ export const CHARS_PER_TOKEN = 4;
  */
 export const COMPACTION_HISTORY_ITEMS = 10;
 
-/** Fraction of the context window at which auto-compaction kicks in. */
-export const AUTO_COMPACT_RATIO = 0.75;
+/**
+ * Fraction of the context window at which auto-compaction kicks in.
+ *
+ * This is "the window is full", not "there is a comfortable margin". The send budget has
+ * already held back the system prompt and the answer's output tokens, and
+ * AUTO_COMPACT_BUDGET_RATIO fires before any message can be dropped, so the trigger can
+ * wait for the window itself. Compacting at 75% threw away a quarter of a large window
+ * for nothing — on a 1M-token model that is 250k tokens of usable conversation.
+ */
+export const AUTO_COMPACT_RATIO = 0.9;
 
 /** Fraction of the *send budget* at which auto-compaction kicks in. Compaction must
  *  fire before the send budget starts dropping messages, otherwise the conversation

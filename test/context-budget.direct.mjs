@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AUTO_COMPACT_BUDGET_RATIO,
+  AUTO_COMPACT_RATIO,
   CONTEXT_SYSTEM_OVERHEAD_TOKENS,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_RESPONSE_RESERVE_TOKENS,
@@ -50,8 +51,16 @@ test('compaction fires before the send budget drops anything', () => {
     'hitting 90% of the send budget must trigger compaction');
 });
 
+test('compaction waits until the window is actually full', () => {
+  // Compacting at 75% of a 1M window threw away 250k tokens of usable conversation for
+  // no reason: the send budget already reserves the system prompt and the answer.
+  assert.ok(AUTO_COMPACT_RATIO >= 0.9, `compaction ratio ${AUTO_COMPACT_RATIO}`);
+  assert.equal(shouldAutoCompact(750_000, 1_000_000), false, 'most of a large window must stay usable');
+  assert.equal(shouldAutoCompact(900_000, 1_000_000), true);
+});
+
 test('the window trigger still fires on its own', () => {
-  assert.equal(shouldAutoCompact(DEFAULT_CONTEXT_WINDOW * 0.75, DEFAULT_CONTEXT_WINDOW), true);
+  assert.equal(shouldAutoCompact(DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_RATIO, DEFAULT_CONTEXT_WINDOW), true);
   assert.equal(shouldAutoCompact(0, DEFAULT_CONTEXT_WINDOW, 0, 60_000), false);
 });
 

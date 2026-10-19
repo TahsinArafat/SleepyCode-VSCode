@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
 import { executeTool } from '@ai-sdk/provider-utils';
-import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, gitTreeChanges, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
+import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, gitTreeChanges, invalidateGitTrackedCache, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
 import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
 import { buildTools } from './tools';
@@ -15,12 +15,14 @@ import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
+import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage } from './retry-core.ts';
 import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
+import { pickContextWindow } from './context-window-core';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, originalUserText, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
@@ -191,6 +193,21 @@ function notificationSummary(text: string): string {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (!clean) return '';
   return clean.length > 140 ? `${clean.slice(0, 139)}…` : clean;
+}
+
+/**
+ * The newest assistant item in a transcript, or undefined when there is none.
+ *
+ * Walks backwards rather than copying the array with `[...items].reverse()`:
+ * the conversation list is rebuilt on every state sync, and copying every
+ * conversation's whole item array each time is pure allocation churn.
+ */
+function findLastAssistant(items: readonly TranscriptItem[]): TranscriptItem | undefined {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item?.role === 'assistant') return item;
+  }
+  return undefined;
 }
 
 function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
@@ -679,6 +696,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private onWorkspaceFoldersChanged(): void {
     this.projectIndex.invalidate();
+    invalidateGitTrackedCache();
     if (!this.loaded) return;
     this.reanchorToWorkspace();
     void this.ensureProjectIntelligence(false);
@@ -1321,19 +1339,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * results are never separated from the assistant message that requested them,
    * because an orphaned tool-call id makes strict providers reject the request.
    */
-  private structuredHistory(conversation: Conversation, contextWindow?: number | null): ModelMessage[] {
-    const budgetTokens = structuredHistoryBudget(contextWindow);
+  private structuredHistory(conversation: Conversation, contextWindow?: number | null, maxOutputLimit?: number | null): ModelMessage[] {
+    // Same budget formula as maybeAutoCompact, including the output reserve. Budgeting the
+    // send with a different number than the one compaction is measured against is what let
+    // history be cut before compaction ever became due.
+    const budgetTokens = structuredHistoryBudget(contextWindow, maxOutputLimit);
     const selected = selectStructuredHistory(conversation.messages, budgetTokens, estimateMessageTokens);
     // The cut is real context loss, so say so. Silently narrowing the window is what
     // makes this read as "the agent forgot" instead of "older turns were dropped".
     const dropped = droppedMessageCount(conversation.messages, selected);
     if (dropped > 0 && this.lastHistoryDropNotice.get(conversation.id) !== dropped) {
       this.lastHistoryDropNotice.set(conversation.id, dropped);
+      // Name the number the cut was made against. "400 messages left this request" with no
+      // figures is unactionable — it reads as a 1M-window model misbehaving when the real
+      // cause was a 60k budget for a model nobody could describe.
+      const within = contextWindow && contextWindow > 0
+        ? `${Math.round(budgetTokens / 1_000)}k of the model's ${Math.round(contextWindow / 1_000)}k-token window`
+        : `the conservative ${Math.round(budgetTokens / 1_000)}k-token budget (no context window is known for this model)`;
       this.post({
         type: 'contextNotice',
         conversationId: conversation.id,
         kind: 'trimmed',
-        text: `${dropped} older message${dropped === 1 ? '' : 's'} left this request to stay within the model context window. They are still saved in this conversation.`,
+        text: `${dropped} older message${dropped === 1 ? '' : 's'} left this request to stay within ${within}. They are still saved in this conversation.`,
       });
     }
     return backfillAssistantReasoning(selected, reasoningTextsFromItems(conversation.items));
@@ -1482,9 +1509,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const project = this.activeProject();
     if (!project) return;
     this.sortConversations(project);
+    // Group the queue once. Filtering it per conversation made this sync cost
+    // conversations x queued entries on a path that runs on every state change.
+    const queueByConversation = new Map<string, typeof this.queue>();
+    for (const entry of this.queue) {
+      const existing = queueByConversation.get(entry.conversationId);
+      if (existing) existing.push(entry);
+      else queueByConversation.set(entry.conversationId, [entry]);
+    }
     this.post({
       type: 'conversations', conversations: project.conversations.map(({ id, title, archived, pinned, updatedAt, items }) => {
-        const lastAssistant = [...items].reverse().find(item => item.role === 'assistant');
+        // Scan backwards instead of copying and reversing the whole item array.
+        const lastAssistant = findLastAssistant(items);
+        const queued = queueByConversation.get(id) ?? [];
         return {
           id, title, archived, pinned: Boolean(pinned), updatedAt,
           hasMessages: items.length > 0,
@@ -1492,8 +1529,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           changeCount: lastAssistant?.changes?.length ?? 0,
           status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? (lastAssistant.errorInfo?.code === 'interrupted' ? 'stopped' : 'failed') : lastAssistant ? 'done' : 'empty',
           running: this.runs.has(id),
-          queued: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.text),
-          queuedIds: this.queue.filter(entry => entry.conversationId === id).map(entry => entry.id),
+          queued: queued.map(entry => entry.text),
+          queuedIds: queued.map(entry => entry.id),
         };
       }), activeId: project.activeConversationId
     });
@@ -1503,7 +1540,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const selection = this.selectionFor(active);
         const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
         const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
-        this.post({ type: 'conversation', id: active.id, items: active.items, model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, compactionUndoable, compactionRedoable });
+        this.post({ type: 'conversation', id: active.id, items: webviewTranscriptItems(active.items), model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, compactionUndoable, compactionRedoable });
       }
     }
   }
@@ -1779,7 +1816,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       project.conversations.unshift(branched);
       project.activeConversationId = branched.id;
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -1795,9 +1832,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (this.refuseIfCliOwned(conversation, 'Editing a past message')) return;
       const root = this.workspaceRoot();
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
+      // One pass over the rewound tail. This used to be three separate
+      // `slice(targetIndex)` copies plus two scans, each allocating a full copy
+      // of the transcript tail on the exact path a user reaches for when the UI
+      // already feels slow.
+      let hasSnapshot = false;
+      let assistantCheckpoint: TranscriptItem | undefined;
+      let snapshotItem: TranscriptItem | undefined;
+      for (let index = targetIndex; index < conversation.items.length; index++) {
+        const item = conversation.items[index]!;
+        if (!item.fileSnapshot?.length) continue;
+        hasSnapshot = true;
+        if (item.role === 'assistant' && !snapshotItem) snapshotItem = item;
+      }
+      if (!snapshotItem) {
+        for (let index = targetIndex; index < conversation.items.length; index++) {
+          const item = conversation.items[index]!;
+          if (item.role === 'assistant' && item.gitTree) { assistantCheckpoint = item; break; }
+        }
+      }
       // Ask before reverting workspace files: editing a past message can either
       // rewind the code to the checkpoint or keep the current workspace as-is.
-      const hasRestorableState = Boolean(root) && (gitTracked || conversation.items.slice(targetIndex).some(item => item.fileSnapshot?.length));
+      const hasRestorableState = Boolean(root) && (gitTracked || hasSnapshot);
       let restoreState = false;
       if (hasRestorableState) {
         const choice = await this.prompt(
@@ -1808,14 +1864,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (choice === 'cancel') return;
         restoreState = choice === 'ok';
         if (restoreState && gitTracked) {
-          const assistantCheckpoint = conversation.items.slice(targetIndex).find(item => item.role === 'assistant' && item.gitTree);
           if (assistantCheckpoint?.gitTree) {
             try {
               await restoreGitTree(root!.fsPath, assistantCheckpoint.gitTree);
             } catch { }
           }
         } else if (restoreState && root) {
-          const snapshotItem = conversation.items.slice(targetIndex).find(item => item.role === 'assistant' && item.fileSnapshot?.length);
           if (snapshotItem?.fileSnapshot?.length) await this.restoreFileSnapshots(root.fsPath, snapshotItem.fileSnapshot);
         }
       }
@@ -1829,7 +1883,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (conversation.items.length === 1) conversation.title = conversationTitle(message.text.trim());
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      // Only this project changed, so only this project needs rewriting. The
+      // coarse whole-workspace persist re-serializes every project key, which
+      // on a long conversation means re-writing megabytes of snapshots in
+      // order to change one of them.
+      await this.persistProject(project);
       this.syncConversations();
       const editorContext = root ? await this.composerContextBlock(root, message.context) : '';
       const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, message.text.trim()) : '';
@@ -1854,7 +1912,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (!this.undoCompaction(conversation)) return;
         conversation.updatedAt = Date.now();
         project.updatedAt = Date.now();
-        await this.persistProjects();
+        await this.persistProject(project);
         this.syncConversations();
         return;
       }
@@ -1895,7 +1953,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.turnRedo = [];
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -1914,7 +1972,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (this.redoCompaction(conversation)) {
         conversation.updatedAt = Date.now();
         project.updatedAt = Date.now();
-        await this.persistProjects();
+        await this.persistProject(project);
         this.syncConversations();
         return;
       }
@@ -1941,7 +1999,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -3052,9 +3110,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const providerConfig = getProvider(this.getProviders(), selection.provider) ?? this.getProviders()[0];
     let reconnectAttempt = 0;
     let model = selection.model;
-    // The send budget has to follow the model's real window: a fixed budget either
-    // overflows a small window or strands a large one far below its capacity.
-    let modelInfo = this.getEffectiveModelInfo(selection.provider, model);
     try {
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
@@ -3078,6 +3133,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         model = route.id;
         this.post({ type: 'modelRoute', conversationId, requested: SLEEPY_AUTO_MODEL_ID, model, reason: route.reason });
       }
+      // The send budget has to follow the window of the model that will actually run.
+      // Resolving it from the unresolved id (or before `refreshModels` filled the
+      // catalog) is how a 1M-window model was budgeted at the 60k fallback and dropped
+      // hundreds of stored messages per request.
+      const modelInfo = this.getEffectiveModelInfo(selection.provider, model);
       // The single retry budget for this turn. The request layer below and the
       // run loop after it both draw from it, so retries can no longer multiply
       // per layer, and both report the same attempt numbering.
@@ -3472,7 +3532,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Prefer the structured model history (assistant turns + tool calls + tool
         // results). Fall back to the flattened text window only for conversations
         // that predate structured history or were compacted to text summaries.
-        const structured = this.structuredHistory(conversation, modelInfo.contextWindow);
+        const structured = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
         if (structured.length) {
           streamPrompt = `${userText}${promptContext}`;
         } else {
@@ -3529,7 +3589,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Keep prior conversation history AND this turn's already-produced
             // tool calls/results. Resume/auto-continue used to drop that live
             // slice, which is how partial context disappeared mid-iteration.
-            const history = this.structuredHistory(conversation, modelInfo?.contextWindow);
+            const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
             let agentMessages: ModelMessage[] | undefined;
             if (history.length || runMessages.length) {
               agentMessages = iterationRequestMessages(history, runMessages, streamPrompt);
@@ -4909,21 +4969,43 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * Context window and output limit for the model that will actually run.
+   *
+   * Sources are consulted in the order the webview's session meter uses them: the
+   * provider's catalog entry for this model, then SleepyAI's price list for this model,
+   * then the model-name families in context-window-core. Reading only the catalog (and
+   * falling through to a conservative 60k send budget) is how a 1M-window model ended up
+   * dropping hundreds of stored messages per request while the meter showed "150k / 1M":
+   * the catalog is empty until `refreshModels` has succeeded, and a provider that reports
+   * no metadata never fills it at all.
+   *
+   * An id that matches nothing deliberately does NOT borrow another model's window — not
+   * even the catalog's first entry. A window guessed too large turns a trimmed request
+   * into a hard `context_too_large` failure, so an unknown model keeps the conservative
+   * fallback budget instead.
+   */
   private getEffectiveModelInfo(providerId: string, configuredModel: string): { contextWindow?: number; maxOutputLimit?: number } {
     const providers = this.getProviders();
     const providerConfig = getProvider(providers, providerId) ?? providers[0];
-    const modelId = configuredModel || providerConfig?.id || '';
-    const group = this.lastModelGroups.find(group => group.providerId === (providerConfig?.id ?? ''));
-    const modelEntry = group?.models.find(model => typeof model !== 'string' && model.id === modelId);
-    if (typeof modelEntry !== 'string' && modelEntry) {
-      return { contextWindow: modelEntry.contextWindow, maxOutputLimit: modelEntry.maxOutputLimit };
-    }
-    const models = providerConfig ? (this.lastModelGroups.find(group => group.providerId === providerConfig.id)?.models ?? []) : [];
-    const autoEntry = models.find((model): model is ProviderModelItem => typeof model !== 'string' && model.isAuto === true);
-    if (autoEntry) return { contextWindow: autoEntry.contextWindow, maxOutputLimit: autoEntry.maxOutputLimit };
-    const first = models.find(model => typeof model !== 'string');
-    if (first) return { contextWindow: first.contextWindow, maxOutputLimit: first.maxOutputLimit };
-    return {};
+    const modelId = configuredModel || '';
+    const models = providerConfig
+      ? (this.lastModelGroups.find(group => group.providerId === providerConfig.id)?.models ?? [])
+      : [];
+    const entry = modelId
+      ? models.find((model): model is ProviderModelItem => typeof model !== 'string' && model.id === modelId)
+      // Nothing selected yet: only the auto entry is a model this request can be assumed
+      // to run on, and the send replaces it with the routed id before budgeting.
+      : models.find((model): model is ProviderModelItem => typeof model !== 'string' && model.isAuto === true);
+    const price = modelId
+      ? this.lastSleepyModelPrices.find(item => item.modelId === modelId || item.name === modelId)
+      : undefined;
+    const resolved: { contextWindow?: number; maxOutputLimit?: number } = {};
+    const window = pickContextWindow(entry?.contextWindow, price?.contextWindow, modelId);
+    if (window.window) resolved.contextWindow = window.window;
+    const maxOutputLimit = entry?.maxOutputLimit ?? price?.maxOutputLimit;
+    if (maxOutputLimit && maxOutputLimit > 0) resolved.maxOutputLimit = maxOutputLimit;
+    return resolved;
   }
 
   // Auto-compaction threshold logic lives in compaction-core.ts (shouldAutoCompact)
