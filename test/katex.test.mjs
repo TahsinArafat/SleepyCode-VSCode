@@ -41,7 +41,12 @@ test('KaTeX is limited to think and content tokens, not tool-call labels', () =>
   // treats as enabled (`allowMath !== false`) — the same value a full pass gets.
   assert.match(runtime, /createStreamRenderer\(markdown\)/);
   assert.match(runtime, /streamRenderer\.html\(\s*raw\s*,\s*undefined\s*\)/);
-  assert.match(runtime, /reasoning\.innerHTML\s*=\s*markdown\(\s*reasoning\.dataset\.raw\s*\)/);
+  // Reasoning now paints through the same coalesced, incremental path as the answer: the delta
+  // handler only updates the buffer and schedules a paint, and the painter builds its renderer from
+  // the page's own `markdown`. Without that binding a thought would lose its math.
+  assert.match(runtime, /reasoningPaint\.schedule\(\{\s*el:\s*reasoning,\s*raw:\s*reasoning\.dataset\.raw\s*\}\)/);
+  assert.match(runtime, /renderer\s*=\s*createStreamRenderer\(markdown\)/);
+  assert.match(runtime, /el\.innerHTML\s*=\s*renderer\.html\(\s*payload\.raw\s*,\s*undefined\s*\)/);
   assert.match(runtime, /className\s*=\s*'reasoning';\s*r\.innerHTML\s*=\s*markdown\(\s*w\.text\s*\)/);
   assert.doesNotMatch(runtime, /task-label">'\+markdown\((?:t\.name|w\.text|retLabel)\)/);
   assert.match(runtime, /task-label">'\+markdown\(\s*t\.name\s*,\s*false\s*\)/);

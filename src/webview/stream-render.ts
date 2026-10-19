@@ -28,8 +28,9 @@
  *
  * A fence that is still open at the tail cannot be settled, because `markdown()` emits one
  * `<pre><code>` for the whole fence and splitting it would change the output. The tail then
- * re-renders on every frame. That path is only an `esc()` pass — no tokenizing — and the frame
- * coalescing below caps it at one repaint per animation frame, so it stays cheap. Making fences
+ * re-renders on every frame. That path is an `esc()` pass — `markdown()` emits the still-open fence
+ * as escaped text and only tokenizes it once the fence closes — and the frame coalescing below caps
+ * it at one repaint per animation frame, so it stays cheap. Making fences
  * settle would require a different DOM strategy (growing a single `<pre>` in place), which is not
  * worth the divergence risk for the gain.
  */

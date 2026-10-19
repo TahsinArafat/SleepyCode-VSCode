@@ -301,10 +301,17 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   }
   // Wiring lives at the end of the module, next to the other document-level handlers, so that every
   // toggle/close function above is already initialised when these bind.
+  // mathTokens is per-render scratch (cleared by markdown); this cache is what survives between
+  // renders. The same formula is rendered again on every streaming frame and on every history
+  // rebuild, and katex.renderToString dominates the cost of a math-bearing answer. Eviction is a
+  // plain FIFO delete so a long session cannot grow it without bound; a formula that falls out is
+  // simply rendered again.
+  const mathCache=new Map();
+  const MATH_CACHE_MAX=256;
   const mathTokens=[];
   const mathStart=String.fromCharCode(57346),mathEnd=String.fromCharCode(57347);
   const katexApi=()=>window.katex;
-  function renderMathHtml(tex,displayMode){const src=String(tex||'');if(!src.trim())return '';const katex=katexApi();if(!katex||typeof katex.renderToString!=='function')return '<code>'+esc(src)+'</code>';try{return katex.renderToString(src,{displayMode:Boolean(displayMode),throwOnError:false,errorColor:'var(--vscode-errorForeground,#f14c4c)',strict:'ignore',trust:false,output:'html'})}catch{return '<code>'+esc(src)+'</code>'}}
+  function renderMathHtml(tex,displayMode){const src=String(tex||'');if(!src.trim())return '';const key=(displayMode?'D:':'I:')+src;const hit=mathCache.get(key);if(hit!==undefined)return hit;const katex=katexApi();if(!katex||typeof katex.renderToString!=='function')return '<code>'+esc(src)+'</code>';let html;try{html=katex.renderToString(src,{displayMode:Boolean(displayMode),throwOnError:false,errorColor:'var(--vscode-errorForeground,#f14c4c)',strict:'ignore',trust:false,output:'html'})}catch{html='<code>'+esc(src)+'</code>'}if(mathCache.size>=MATH_CACHE_MAX)mathCache.delete(mathCache.keys().next().value);mathCache.set(key,html);return html}
   // Replaces inline math with a placeholder token so emphasis/list parsing cannot
   // corrupt the LaTeX, then renders it after the surrounding HTML is built.
   // Supports \(...\), \[...\] and $...$ (single dollar, with currency guards).
@@ -650,13 +657,40 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   // a composer growing, an inserted activity block). That second pass used to be queued on every
   // call, so one streamed token scheduled one extra frame of forced layout. Coalesce it: at most
   // one follow-up measurement is pending per tick, no matter how many callers asked.
-  let scrollFollowUp=0;
+  //
+  // Turns are content-visibility:auto, so turns above the viewport have an estimated height until
+  // they are laid out. Opening a long chat therefore grows scrollHeight over the next few frames,
+  // and a single pin can leave the newest answer a screen short of the bottom. Re-pin while the
+  // height is still settling, bounded so a pathological transcript cannot loop forever.
+  //
+  // Our own pins emit scroll events. While a render settles, those must not be mistaken for the
+  // user leaving the bottom: the old code read followOutput from them, and a pin that landed short
+  // switched follow off, which is why the second look at a long conversation sometimes stopped a
+  // screen above the newest answer. A real gesture clears the window immediately.
+  let scrollFollowUp=0,pinnedScrollHeight=-1,scrollLockUntil=0;
+  const lockScroll=()=>{scrollLockUntil=performance.now()+600};
+  const userScrolled=()=>{scrollLockUntil=0;followOutput=nearBottom();updateJump()};
   const scroll=(force=false)=>{
+    // A forced scroll follows a rebuilt transcript, whose height has nothing to do with the one that
+    // was on screen a moment ago (two conversations can reach the same height and then diverge).
+    if(force){pinnedScrollHeight=-1;lockScroll()}
     if(force||followOutput)pinScroll();
     updateJump();
     if(scrollFollowUp)return;
     const raf=typeof requestAnimationFrame==='function'?requestAnimationFrame:cb=>setTimeout(cb,16);
-    scrollFollowUp=raf(()=>{scrollFollowUp=0;if(followOutput)pinScroll();updateJump()});
+    let passes=0;
+    // Only a full render waits for the height to settle; a streamed frame keeps exactly one
+    // follow-up pin, so a fast-growing answer cannot turn into six pins per frame.
+    const settlePasses=force?6:1;
+    const settle=()=>{
+      scrollFollowUp=0;
+      if(followOutput)pinScroll();
+      updateJump();
+      const height=messages.scrollHeight;
+      if(passes++<settlePasses&&height!==pinnedScrollHeight){pinnedScrollHeight=height;lockScroll();scrollFollowUp=raf(settle)}
+      else pinnedScrollHeight=height;
+    };
+    scrollFollowUp=raf(settle);
   };
   function scrollActivity(){const body=activityBody,details=activity;requestAnimationFrame(()=>{if(body&&details?.open&&followOutput)body.scrollTop=body.scrollHeight});scroll()}
   function freshLive(){return{userItem:null,phase:'thinking',plan:null,currentRaw:'',errorText:null,errorRetry:false,activity:null,closedActivities:[]}}
@@ -717,6 +751,10 @@ function linkifyDevRefs(line,keep){
   return line}
 function inlineMarkdown(raw,allowMath){const tick=String.fromCharCode(96),tokenStart=String.fromCharCode(57344),tokenEnd=String.fromCharCode(57345),safeStart=String.fromCharCode(57346),safeEnd=String.fromCharCode(57347),codes=[],safe=[];const keep=html=>{safe.push(html);return safeStart+(safe.length-1)+safeEnd};let line=protectInlineMath(raw,allowMath);line=esc(line);line=line.replace(new RegExp(tick+'([^'+tick+'\\n]+)'+tick,'g'),(_,code)=>{codes.push(code);return tokenStart+(codes.length-1)+tokenEnd});line=line.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,label,url)=>keep('<a href="'+url+'">'+label+'</a>'));line=linkifyDevRefs(line,keep).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/__([^_]+)__/g,'<strong>$1</strong>').replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/_([^_]+)_/g,'<em>$1</em>');line=line.replace(new RegExp(tokenStart+'(\\d+)'+tokenEnd,'g'),(_,index)=>'<code>'+codes[Number(index)]+'</code>').replace(new RegExp(safeStart+'(\\d+)'+safeEnd,'g'),(_,index)=>safe[Number(index)]);return restoreMath(line)}
   function markdown(raw,allowMath){
+    // Math placeholders are only meaningful inside one call: every token is consumed by the
+    // restoreMath at the end of inlineMarkdown. Without the reset each render appended to the
+    // table forever, so a long session pinned every formula it had ever drawn.
+    mathTokens.length=0;
     const fence=String.fromCharCode(96).repeat(3),lines=String(raw).split(/\r?\n/);let html='',inCode=false,code='',list='',paragraph=[],table=[],inMath=false,mathBuf=[],fenceLang='';
     const md=line=>inlineMarkdown(line,allowMath);
     const flushParagraph=()=>{if(paragraph.length){html+='<p>'+paragraph.map(md).join(' ')+'</p>';paragraph=[]}};
@@ -727,7 +765,11 @@ function inlineMarkdown(raw,allowMath){const tick=String.fromCharCode(96),tokenS
     // the text back off the <code> node rather than carrying the source in an attribute — highlight()
     // escapes everything and only inserts spans, so textContent is exactly the original code.
     const CODE_TALL_ROWS=24;
-    const closeCode=()=>{
+    // The open flag marks a fence that has not closed yet: while a reply streams, the trailing block
+    // is re-rendered every frame, and tokenizing it each time is O(n) per frame over a block that
+    // only grows. Plain escaped text costs one pass with no span tree; the closed fence is
+    // highlighted once, exactly as before.
+    const closeCode=(open)=>{
       if(!inCode)return;
       const body=code.replace(/\n$/,'');
       const rowCount=body?body.split('\n').length:0;
@@ -740,7 +782,7 @@ function inlineMarkdown(raw,allowMath){const tick=String.fromCharCode(96),tokenS
     '<div class="code-bar"><span class="code-lang">' + esc(fenceLang) + '</span>' +
     (tall ? '<button class="code-toggle" type="button" aria-expanded="false" data-label="Expand ' + rowCount + ' lines">Expand ' + rowCount + ' lines</button>' : '') +
     '<button class="code-copy" type="button" aria-label="Copy code">Copy</button></div>' +
-    '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + highlight(body, fenceLang) + '</code></pre></div>';
+    '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + (open ? esc(body) : highlight(body, fenceLang)) + '</code></pre></div>';
   code = ''; inCode = false; fenceLang = '';
 };
 const flushMath = () => { if (inMath) { html += allowMath !== false ? ('<div class="math-block">' + renderMathHtml(mathBuf.join('\n'), true) + '</div>') : ('<p>' + md(mathBuf.join('\n')) + '</p>'); inMath = false; mathBuf = [] } };
@@ -764,7 +806,7 @@ for (const rawLine of lines) {
   const quote = rawLine.match(/^>\s?(.*)$/); if (quote) { flushParagraph(); html += '<blockquote>' + md(quote[1]) + '</blockquote>'; continue }
   paragraph.push(rawLine.trim())
 }
-flushParagraph(); closeList(); flushTable(); flushMath(); closeCode(); return html
+flushParagraph(); closeList(); flushTable(); flushMath(); closeCode(inCode); return html
   }
 const STARTERS = [
   { title: 'Build a feature', desc: 'Plan, implement, and verify a production-ready change.', prompt: 'Build this feature. Inspect the codebase first, make a concise implementation plan, implement it completely, and verify the result:\n\n' },
@@ -872,8 +914,8 @@ function changesCard(item) {
   const restore = card.querySelector('[data-undo-changes]'); if (restore) restore.onclick = async () => { const choice = await showNotifyModal({ title: 'Restore this task checkpoint?', body: 'Workspace files will return to the state captured before this response. If this is an older response, later conversation messages will also be removed.', ok: 'Restore checkpoint', cancel: 'Cancel', danger: true }); if (choice === 'ok') vscode.postMessage({ type: 'restoreCheckpoint', conversationId: activeConversationId, itemId: item.id }) }; return card
 }
 function userBubble(item) { const row = document.createElement('div'); row.className = 'user-row'; const wrapper = document.createElement('div'); wrapper.className = 'user-message'; const text = document.createElement('div'); text.className = 'user-text'; text.textContent = item.text; wrapper.append(text); for (const attachment of (item.attachments || [])) { if (attachment.kind === 'image' && attachment.previewDataUrl) { const image = document.createElement('img'); image.className = 'user-image-attachment'; image.src = attachment.previewDataUrl; image.alt = attachment.name || 'Attached image'; image.title = attachment.name || 'Attached image'; wrapper.append(image) } else if (attachment.kind !== 'image') { const chip = document.createElement('div'); chip.className = 'user-attachment'; chip.textContent = (attachment.kind === 'folder' ? '📁 ' : '📄 ') + attachment.path; wrapper.append(chip) } } wrapper.append(messageFooter(item, false)); row.appendChild(wrapper); return row }
-function closeCurrentText() { if (current) { flushStreamPaint(); current.classList.remove('streaming') } current = null; updateActivityChips() }
-function clearActivityRefs() { activity = activityBody = reasoning = null; taskCount = 0 }
+function closeCurrentText() { flushReasoningPaint(); if (current) { flushStreamPaint(); current.classList.remove('streaming') } current = null; updateActivityChips() }
+function clearActivityRefs() { flushReasoningPaint(); activity = activityBody = reasoning = null; taskCount = 0 }
 // A turn reads as Plan -> Tools -> Answer, but the transcript only ever showed the current
 // sentence in the summary, so a long run looked like one spinner that never resolved. Deriving the
 // three chips from state that already exists costs no new message and no host change.
@@ -927,6 +969,22 @@ const streamPaint = createFrameCoalescer(raw => {
   scroll()
 });
 const flushStreamPaint = () => { if (current) streamPaint.flushNow() };
+// Reasoning paint. The same two problems as the answer text, and the same cure: the reasoning
+// element used to be innerHTML = markdown(dataset.raw) per delta, so a long thought cost O(n^2),
+// and every delta wrote to the DOM regardless of the frame budget. Reasoning deltas arrive far
+// faster than they can be painted, so both halves matter here. One renderer per reasoning element
+// (a rebuilt activity gets a fresh element, hence the WeakMap) keeps the settled-prefix trick
+// intact.
+const reasoningRenderers = new WeakMap();
+const reasoningPaint = createFrameCoalescer(payload => {
+  const el = payload && payload.el;
+  if (!el || !el.isConnected) return;
+  let renderer = reasoningRenderers.get(el);
+  if (!renderer) { renderer = createStreamRenderer(markdown); reasoningRenderers.set(el, renderer) }
+  el.innerHTML = renderer.html(payload.raw, undefined);
+  if (el === reasoning) scrollActivity()
+});
+const flushReasoningPaint = () => reasoningPaint.flushNow();
 function planCard(title, steps, activeStep, doneSteps, interrupted) { const d = document.createElement('div'); d.className = 'plan'; const doneSet = new Set(doneSteps || []), list = steps || [], doneCount = list.filter((_, index) => doneSet.has(index)).length, total = list.length, percent = total ? Math.min(100, Math.round(doneCount / total * 100)) : 0; const head = document.createElement('div'); head.className = 'plan-head'; const h = document.createElement('div'); h.className = 'plan-title'; h.textContent = title || 'Plan'; head.appendChild(h); if (total) { const count = document.createElement('span'); count.className = 'plan-count'; count.textContent = doneCount + ' / ' + total; head.appendChild(count) } if (interrupted) { const badge = document.createElement('span'); badge.className = 'plan-badge'; badge.textContent = 'Interrupted'; head.appendChild(badge) } const collapse = document.createElement('button'); collapse.className = 'plan-collapse'; collapse.title = 'Collapse plan'; collapse.setAttribute('aria-label', 'Collapse or expand plan'); collapse.innerHTML = '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>'; collapse.onclick = () => d.classList.toggle('collapsed'); head.appendChild(collapse); d.appendChild(head); if (total) { const progress = document.createElement('div'); progress.className = 'plan-progress'; progress.innerHTML = '<span class="plan-progress-fill" style="width:' + percent + '%"></span>'; d.appendChild(progress); const currentLabel = list[activeStep]; if (currentLabel && !doneSet.has(activeStep)) { const currentStep = document.createElement('div'); currentStep.className = 'plan-current'; currentStep.textContent = (interrupted ? 'Paused: ' : 'Working: ') + currentLabel; d.appendChild(currentStep) } const ol = document.createElement('ol'); ol.className = 'plan-steps'; list.forEach((s, index) => { const isDone = doneSet.has(index); const isActive = index === activeStep && !isDone && !interrupted; const isPaused = index === activeStep && !isDone && interrupted; const li = document.createElement('li'); li.className = 'plan-step' + (isDone ? ' done' : '') + (isActive ? ' active' : '') + (isPaused ? ' paused' : ''); const state = document.createElement('span'); state.className = 'plan-state'; state.textContent = isDone ? '✓' : (isPaused ? '⏸' : ''); const label = document.createElement('span'); label.className = 'plan-label'; label.textContent = s; li.append(state, label); ol.appendChild(li) }); d.appendChild(ol) } return d }
 function showPlan(m) { plan.classList.add('visible'); plan.classList.toggle('done', Boolean(m.done)); plan.classList.toggle('interrupted', Boolean(m.interrupted)); plan.innerHTML = ''; plan.appendChild(planCard(m.title, m.steps, m.activeStep, m.doneSteps, Boolean(m.interrupted))); scroll() }
 function hidePlan() { plan.classList.remove('visible') }
@@ -1158,9 +1216,15 @@ syncSafetyControl();
 syncAgentPill();
 syncEffortPill();
 function submit() { let text = input.value.trim(); const wasRunning = isRunning(); if (wasRunning && !text && !attachments.length) { vscode.postMessage({ type: 'stop' }); return } if (!text && !attachments.length) return; if (text.startsWith('/')) { const slash = expandSlashPrompt(text); if (slash.handled) { input.value = ''; closeSlashMenu(); resize(); return } text = slash.text } if (!selectedModel) { addError('Choose a model first.'); return } recordPromptHistory(text); const sentAttachments = [...attachments]; const context = { includeProjectIndex, includeActiveFile, includeSelection, activeFile: editorContext.activeFile, selectionLines: editorContext.selectionLines, attachments: sentAttachments }; const optimisticText = text || 'Please inspect the attached files.'; const edit = editMessageState ? { ...editMessageState } : null; editMessageState = null; setEditBar(false); if (!edit && !wasRunning) runningSet.add(activeConversationId); input.value = ''; attachments = []; renderAttachments(); closeContextPanel(); closeSlashMenu(); resize(); if (!edit) { if (wasRunning) { const list = queuedByConversation.get(activeConversationId) || []; list.push({ id: 'tmp-' + Date.now(), text: optimisticText }); queuedByConversation.set(activeConversationId, list); updateQueuedVisibility(); vscode.postMessage({ type: 'send', text: optimisticText, conversationId: activeConversationId, context }); updateSendMode(); return } updateJump(); try { const now = Date.now(), optimistic = { id: 'tmp-' + now, role: 'user', text: optimisticText, timestamp: now, attachments: sentAttachments }; beginTurn(optimistic); createActivity(); const st = activity && activity.querySelector('.activity-status'); if (st) st.textContent = 'Sending…'; scroll(true) } catch (e) { } vscode.postMessage({ type: 'send', text: optimisticText, conversationId: activeConversationId, context }) } else { vscode.postMessage({ type: 'editUserMessage', conversationId: edit.conversationId, itemId: edit.itemId, text: optimisticText, context }) } }
-function resize() { input.style.height = 'auto'; const viewportCap = Math.max(72, Math.min(180, Math.floor(window.innerHeight * .28))); input.style.height = Math.min(input.scrollHeight, viewportCap) + 'px'; updateSendMode(); if (followOutput) pinScroll(); updateJump() }
+// Typing used to force layout four times per keystroke: input.oninput and the input listener
+// below both called resize() (two runs, two scrollHeight reads), and each run pinned the scroll
+// and re-measured the composer even when the box had not moved. Measure once, and touch the
+// transcript only when the box actually grew or shrank — which is what the observer used to echo
+// back a second time.
+let composerInputHeight = -1;
+let syncedComposerBoxHeight = -1;
+function resize() { input.style.height = 'auto'; const viewportCap = Math.max(72, Math.min(180, Math.floor(window.innerHeight * .28))); const height = Math.min(input.scrollHeight, viewportCap); input.style.height = height + 'px'; updateSendMode(); if (height === composerInputHeight) return; composerInputHeight = height; if (followOutput) pinScroll(); updateJump(); syncedComposerBoxHeight = composerEl ? composerEl.offsetHeight : syncedComposerBoxHeight }
 send.onclick = () => { if (isRunning()) { vscode.postMessage({ type: 'stop' }); return } submit() };
-input.oninput = resize;
 input.onkeydown = e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return }
   // Arrow-key carets move through multi-line drafts, so only recall when the
@@ -1214,8 +1278,8 @@ function openDevRef(el){const path=el.getAttribute('data-path');if(!path)return;
 // tab to the reference and then do nothing with it.
 messages.addEventListener('click',e=>{const el=e.target.closest&&e.target.closest('[data-devref]');if(!el)return;e.preventDefault();openDevRef(el)});
 messages.addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const el=e.target.closest&&e.target.closest('[data-devref]');if(!el)return;e.preventDefault();openDevRef(el)});
-messages.addEventListener('scroll', () => { followOutput = nearBottom(); updateJump() }); jumpBottom.onclick = () => { followOutput = true; scroll(true) }; projectIndicator.onclick = () => { if (projectIndicatorPath) vscode.postMessage({ type: 'revealInOS' }) }; document.getElementById('statPillGroup')?.addEventListener('click', () => toggleSessionInfo()); document.getElementById('statPillGroup')?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSessionInfo() } });
-if (typeof ResizeObserver !== 'undefined' && composerEl) new ResizeObserver(() => { updateJump(); placeOpenComposerMenus(); if (followOutput) pinScroll() }).observe(composerEl); window.addEventListener('resize', () => { resize(); updateJump(); placeOpenComposerMenus() }); window.visualViewport?.addEventListener('resize', () => placeOpenComposerMenus()); window.visualViewport?.addEventListener('scroll', () => placeOpenComposerMenus());
+messages.addEventListener('scroll', () => { if (performance.now() < scrollLockUntil) { updateJump(); return } followOutput = nearBottom(); updateJump() }); for (const gesture of ['wheel', 'touchstart', 'pointerdown', 'keydown']) messages.addEventListener(gesture, userScrolled, { passive: true }); jumpBottom.onclick = () => { followOutput = true; scroll(true) }; projectIndicator.onclick = () => { if (projectIndicatorPath) vscode.postMessage({ type: 'revealInOS' }) }; document.getElementById('statPillGroup')?.addEventListener('click', () => toggleSessionInfo()); document.getElementById('statPillGroup')?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSessionInfo() } });
+if (typeof ResizeObserver !== 'undefined' && composerEl) new ResizeObserver(() => { placeOpenComposerMenus(); if (composerEl.offsetHeight === syncedComposerBoxHeight) return; syncedComposerBoxHeight = composerEl.offsetHeight; updateJump(); if (followOutput) pinScroll() }).observe(composerEl); window.addEventListener('resize', () => { resize(); updateJump(); placeOpenComposerMenus() }); window.visualViewport?.addEventListener('resize', () => placeOpenComposerMenus()); window.visualViewport?.addEventListener('scroll', () => placeOpenComposerMenus());
 queued.onclick = (event) => { const button = event.target.closest('button[data-act]'); if (!button) return; const id = button.dataset.id; const act = button.dataset.act; if (act === 'steer') { vscode.postMessage({ type: 'steerQueued', conversationId: activeConversationId, id }); return } const list = queuedByConversation.get(activeConversationId) || []; const entry = list.find(item => item.id === id); if (!entry) return; if (act === 'edit') { queuedByConversation.set(activeConversationId, list.filter(item => item.id !== id)); updateQueuedVisibility(); vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }); input.value = entry.text; resize(); input.focus(); return } if (act === 'remove') { vscode.postMessage({ type: 'removeQueued', conversationId: activeConversationId, id }) } };
 document.getElementById('loginBannerBtn').onclick = () => vscode.postMessage({ type: 'requestSettings' });
 const undoBtn = document.getElementById('undoButton'), redoBtn = document.getElementById('redoButton'); if (undoBtn) undoBtn.onclick = async () => { const choice = await showNotifyModal(compactionUndoable ? { title: 'Undo compaction?', body: 'This will restore the full conversation that was compacted. You can redo later.', ok: 'Undo', cancel: 'Cancel' } : { title: 'Undo last turn?', body: 'This will remove the last assistant response and your last message. You can redo later.', ok: 'Undo', cancel: 'Cancel' }); if (choice === 'ok') vscode.postMessage({ type: 'undoLastTurn', conversationId: activeConversationId }) }; if (redoBtn) redoBtn.onclick = async () => { const choice = await showNotifyModal(compactionRedoable ? { title: 'Redo compaction?', body: 'This will re-apply the compaction you just undid.', ok: 'Redo', cancel: 'Cancel' } : { title: 'Redo last turn?', body: 'This will restore the last undone turn.', ok: 'Redo', cancel: 'Cancel' }); if (choice === 'ok') vscode.postMessage({ type: 'redoLastTurn', conversationId: activeConversationId }) };
@@ -1728,7 +1792,7 @@ window.addEventListener('message', async ({ data: m }) => {
     case 'resume': { const s = liveState(m.conversationId); s.phase = 'thinking'; s.activity = null; s.currentRaw = m.partialText || ''; if (m.conversationId === activeConversationId) { currentTurn = document.querySelector('.turn:last-child') || null; current = activity = activityBody = reasoning = null; followOutput = true; if (m.partialText) { current = document.createElement('div'); current.className = 'assistant streaming'; current.dataset.raw = m.partialText; current.innerHTML = markdown(m.partialText); currentTurn.appendChild(current) } scroll(true) } break }
     case 'workPhase': { const s = liveState(m.conversationId); s.phase = 'work'; if (s.activity) s.activity.reasoningParts.push(''); if (m.conversationId === activeConversationId) nextWorkPhase(); break }
     case 'delta': { const s = liveState(m.conversationId); s.currentRaw += m.text; s.phase = 'text'; closeLiveActivity(s); if (m.conversationId === activeConversationId) streamPaint.schedule(s.currentRaw); break }
-    case 'reasoningDelta': { const s = liveState(m.conversationId); ensureLiveActivity(s); const parts = s.activity.reasoningParts; parts[parts.length - 1] += m.text; if (m.conversationId === activeConversationId) { if (!currentTurn) { currentTurn = document.querySelector('.turn:last-child'); if (!currentTurn) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; messages.appendChild(currentTurn) } } ensureActivity(); enableActivity(); reasoning.dataset.raw += m.text; reasoning.innerHTML = markdown(reasoning.dataset.raw); scrollActivity() } break }
+    case 'reasoningDelta': { const s = liveState(m.conversationId); ensureLiveActivity(s); const parts = s.activity.reasoningParts; parts[parts.length - 1] += m.text; if (m.conversationId === activeConversationId) { if (!currentTurn) { currentTurn = document.querySelector('.turn:last-child'); if (!currentTurn) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; messages.appendChild(currentTurn) } } ensureActivity(); enableActivity(); reasoning.dataset.raw += m.text; reasoningPaint.schedule({ el: reasoning, raw: reasoning.dataset.raw }); scrollActivity() } break }
     case 'reasoningEnd': break;
     case 'plan': { const s = liveState(m.conversationId); s.plan = { title: m.title, steps: m.steps, activeStep: m.activeStep, doneSteps: m.doneSteps, interrupted: Boolean(m.interrupted), done: Boolean(m.done) }; if (m.conversationId === activeConversationId) showPlan(m); break }
     case 'subagent': { const s = liveState(m.conversationId); ensureLiveActivity(s); let sub = (s.activity.subagents || []).find(x => x.id === m.id); if (!sub) { sub = { id: m.id, role: m.role, name: m.name, done: false, ok: null, result: '', error: '' }; s.activity.subagents.push(sub); s.activity.taskCount++ } sub.name = m.name || sub.name; sub.role = m.role || sub.role; sub.done = m.phase === 'end'; if (m.phase === 'end') { sub.ok = m.ok !== false; sub.result = m.result || ''; sub.error = m.error || '' } s.activity.summary = m.phase === 'start' ? (m.name || 'Subagent working') : 'Working'; if (m.conversationId === activeConversationId) updateSubagent(m); break }

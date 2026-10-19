@@ -220,3 +220,56 @@ test('createFrameCoalescer paints at most once per scheduled frame', () => {
   coalescer.flushNow();
   assert.deepEqual(painted, ['c'], 'flushing an empty queue is a no-op');
 });
+
+test('reasoning deltas coalesce into a single paint per frame', async t => {
+  const { browser, page, dir } = await openComposer();
+  t.after(async () => {
+    await browser.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const sentence = 'Checking the refresh path. ';
+  const result = await page.evaluate(async text => {
+    window.__emit({ type: 'conversations', conversations: [{ id: 'c9', title: 'T', running: true }], activeId: 'c9' });
+    window.__emit({ type: 'conversation', id: 'c9', items: [] });
+    window.__emit({ type: 'user', conversationId: 'c9', item: { id: 'u9', role: 'user', text: 'go' } });
+    // 200 chunks land between two animation frames, which is what a fast provider looks like.
+    // The old handler ran a full `markdown()` per chunk here, so the DOM already held the whole
+    // thought by the end of the synchronous run and the cost was O(n^2).
+    for (let i = 0; i < 200; i++) window.__emit({ type: 'reasoningDelta', conversationId: 'c9', text });
+    const element = () => document.querySelector('.activity .reasoning');
+    const before = element()?.innerHTML ?? '';
+    await window.__frame();
+    return { before, after: element()?.innerHTML ?? '', raw: element()?.dataset.raw ?? '', text: element()?.textContent ?? '' };
+  }, sentence);
+
+  assert.equal(result.before, '', 'no chunk may paint before the scheduled frame runs');
+  assert.equal(result.raw, sentence.repeat(200), 'every chunk is still buffered, coalescing is paint-only');
+  assert.ok(result.after.length > 0, 'the scheduled frame must paint the buffered thought');
+  assert.equal(result.text.trim(), result.raw.trim(), 'the painted thought matches the buffered text');
+});
+
+test('a formula is rendered once per unique expression, not once per repaint', async t => {
+  const { browser, page, dir } = await openComposer();
+  t.after(async () => {
+    await browser.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const calls = await page.evaluate(async () => {
+    let n = 0;
+    // KaTeX is loaded asynchronously by the extension, so the runtime reads `window.katex` lazily;
+    // stubbing it here counts exactly how often the runtime asks it to render.
+    window.katex = { renderToString: src => { n++; return '<span class="katex">' + src + '</span>' } };
+    window.__emit({ type: 'conversations', conversations: [{ id: 'c8', title: 'T', running: false }], activeId: 'c8' });
+    const items = [{ id: 'u8', role: 'user', text: 'why' }, { id: 'a8', role: 'assistant', text: 'It is $x^2$ and also $y+1$.' }];
+    // Opening, then re-rendering the same turn four more times: five full passes over two formulas.
+    for (let i = 0; i < 5; i++) {
+      window.__emit({ type: 'conversation', id: 'c8', items });
+      await window.__frame();
+    }
+    return n;
+  });
+
+  assert.equal(calls, 2, `expected one render per unique formula across five repaints, saw ${calls}`);
+});

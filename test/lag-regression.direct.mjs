@@ -87,3 +87,21 @@ test('the conversation list sync stops copying and re-filtering per conversation
   assert.doesNotMatch(block, /this\.queue\.filter\(entry => entry\.conversationId === id\)/, 'per-conversation queue filtering was conversations x queue');
   assertSource(block, /const queued = queueByConversation\.get\(id\) \?\? \[\];/, 'each conversation reads its grouped queue');
 });
+
+test('turns that are scrolled off screen are neither laid out nor painted', () => {
+  const styles = readFileSync('src/webview/styles.ts', 'utf8');
+  assertSource(styles, /\.turn\{[^}]*content-visibility:auto[^}]*contain-intrinsic-size:auto \d+px/, 'a long transcript must not pay for offscreen turns');
+});
+
+test('typing in the composer forces layout once, not once per handler', () => {
+  assertSource(runtime, /const height = Math\.min\(input\.scrollHeight, viewportCap\)/, 'the composer measures its own height once per keystroke');
+  assert.doesNotMatch(runtime, /input\.oninput = resize/, 'a single input handler drives the composer');
+  assertSource(runtime, /if \(height === composerInputHeight\) return;/, 'an unchanged composer skips the transcript work');
+  assertSource(runtime, /if \(composerEl\.offsetHeight === syncedComposerBoxHeight\) return;/, 'the observer ignores the echo of our own resize');
+});
+
+test('a fence that is still streaming is escaped, not tokenized every frame', () => {
+  assertSource(runtime, /const closeCode=\(open\)=>\{/, 'the tail knows whether the fence closed');
+  assertSource(runtime, /\(open \? esc\(body\) : highlight\(body, fenceLang\)\)/, 'only a closed fence is highlighted');
+  assertSource(runtime, /closeCode\(inCode\); return html/, 'an unterminated fence takes the plain-text path');
+});
