@@ -259,4 +259,18 @@ check(/body\.compact \.reasoning\{[^}]*-webkit-line-clamp/.test(webviewStyles)
   && !/body\.compact \.reasoning\{[^}]*display:none/.test(webviewStyles),
   'compact density clamps reasoning instead of hiding it');
 
+// --- Turn timeline -------------------------------------------------------------------------------
+// The chips have to be a real list: a row of spans with no role reads as decorative text to a screen
+// reader, and "which step are we on" is precisely the question this feature exists to answer.
+check(webviewRuntime.includes('role="list" aria-label="Turn progress"')
+  && webviewRuntime.includes('role="listitem"')
+  && webviewRuntime.includes('aria-current="step"'),
+  'the turn timeline is a labelled list and marks the current step for assistive tech');
+// Derived from state that already exists, so there is nothing to keep in sync on the host side. If a
+// future change reaches for a new message type here, that is the thing to notice and reconsider.
+check(webviewRuntime.includes("if (!activity.classList.contains('loading')) return 'done';")
+  && webviewRuntime.includes("if (taskCount > 0) return 'tools';")
+  && webviewRuntime.includes("type: 'phase'") === false,
+  'the turn timeline is derived from the loading flag and tool count, not a new webview message');
+
 console.log(`LOGIC CHECK OK (${checks.length} checks)`);

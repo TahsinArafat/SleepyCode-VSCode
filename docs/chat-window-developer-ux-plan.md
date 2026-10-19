@@ -239,7 +239,7 @@ Add an `Esc`-ladder so the same key degrades gracefully instead of doing nothing
 
 **Problem:** §2-E, §2-H.
 
-**Status: linkify, error cards and density have landed. Turn-timeline phase chips have not. The developer-grade empty state was audited and found to already exist.**
+**Status: complete. Linkify, error cards, density and the turn timeline have landed. The developer-grade empty state was audited and found to already exist.**
 
 **Landed — linkify in prose.** The interesting part was not the regexes, it was the ordering. `inlineMarkdown` already swapped inline-code spans for sentinel placeholders before anything else ran, so a new pass placed after that step simply cannot see code. The second hazard was self-inflicted: a new pass must not reach inside markup an earlier pass generated, or `[see src/a.ts](https://x)` nests an anchor inside an anchor. So generated HTML now goes into a **second** placeholder channel and is substituted back only after every pass has run. The extension list is deliberate rather than "anything with a dot" — prose is full of dotted tokens (`i.e.`, `e.g.`, `and/or`, `foo/bar/baz`), and a false link is worse than a missed one because it turns a sentence into something clickable that opens the wrong file. A reference now carries its position through to the editor: `openFile` grew optional `line`/`column`, and the host opens a `Range` there.
 
@@ -249,7 +249,9 @@ Add an `Esc`-ladder so the same key degrades gracefully instead of doing nothing
 
 **Audited, not built — the empty state was already developer-grade.** This item described work that did not exist. `emptyState()` already renders the indexed file count ("137 files indexed"), the index status with its reindex affordance, the detected languages and frameworks, and a set of clickable starters that fill the composer. So `test/density.direct.mjs` pins what is already there rather than adding to it — the point is that a plan item reading "done" is now actually pinned, and a future edit cannot quietly drop the file count without a test failing.
 
-**Not landed:** turn-timeline phase chips. The activity panel already carries a phase label (`<summary>` renders `a.summary`, "Thinking…" / "Working…"), so what remains is a visual Plan → Tools → Answer timeline rather than missing information. It was not started.
+**Landed — the turn timeline.** Plan → Tools → Answer chips inside the existing activity `<summary>`, so no new surface and nothing to keep in sync on the host: the stage is derived from the loading flag and the tool count, both of which already exist. That constraint is contracted, because the natural next move for someone reading this code is to add a message type, and adding one would buy nothing at the cost of a second thing to keep correct.
+
+**The Answer chip is never the *active* one, and that is correct rather than unfinished.** `createTextSegment()` finishes the activity panel and drops its refs before the first answer token lands, so the panel's last live moment is "Tools" and Answer only ever appears as done. A fourth stage would describe a state the panel never passes through. An earlier draft of this work did put a "streaming beats closed" rule in the stage function to make Answer activatable; it turned out to be dead code, because `clearActivityRefs()` has already nulled the element by the time it could matter. It was removed rather than left in with a comment explaining why it was unreachable.
 
 **Files:** `src/webview/runtime.ts` (`inlineMarkdown` 546), `src/webview/styles.ts`.
 

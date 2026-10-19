@@ -289,4 +289,13 @@ export const WEBVIEW_STYLES = String.raw`
   body.compact .reasoning{-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
   body.compact .activity-body{gap:2px}
   body.compact .message-footer{margin-top:1px}
+  /* Turn timeline chips. These sit inside the existing <summary>, so they must not disturb the row:
+     inline, vertically centred, and quiet enough that the status sentence stays what you read first.
+     The active chip is the only one with a border, so the current phase is findable at a glance
+     without the row turning into three equally loud pills. */
+  .activity-summary-chips,.phase-chips{display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px}
+  .phase-chips{gap:4px}
+  .phase-chip{font-size:10px;line-height:16px;padding:0 7px;border-radius:9px;white-space:nowrap;color:color-mix(in srgb,var(--vscode-descriptionForeground) 55%,transparent);border:1px solid transparent}
+  .phase-chip.done{color:var(--vscode-descriptionForeground)}
+  .phase-chip.active{color:var(--vscode-textLink-foreground);border-color:color-mix(in srgb,var(--vscode-textLink-foreground) 45%,transparent);background:color-mix(in srgb,var(--vscode-textLink-foreground) 12%,transparent)}
 `;
