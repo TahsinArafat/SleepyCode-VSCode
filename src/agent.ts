@@ -2511,7 +2511,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (message.type === 'openFile') {
       try {
         const uri = this.resolveWorkspacePath(message.path);
-        await vscode.window.showTextDocument(uri);
+        // A reference written as src/a.ts:42:7 should land the caret there, not at the top of the
+        // file. Editor positions are zero-based and a written reference is one-based, so both are
+        // decremented together; a reference with no line keeps the previous behaviour exactly.
+        const options: vscode.TextDocumentShowOptions = {};
+        if (message.line) {
+          const row = Math.max(0, message.line - 1);
+          const col = Math.max(0, (message.column ?? 1) - 1);
+          options.selection = new vscode.Range(row, col, row, col);
+        }
+        await vscode.window.showTextDocument(uri, options);
       } catch (error) {
         vscode.window.showErrorMessage(errorMessage(error));
       }

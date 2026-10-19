@@ -265,6 +265,17 @@ export const WEBVIEW_STYLES = String.raw`
   .composer-caption{font-size:10px;line-height:1.4;color:var(--vscode-descriptionForeground);padding:2px 4px 0;opacity:.75;transition:opacity .18s ease}
   .composer-caption.faded{opacity:0}
   @media (prefers-reduced-motion:reduce){.composer-caption{transition:none}}
+  /* Error-card actions beyond Retry. These are named actions a user reads, not glyphs to guess at,
+     so they sit beside the icon button rather than replacing it. */
+  .error-action{font:inherit;font-size:11px;padding:3px 9px;border:1px solid var(--vscode-panel-border);border-radius:4px;background:transparent;color:var(--vscode-foreground);cursor:pointer}
+  .error-action:hover{background:var(--vscode-list-hoverBackground)}
+  .error-action:focus-visible{outline:1px solid var(--vscode-focusBorder,currentColor);outline-offset:1px}
+  .error-action.copied{color:var(--vscode-testing-iconPassed,var(--vscode-charts-green))}
+  /* A path written in prose. Dotted to read as a reference without shouting, and the monospace face
+     is what makes src/a.ts:42 legible as a coordinate rather than a word. */
+  .dev-ref{font-family:var(--vscode-editor-font-family);font-size:.95em;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;border-radius:2px;cursor:pointer}
+  .dev-ref:hover{color:var(--vscode-textLink-activeForeground);background:var(--vscode-list-hoverBackground)}
+  .dev-ref:focus-visible{outline:1px solid var(--vscode-focusBorder,currentColor);outline-offset:2px}
   /* Cmd/Ctrl+/ shortcut cheatsheet. Anchored to the composer so it never covers the transcript it
      is describing, and focusable so Escape has somewhere to return to. */
   .shortcut-panel{position:absolute;left:8px;right:8px;bottom:calc(100% - 4px);z-index:40;display:flex;flex-direction:column;gap:1px;padding:8px 10px;border:1px solid var(--vscode-panel-border);border-radius:6px;background:var(--vscode-editorWidget-background);box-shadow:0 6px 22px var(--vscode-widget-shadow)}

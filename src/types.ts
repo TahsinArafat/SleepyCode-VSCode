@@ -48,7 +48,7 @@ export type WebMessage =
   | { type: 'openSleepyDashboard' }
   | { type: 'openSleepyWebsite' }
   | { type: 'resetSettings' }
-  | { type: 'openFile'; path: string }
+  | { type: 'openFile'; path: string; line?: number; column?: number }
   | { type: 'chooseContext' }
   | { type: 'compact'; conversationId?: string }
   | { type: 'cancelCompact'; conversationId?: string }

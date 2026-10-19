@@ -206,4 +206,38 @@ check(/id="composerCaption"/.test(webviewMarkup) && /Shift\+Enter for a new line
 check(!/id="(modelMenu|effortMenu|agentMenu|safetyMenu|conversationMenu|moreActionsMenu)"[^>]*role="menu"/.test(webviewMarkup),
   'disclosure popovers do not claim role=menu, because they move real focus instead of roving tabindex');
 
+// --- Findability: developer references in prose ------------------------------------------------
+// The ordering here is the whole correctness argument. Inline code is swapped for sentinel
+// placeholders *before* the reference pass runs, and every pass writes its HTML into a second
+// placeholder channel, so a later pass can never reach inside markup an earlier one generated.
+check(/codes\.push\(code\);return tokenStart/.test(webviewRuntime) && /line=linkifyDevRefs\(line,keep\)/.test(webviewRuntime)
+  && /const tick=String\.fromCharCode\(96\)/.test(webviewRuntime),
+  'inline code is placeholder-protected before the developer-reference pass runs, so code spans stay inert');
+check(webviewRuntime.includes('const keep=html=>{safe.push(html);return safeStart+(safe.length-1)+safeEnd}')
+  && webviewRuntime.includes("new RegExp(safeStart+'") && webviewRuntime.includes("+safeEnd,'g')"),
+  'generated anchors are stashed in their own placeholder channel and restored last');
+// A false link is worse than a missed one: it turns a sentence into something clickable that opens
+// the wrong file. The extension list is what keeps i.e. / and\/or / foo\/bar\/baz out of the DOM.
+check(webviewRuntime.includes("const DEV_REF_EXT='ts|tsx|mts|cts|js")
+  && webviewRuntime.includes('function splitRefPosition')
+  && webviewRuntime.includes('const two=/^(.*):(\\d+):(\\d+)$/.exec(text)||/^(.*):(\\d+)$/.exec(text)'),
+  'references are matched against an explicit extension list and only a trailing numeric position is split off');
+check(webviewRuntime.includes('const DEV_FILE_RE=/(?<!')
+  && webviewRuntime.includes('const DEV_URL_RE=/(?<!')
+  && webviewRuntime.includes("new RegExp('(?<!"),
+  'each reference pass is guarded by a lookbehind so it cannot fire inside generated markup or the tail of a URL');
+// A reference must actually reach the editor at the right position, not just look clickable.
+check(/type: 'openFile'; path: string; line\?: number; column\?: number/.test(types)
+  && /data-line="'\+line/.test(webviewRuntime)
+  && /new vscode\.Range\(row, col, row, col\)/.test(agent),
+  'a file reference carries its position from the webview to the editor');
+check(/data-devref\b/.test(webviewRuntime) && /role="link" tabindex="0"/.test(webviewRuntime),
+  'prose references answer Enter and Space as well as a click, because a role=link must');
+// Error cards: extend, never replace. Losing Retry would be a regression, not a cleanup.
+check(/function errorActions\(errorText\)/.test(webviewRuntime) && /appendChild\(retryButton\(\)\)/.test(webviewRuntime)
+  && /copy\.textContent = 'Copy error'/.test(webviewRuntime) && /logs\.textContent = 'Open logs'/.test(webviewRuntime),
+  'an error card still offers Retry and now also Copy error and Open logs');
+check(/type: 'requestExtensionLogs'/.test(webviewRuntime) && /getElementById\('extensionLogs'\)/.test(webviewRuntime),
+  'Open logs reveals the existing log view instead of adding a second place to read the same thing');
+
 console.log(`LOGIC CHECK OK (${checks.length} checks)`);
