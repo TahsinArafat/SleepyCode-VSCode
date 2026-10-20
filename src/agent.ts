@@ -2439,6 +2439,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       void this.refreshModels();
       return;
     }
+    if (message.type === 'refreshModels') {
+      // The picker's own retry: refetch catalogs without re-running the whole
+      // `ready` boot sequence.
+      await this.refreshModels();
+      return;
+    }
     if (message.type === 'selectReasoningEffort') {
       // Per-conversation, not global: two chats can legitimately want
       // different budgets. Unknown values coerce to the default.
@@ -4801,6 +4807,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       ? [defaultProvider]
       : providers.filter(provider => this.providerConfigured(provider) || provider.id === config.activeProvider);
     const groups: ProviderModelGroup[] = [];
+    this.post({ type: 'modelsLoading' });
     await Promise.all(targets.map(async provider => {
       try {
         const models = sortModelsA2Z(await fetchProviderModels(provider, this.providerApiKey(provider), config.extraFreeModels));

@@ -4,7 +4,7 @@ import { HIGHLIGHT_SOURCE } from './highlight';
 import { STREAM_FRAME_SOURCE, STREAM_RENDER_SOURCE } from './stream-render';
 
 export function getWebviewRuntime(markUri: string, gitTracked: boolean): string {
-  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),composerEl=document.querySelector('.composer'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',modelGroups=[],liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
+  return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),composerEl=document.querySelector('.composer'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',modelGroups=[],modelGroupsLoading=true,modelLoadError='',liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
   const effortDropdown=document.getElementById('effortDropdown'),effortButton=document.getElementById('effortButton'),effortMenu=document.getElementById('effortMenu');
   const agentDropdown=document.getElementById('agentDropdown'),agentButton=document.getElementById('agentButton'),agentMenu=document.getElementById('agentMenu'),agentIcon=document.getElementById('agentIcon'),safetyDropdown=document.getElementById('safetyDropdown'),safetyButton=document.getElementById('safetyButton'),safetyMenu=document.getElementById('safetyMenu'),contextPanel=document.getElementById('contextPanel'),contextItems=document.getElementById('contextItems'),contextPanelMeta=document.getElementById('contextPanelMeta'),contextSummaryButton=document.getElementById('contextSummaryButton'),contextSummaryText=document.getElementById('contextSummaryText');
   const AGENTS=[
@@ -1101,13 +1101,37 @@ function compactPrice(value) { if (value === undefined || value === null) return
 function modelMeta(m, mid, providerId) { if (typeof m === 'object' && m && m.isAuto) return 'Cheapest model first · A–Z fallback'; const price = providerId === 'sleepyai' ? (sleepyModelPrices || []).find(p => p.modelId === mid || p.name === mid || p.name === modelNameOf(m)) : undefined; const context = (typeof m === 'object' && m && m.contextWindow) || price?.contextWindow || 0; const parts = []; if (typeof m === 'object' && m && m.recommended) parts.push('Recommended'); if (context) parts.push(fmt(context) + ' context'); if (price && price.inputPrice !== undefined && price.outputPrice !== undefined) parts.push(compactPrice(price.inputPrice) + ' / ' + compactPrice(price.outputPrice) + ' per 1M in/out'); return parts.join(' · ') }
 let modelQuery = '';
 function modelMatches(m, mid, providerName) { const q = modelQuery.trim().toLowerCase(); if (!q) return true; return [modelNameOf(m), mid, providerName].some(v => String(v || '').toLowerCase().includes(q)) }
+function dropdownStateAction(label, run) { const button = document.createElement('button'); button.type = 'button'; button.className = 'dropdown-state-action'; button.textContent = label; button.onclick = run; return button }
+function modelMenuState() {
+  const state = document.createElement('div');
+  state.className = 'dropdown-state';
+  if (modelGroupsLoading) {
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    state.appendChild(spinner);
+  } else if (modelLoadError) state.classList.add('dropdown-state-error');
+  const copy = document.createElement('span');
+  copy.className = 'dropdown-state-copy';
+  const title = document.createElement('span');
+  title.className = 'dropdown-state-title';
+  title.textContent = modelGroupsLoading ? 'Loading models…' : modelLoadError ? 'Models unavailable' : 'No models available';
+  const note = document.createElement('span');
+  note.className = 'dropdown-state-note';
+  note.textContent = modelGroupsLoading ? 'Asking each configured provider for its model list.' : modelLoadError || 'No provider returned a model list. Add a provider key, then reload.';
+  copy.append(title, note);
+  if (!modelGroupsLoading) {
+    const actions = document.createElement('span');
+    actions.className = 'dropdown-state-actions';
+    actions.append(dropdownStateAction('Reload models', () => vscode.postMessage({ type: 'refreshModels' })), dropdownStateAction('Open Settings', () => vscode.postMessage({ type: 'requestSettings' })));
+    copy.appendChild(actions);
+  }
+  state.appendChild(copy);
+  return state;
+}
 function renderModelMenu() {
   modelMenu.innerHTML = '';
   if (!modelGroups.length) {
-    const empty = document.createElement('div');
-    empty.className = 'dropdown-empty';
-    empty.textContent = 'No models available yet.';
-    modelMenu.appendChild(empty);
+    modelMenu.appendChild(modelMenuState());
     return;
   }
   const search = document.createElement('div');
@@ -1145,7 +1169,25 @@ function renderModelMenu() {
       results.appendChild(opt);
     }
   }
-  if (!total) { const none = document.createElement('div'); none.className = 'dropdown-empty'; none.textContent = 'No models match \u201c' + modelQuery + '\u201d.'; results.appendChild(none) }
+  if (!total) {
+    const none = document.createElement('div');
+    none.className = 'dropdown-state';
+    const copy = document.createElement('span');
+    copy.className = 'dropdown-state-copy';
+    const title = document.createElement('span');
+    title.className = 'dropdown-state-title';
+    title.textContent = 'No models match “' + modelQuery + '”';
+    const note = document.createElement('span');
+    note.className = 'dropdown-state-note';
+    note.textContent = 'Search covers model name, id, and provider.';
+    const actions = document.createElement('span');
+    actions.className = 'dropdown-state-actions';
+    actions.appendChild(dropdownStateAction('Clear search', () => { modelQuery = ''; renderModelMenu(); const next = modelMenu.querySelector('.model-search'); next && next.focus() }));
+    copy.append(title, note, actions);
+    none.appendChild(copy);
+    results.appendChild(none);
+  }
+
   if (modelMenu.classList.contains('open')) requestAnimationFrame(() => placeAnchoredMenu(modelMenu, modelDropdown || modelButton));
   searchInput.oninput = () => { modelQuery = searchInput.value; renderModelMenu(); const next = modelMenu.querySelector('.model-search'); if (next) { next.focus(); const end = next.value.length; try { next.setSelectionRange(end, end) } catch { } } }
   searchInput.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (modelQuery) { modelQuery = ''; renderModelMenu(); const next = modelMenu.querySelector('.model-search'); next && next.focus() } else closeModelMenu() } }
@@ -1178,7 +1220,7 @@ function renderEffortMenu() {
     const opt = document.createElement('button');
     opt.type = 'button';
     opt.className = 'dropdown-option effort-option' + (e.id === reasoningEffort ? ' selected' : '');
-    opt.innerHTML = '<span class="effort-option-main"><span class="effort-option-name">' + esc(e.name) + (e.id === reasoningEffort ? '<span class="model-option-check">✓</span>' : '') + '</span><span class="effort-option-desc">' + esc(e.desc) + '</span></span>';
+    opt.innerHTML = '<span class="effort-option-main"><span class="effort-option-head"><span class="effort-option-name">' + esc(e.name) + '</span>' + (e.id === reasoningEffort ? '<span class="model-option-check">✓</span>' : '') + '</span><span class="effort-option-desc">' + esc(e.desc) + '</span></span>';
     opt.onclick = () => selectEffort(e.id);
     effortMenu.appendChild(opt);
   }
@@ -1780,9 +1822,10 @@ window.addEventListener('message', async ({ data: m }) => {
     case 'mcpConnectionResult': { if (m.status) setMcpStatus(m.status.name, m.status); else if (m.statuses) for (const status of m.statuses) setMcpStatus(status.name, status); renderMcpConnections(); const authHint = m.status && m.status.state === 'auth_required' ? ' Sign in with OAuth: edit this connection and choose Connect OAuth.' : ''; if (settingsResult) { clearTimeout(settingsSavedTimer); if (m.ok) { settingsResult.className = 'settings-result'; void settingsResult.offsetWidth; settingsResult.textContent = m.text || 'Saved'; settingsResult.className = 'settings-result ok'; settingsSavedTimer = setTimeout(() => { settingsResult.textContent = ''; settingsResult.className = 'settings-result' }, 1800) } else { settingsResult.textContent = (m.text || 'MCP connection failed.') + authHint; settingsResult.className = 'settings-result bad' } } break }
     case 'sleepyStatus': sleepyAccount = { loggedIn: Boolean(m.loggedIn), email: m.email || sleepyAccount?.email || '', tier: m.tier || sleepyAccount?.tier || '', limits: m.limits || sleepyAccount?.limits, balances: m.balances || sleepyAccount?.balances, subscription: m.subscription || sleepyAccount?.subscription, modelPrices: m.modelPrices || sleepyAccount?.modelPrices }; sleepyBusy = Boolean(m.busy); sleepyStatusText = m.text || ''; if (m.modelPrices && m.modelPrices.length) sleepyModelPrices = m.modelPrices; if (m.loggedIn && m.provider) { providersList = providersList || []; const existingIndex = providersList.findIndex(p => p.id === 'sleepyai'); if (existingIndex >= 0) providersList[existingIndex] = m.provider; else providersList.unshift(m.provider); activeProvider = 'sleepyai' } renderSleepyCard(); renderProviderList(); renderModelMenu(); if (usageView.classList.contains('visible')) renderUsage(); updateSessionStats(); refreshEmpty(); break;
     case 'config': if (m.model) { selectedModel = m.model; modelButton.textContent = findModelName(m.model); modelButton.title = m.model } if (m.reasoningEffort) reasoningEffort = findEffort(m.reasoningEffort).id; syncEffortPill(); if (m.approvalMode) { approvalMode.value = m.approvalMode; syncSafetyControl() } if (m.agentId) { selectedAgentId = m.agentId; syncAgentPill() } break;
-    case 'models': { modelGroups = m.groups || []; selectedModel = m.selected || ''; modelButton.textContent = selectedModel ? findModelName(selectedModel) : 'Choose model…'; modelButton.title = selectedModel; renderModelMenu(); renderCompactionModelOptions(); renderSubagentModelOptions(); updateSessionStats(); break }
+    case 'models': { modelGroups = m.groups || []; modelGroupsLoading = false; modelLoadError = ''; selectedModel = m.selected || ''; modelButton.textContent = selectedModel ? findModelName(selectedModel) : 'Choose model…'; modelButton.title = selectedModel; renderModelMenu(); renderCompactionModelOptions(); renderSubagentModelOptions(); updateSessionStats(); break }
     case 'modelRoute': { if (m.conversationId === activeConversationId) { const s = liveState(m.conversationId); ensureLiveActivity(s); s.activity.summary = 'Auto routed to ' + (findModelName(m.model) || m.model); if (currentTurn) { ensureActivity(); enableActivity(); const d = document.createElement('div'); d.className = 'route-note'; d.textContent = 'Auto → ' + (findModelName(m.model) || m.model) + (m.reason ? ' · ' + m.reason : ''); activityBody.appendChild(d); scrollActivity() } } break }
-    case 'modelsError': addError(m.text); break;
+    case 'modelsLoading': modelGroupsLoading = true; modelLoadError = ''; renderModelMenu(); break;
+    case 'modelsError': modelGroupsLoading = false; modelLoadError = m.text || 'No provider returned a model list.'; renderModelMenu(); addError(m.text); break;
     case 'showUsage': openUsageView(); break; case 'showMarketplace': openMarketplaceView(); break; case 'showPanel': openPanelView(m.panel); break; case 'marketplaceInstalled': installedSkills = m.skills || []; installedSkillsLoaded = true; renderInstalledSkills(); if (marketplaceView.classList.contains('visible')) renderMarketplaceResults(); if (skillPickerOpen) refreshSkillPicker(); break; case 'marketplaceResults': { marketplaceBusy = false; marketplaceCards = (m.skills || []).map(x => ({ key: x.githubUrl || x.name, name: x.name, author: x.author || '', description: x.description || '', meta: (x.stars ? String(x.stars) + ' ★' : '') + (x.author ? ' · ' + esc(x.author) : ''), installed: installedMatch(x.author, x.name) })); marketplaceActions = (m.skills || []).map(x => ({ preview: x.githubUrl ? { source: x.githubUrl, path: '' } : null, install: x.githubUrl ? { source: x.githubUrl, skill: undefined } : null })); marketplaceHeading = m.query ? 'Search results' : 'Popular skills'; marketplaceHint = m.query ? 'Try another search to explore more.' : 'Search above to discover more skills.'; marketplaceStatusText(m.query ? 'Found ' + (m.total || (m.skills || []).length) + ' skills for "' + m.query + '".' : '', true); renderMarketplaceResults(); break } case 'marketplaceRepoSkills': { marketplaceBusy = false; const source = m.owner + '/' + m.repo; marketplaceCards = (m.skills || []).map(x => ({ key: source + '/' + x.path, name: x.name, author: source, description: '', meta: 'from ' + esc(source), installed: installedMatch(source, x.name) })); marketplaceActions = (m.skills || []).map(x => ({ preview: { source, path: x.path }, install: { source, skill: x.name } })); marketplaceHeading = 'Skills in ' + source; marketplaceHint = 'Preview a skill before installing it.'; marketplaceStatusText((m.skills || []).length + ' skills found.', true); renderMarketplaceResults(); break } case 'marketplacePreview': { previewContent.innerHTML = markdown(m.markdown || ''); previewInstall.style.display = ''; document.getElementById('previewTitle').textContent = m.title || 'Skill preview'; break } case 'marketplaceInstallProgress': { const st = marketplaceInstalling[m.key]; if (st) { st.done = m.done || 0; st.total = m.total || 0; st.label = 'Installing… ' + (m.done || 0) + '/' + (m.total || 0) + ' files'; updateCardProgress(m.key); updatePreviewProgress(m.key) } break } case 'marketplaceResult': { if (m.key) delete marketplaceInstalling[m.key]; marketplaceStatusText(m.text, !!m.ok); if (m.ok) { if (previewState && previewState.key === m.key) { closeSkillPreview() } if (marketplaceView.classList.contains('visible')) vscode.postMessage({ type: 'requestMarketplaceInstalled' }) } else { if (previewState && previewState.key === m.key) { previewProgress.classList.add('visible', 'error'); previewProgressFill.style.width = '100%'; previewProgressLabel.textContent = m.text || 'Install failed.' } renderMarketplaceResults() } break } case 'marketplaceError': { marketplaceBusy = false; marketplaceStatusText(m.text || 'Request failed.', false); renderMarketplaceResults(); break }
     case 'usage': usageData = m; if (usageView.classList.contains('visible')) renderUsage(); updateSessionStats(); break;
     case 'panel': renderPanel(m); break;

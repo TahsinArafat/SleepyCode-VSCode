@@ -26,6 +26,7 @@ export type WebMessage =
   | { type: 'setKey' }
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'selectReasoningEffort'; effort: string }
+  | { type: 'refreshModels' }
   | { type: 'requestSettings' }
   | { type: 'requestExtensionLogs' }
   | { type: 'clearExtensionLogs' }
