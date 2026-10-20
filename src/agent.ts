@@ -257,6 +257,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private activeProjectId = '';
   private loaded = false;
   private runs = new Map<string, ActiveRun>();
+  private mcpNoticeSignatures = new Map<string, string>();
   private queue: { id: string; text: string; conversationId: string; context?: ComposerContext; promptContext?: string }[] = [];
   private queueSeq = 0;
   private apiKeys: Record<string, string> = {};
@@ -3239,15 +3240,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
       mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
         ? await Promise.race([
-          connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(() => ({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => { } })),
-          new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['Legacy MCP timed out'], close: async () => { } }), 10_000)),
+          connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], close: async () => { } })),
+          new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], close: async () => { } }), 10_000)),
         ])
         : { tools: {}, instructions: [], errors: [], close: async () => { } };
       this.log('info', 'run.mcp.legacy.done');
-      const savedConnections = await Promise.race([
-        loadMcpConnections(this.context).catch(() => [] as McpConnectionData[]),
-        new Promise<McpConnectionData[]>(resolve => setTimeout(() => resolve([]), 3_000)),
-      ]);
+      let savedLoadError = '';
+      const savedConnections = await loadMcpConnections(this.context).catch(error => {
+        savedLoadError = `Saved MCP connections could not be read: ${errorMessage(error)}`;
+        this.log('error', 'run.mcp.load.failed', errorMessage(error));
+        return [] as McpConnectionData[];
+      });
       this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
       if (savedConnections.some((c) => c.enabled)) {
         const baseConnection = mcpConnection;
@@ -3265,6 +3268,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
           },
         };
+      }
+      if (savedLoadError) mcpConnection.errors.push(savedLoadError);
+      if (mcpConnection.errors.length) {
+        // A server that fails to connect used to leave one line buried in the
+        // system prompt, so "MCP is not working" had no visible cause. Say it
+        // once per distinct failure instead of every turn.
+        const signature = mcpConnection.errors.join('\n');
+        if (this.mcpNoticeSignatures.get(conversationId) !== signature) {
+          this.mcpNoticeSignatures.set(conversationId, signature);
+          this.post({ type: 'contextNotice', conversationId, kind: 'mcp', text: `MCP: ${mcpConnection.errors.join(' · ')}` });
+        }
+      } else {
+        this.mcpNoticeSignatures.delete(conversationId);
       }
       const instructions = [
         await this.systemPrompt(root, selection.agentId),
