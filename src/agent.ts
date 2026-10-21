@@ -293,6 +293,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private subagentSequence = 0;
   private compactionControllers = new Map<string, AbortController>();
   private lastAutoCompactAt = new Map<string, number>();
+  /** Last captured git tree + the fs version at capture start, so a clean workspace reuses it. */
+  private lastGitTree: { root: string; tree: string; version: number } | undefined;
+  /** Bumped on every workspace file change; gates reuse of `lastGitTree`. */
+  private fsVersion = 0;
+  /** Cached merged MCP connection, reused across turns while its config signature is unchanged. */
+  private mcpCache: { key: string; connection: McpConnection } | undefined;
 
   /**
    * Which engine owns the run loop. The Sleepy CLI owns it whenever it is
@@ -313,14 +319,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Which setting `engineReady` resolved under, so a toggle can re-resolve without racing the resolve in flight. */
   private engineUseCli: boolean | undefined;
 
+  /** Close and forget the cached MCP connection (on config change or deactivate). */
+  private closeMcpCache(): void {
+    const cached = this.mcpCache?.connection;
+    this.mcpCache = undefined;
+    if (cached) void cached.close().catch(() => { });
+  }
+
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
+    const onFsEvent = (uri: vscode.Uri): void => {
+      this.fsVersion++;
+      this.scheduleProjectReindex(uri);
+    };
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(
       watcher,
-      watcher.onDidCreate(uri => this.scheduleProjectReindex(uri)),
-      watcher.onDidChange(uri => this.scheduleProjectReindex(uri)),
-      watcher.onDidDelete(uri => this.scheduleProjectReindex(uri)),
+      watcher.onDidCreate(onFsEvent),
+      watcher.onDidChange(onFsEvent),
+      watcher.onDidDelete(onFsEvent),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.onWorkspaceFoldersChanged()),
       vscode.window.onDidChangeActiveTextEditor(() => this.sendEditorContext()),
       vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContext()),
@@ -328,6 +345,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
     context.subscriptions.push({ dispose: () => { void this.shutdownCli(); } });
+    context.subscriptions.push({ dispose: () => this.closeMcpCache() });
+    // Warm the SleepyAI token in the background so the first send doesn't block on a cold refresh.
+    void getSleepyToken().catch(() => { });
   }
 
   /**
@@ -1030,6 +1050,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (uri.path.replace(/\/+$/, '').endsWith('/mcp/oauth/callback')) {
       try {
         const name = await finishMcpOAuth(uri, this.context);
+        this.closeMcpCache();
         this.post({ type: 'toast', id: Date.now(), title: 'MCP authorized', message: `Authorization completed for ${name}.`, kind: 'info' });
         void vscode.window.showInformationMessage(`SleepyCode: MCP connection "${name}" is authorized.`);
         await this.sendMcpConnections();
@@ -2928,10 +2949,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // event. This is the authoritative undo checkpoint for tracked projects.
     let runGitTree = gitTracked ? carryTree : undefined;
     if (gitTracked && !runGitTree) {
-      try {
-        runGitTree = await captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 });
-      } catch (error) {
-        this.log('warn', 'run.checkpoint.unavailable', errorMessage(error));
+      const versionAtSend = this.fsVersion;
+      if (this.lastGitTree?.root === root.fsPath && this.lastGitTree.version === versionAtSend) {
+        // Workspace unchanged since the last capture: reuse the tree instead of
+        // running `git add -A` again.
+        runGitTree = this.lastGitTree.tree;
+      } else {
+        // Capture the undo checkpoint without blocking send: `runGitTree` is only
+        // consumed after the stream (undo checkpointing and post-run diffs), never on
+        // the first-byte path. Awaiting it here made every send wait on `git add -A`.
+        void captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 })
+          .then(tree => {
+            runGitTree = tree;
+            this.lastGitTree = { root: root.fsPath, tree, version: versionAtSend };
+          })
+          .catch(error => this.log('warn', 'run.checkpoint.unavailable', errorMessage(error)));
       }
     }
     // Only steering carries this turn's original checkpoint into the replacement
@@ -3025,6 +3057,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let planItem: WorkItem | undefined;
     let planState: PlanState | undefined;
     let mcpConnection: McpConnection | undefined;
+    let mcpCached = false;
     // Keep the in-progress record durable while text is streaming and whenever
     // a tool starts/finishes or changes a file. Completed SDK response messages
     // are merged by onStepFinish below, so tool calls/results survive a later
@@ -3152,7 +3185,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       let sleepyToken: string | undefined;
       if (providerConfig.isSleepy) {
         this.log('info', 'run.auth.start', providerConfig.id);
-        sleepyToken = (await abortableTimeout(getSleepyToken(), 15_000, run.controller.signal, 'SleepyAI authentication')) ?? undefined;
+        sleepyToken = getSleepyTokenSync() ?? (await abortableTimeout(getSleepyToken(), 15_000, run.controller.signal, 'SleepyAI authentication')) ?? undefined;
         this.log('info', 'run.auth.done', providerConfig.id);
         if (!sleepyToken) throw new Error('SleepyAI session is missing or expired. Sign in again from Settings.');
       }
@@ -3237,39 +3270,55 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const projectMemory = '';
       this.log('info', 'run.fastlane.ready', 'automatic scans disabled');
       const rawMcpServers = this.config().mcpServers;
-      this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
-      mcpConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
-        ? await Promise.race([
-          connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], close: async () => { } })),
-          new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], close: async () => { } }), 10_000)),
-        ])
-        : { tools: {}, instructions: [], errors: [], close: async () => { } };
-      this.log('info', 'run.mcp.legacy.done');
       let savedLoadError = '';
       const savedConnections = await loadMcpConnections(this.context).catch(error => {
         savedLoadError = `Saved MCP connections could not be read: ${errorMessage(error)}`;
         this.log('error', 'run.mcp.load.failed', errorMessage(error));
         return [] as McpConnectionData[];
       });
-      this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
-      if (savedConnections.some((c) => c.enabled)) {
-        const baseConnection = mcpConnection;
-        this.log('info', 'run.mcp.saved.start');
-        const extra = await Promise.race([
-          connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
-          new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => { } }, statuses: [] }), 10_000)),
-        ]);
-        this.log('info', 'run.mcp.saved.done');
-        mcpConnection = {
-          tools: { ...baseConnection.tools, ...extra.connection.tools },
-          instructions: [...baseConnection.instructions, ...extra.connection.instructions],
-          errors: [...baseConnection.errors, ...extra.connection.errors],
-          close: async () => {
-            await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
-          },
-        };
+      const mcpKey = JSON.stringify({
+        legacy: rawMcpServers,
+        saved: savedConnections.map(connection => ({ name: connection.name, url: connection.url, transport: connection.transport, enabled: connection.enabled, auth: connection.auth })),
+      });
+      if (this.mcpCache?.key === mcpKey) {
+        mcpConnection = this.mcpCache.connection;
+        mcpCached = true;
+        this.log('info', 'run.mcp.cached', 'reusing cached MCP connection');
+      } else {
+        this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
+        const baseConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
+          ? await Promise.race([
+            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], close: async () => { } })),
+            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], close: async () => { } }), 10_000)),
+          ])
+          : { tools: {}, instructions: [], errors: [], close: async () => { } };
+        this.log('info', 'run.mcp.legacy.done');
+        this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
+        if (savedConnections.some((c) => c.enabled)) {
+          this.log('info', 'run.mcp.saved.start');
+          const extra = await Promise.race([
+            connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
+            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => { } }, statuses: [] }), 10_000)),
+          ]);
+          this.log('info', 'run.mcp.saved.done');
+          mcpConnection = {
+            tools: { ...baseConnection.tools, ...extra.connection.tools },
+            instructions: [...baseConnection.instructions, ...extra.connection.instructions],
+            errors: [...baseConnection.errors, ...extra.connection.errors],
+            close: async () => {
+              await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
+            },
+          };
+        } else {
+          mcpConnection = baseConnection;
+        }
+        if (savedLoadError) mcpConnection.errors.push(savedLoadError);
+        this.closeMcpCache();
+        if (mcpConnection.errors.length === 0) {
+          this.mcpCache = { key: mcpKey, connection: mcpConnection };
+          mcpCached = true;
+        }
       }
-      if (savedLoadError) mcpConnection.errors.push(savedLoadError);
       if (mcpConnection.errors.length) {
         // A server that fails to connect used to leave one line buried in the
         // system prompt, so "MCP is not working" had no visible cause. Say it
@@ -3361,7 +3410,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             if (targetProviderConfig) {
               const creds = this.providerCredentials(targetProviderConfig);
               let token: string | undefined;
-              if (targetProviderConfig.isSleepy) token = (await getSleepyToken()) ?? undefined;
+              if (targetProviderConfig.isSleepy) token = getSleepyTokenSync() ?? (await getSleepyToken()) ?? undefined;
               subagentProvider = createOpenAICompatible({
                 name: targetProviderConfig.id,
                 baseURL: creds.baseUrl,
@@ -3965,7 +4014,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     } finally {
       this.log('info', 'run.finally.start', conversationId);
-      await mcpConnection?.close();
+      if (!mcpCached) await mcpConnection?.close();
       this.post({ type: 'liveUsage', conversationId, model: '', provider: '', inputTokens: 0, outputTokens: 0 });
       this.runs.delete(conversationId);
       this.log('info', 'run.finally.done', conversationId);
@@ -4196,7 +4245,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (providerConfig) {
         const { apiKey, baseUrl } = this.providerCredentials(providerConfig);
         let sleepyToken: string | undefined;
-        if (providerConfig.isSleepy) sleepyToken = (await getSleepyToken()) ?? undefined;
+        if (providerConfig.isSleepy) sleepyToken = getSleepyTokenSync() ?? (await getSleepyToken()) ?? undefined;
         const provider = createOpenAICompatible({
           name: providerConfig.id,
           baseURL: baseUrl || providerConfig.baseURL,
