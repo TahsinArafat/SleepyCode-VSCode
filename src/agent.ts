@@ -799,6 +799,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void this.context.globalState.update(AgentViewProvider.LOG_KEY, entries.slice(-AgentViewProvider.LOG_LIMIT));
   }
 
+  /**
+   * One compact line per finished turn, so a slow memory climb can be attributed from the log
+   * instead of guessed at. This measures the extension host only; the webview has its own process.
+   * The per-retainer numbers are the point: heap alone says "big", not "big because of what".
+   */
+  private reportMemory(): void {
+    const mb = (bytes: number): string => (bytes / 1048576).toFixed(1);
+    let conversations = 0;
+    let items = 0;
+    let snapshotChars = 0;
+    for (const project of this.projects) {
+      conversations += project.conversations.length;
+      for (const conversation of project.conversations) {
+        items += conversation.items.length;
+        for (const item of conversation.items) {
+          for (const snapshot of item.fileSnapshot ?? []) snapshotChars += snapshot.content.length;
+        }
+      }
+    }
+    const memory = process.memoryUsage();
+    const indexed = this.repoIndexCache ? this.repoIndexCache.index.files.length : 0;
+    this.log('info', 'perf.memory',
+      `heap ${mb(memory.heapUsed)}MB rss ${mb(memory.rss)}MB · ${this.projects.length} projects · ` +
+      `${conversations} conversations · ${items} items · snapshots ${mb(snapshotChars)}MB · index ${indexed} files`);
+  }
+
   private sendExtensionLogs(): void {
     const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
     this.post({ type: 'extensionLogs', logs: entries.map(entry => '[' + new Date(entry.timestamp).toISOString() + '] ' + entry.level.toUpperCase() + ' ' + entry.event + (entry.detail ? ': ' + entry.detail : '')) });
@@ -966,7 +992,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       return this.repoIndexCache.index;
     }
-    const index = new RepoIndex(scanWorkspace(root.fsPath));
+    const index = new RepoIndex(await scanWorkspace(root.fsPath));
     index.indexSymbols();
     this.repoIndexCache = { root: root.fsPath, index, symboled: true };
     return index;
@@ -3890,6 +3916,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           project.updatedAt = Date.now();
           await this.checkpointConversation(conversation, true);
           if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runRetries, max: retryBudget.max });
+          this.reportMemory();
           this.post({ type: 'done', conversationId, item: assistantItem });
           systemNotify(this.context, {
             subtitle: paused ? 'Iteration paused' : truncated ? 'Response truncated' : 'Task complete',

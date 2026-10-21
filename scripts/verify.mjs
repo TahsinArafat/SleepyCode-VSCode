@@ -10,6 +10,7 @@ if (!runtimeMatch) throw new Error('webview runtime template not found');
 const { ESCAPE_HTML_SOURCE } = await import('../src/webview/runtime-core.ts');
 const { STREAM_RENDER_SOURCE, STREAM_FRAME_SOURCE } = await import('../src/webview/stream-render.ts');
 const { HIGHLIGHT_SOURCE } = await import('../src/webview/highlight.ts');
+const { MARKDOWN_CACHE_SOURCE } = await import('../src/webview/markdown-cache.ts');
 const { CONTEXT_WINDOW_INFER_SOURCE } = await import('../src/context-window-core.ts');
 const js = runtimeMatch[1]
   .replaceAll('${gitTracked}', () => 'true')
@@ -18,6 +19,7 @@ const js = runtimeMatch[1]
   .replaceAll('${STREAM_RENDER_SOURCE}', () => STREAM_RENDER_SOURCE)
   .replaceAll('${STREAM_FRAME_SOURCE}', () => STREAM_FRAME_SOURCE)
   .replaceAll('${HIGHLIGHT_SOURCE}', () => HIGHLIGHT_SOURCE)
+  .replaceAll('${MARKDOWN_CACHE_SOURCE}', () => MARKDOWN_CACHE_SOURCE)
   .replaceAll('${CONTEXT_WINDOW_INFER_SOURCE}', () => CONTEXT_WINDOW_INFER_SOURCE);
 await import('node:child_process').then(({ execFileSync }) => {
   execFileSync(process.execPath, ['--check', '--input-type=module', '-'], { input: js, stdio: 'pipe' });

@@ -32,20 +32,20 @@ test('runtime renders inline and display math through KaTeX', () => {
 });
 
 test('KaTeX is limited to think and content tokens, not tool-call labels', () => {
-  assert.match(runtime, /function markdown\(raw,allowMath\)/);
+  assert.match(runtime, /function renderMarkdown\(raw,allowMath\)/);
   assert.match(runtime, /function protectInlineMath\(line,allowMath\)\{if\(allowMath===false\)return String\(line\);/);
   assert.match(runtime, /r\.innerHTML\s*=\s*markdown\(\s*part\s*\)/);
   // The streamed answer paints through the incremental stream renderer now, but its math handling
   // must be unchanged. Two invariants pin that: it is bound to the page's own `markdown`, so live
   // output and replayed history stay in lockstep, and `allowMath` arrives undefined, which markdown
   // treats as enabled (`allowMath !== false`) — the same value a full pass gets.
-  assert.match(runtime, /createStreamRenderer\(markdown\)/);
+  assert.match(runtime, /createStreamRenderer\(renderMarkdown\)/);
   assert.match(runtime, /streamRenderer\.html\(\s*raw\s*,\s*undefined\s*\)/);
   // Reasoning now paints through the same coalesced, incremental path as the answer: the delta
   // handler only updates the buffer and schedules a paint, and the painter builds its renderer from
   // the page's own `markdown`. Without that binding a thought would lose its math.
   assert.match(runtime, /reasoningPaint\.schedule\(\{\s*el:\s*reasoning,\s*raw:\s*reasoning\.dataset\.raw\s*\}\)/);
-  assert.match(runtime, /renderer\s*=\s*createStreamRenderer\(markdown\)/);
+  assert.match(runtime, /renderer\s*=\s*createStreamRenderer\(renderMarkdown\)/);
   assert.match(runtime, /el\.innerHTML\s*=\s*renderer\.html\(\s*payload\.raw\s*,\s*undefined\s*\)/);
   assert.match(runtime, /className\s*=\s*'reasoning';\s*r\.innerHTML\s*=\s*markdown\(\s*w\.text\s*\)/);
   assert.doesNotMatch(runtime, /task-label">'\+markdown\((?:t\.name|w\.text|retLabel)\)/);

@@ -226,6 +226,18 @@ export function stringifyEvalResult(value: unknown, cap = BROWSER_RESULT_CAP): s
 type PageLike = any;
 type BrowserLike = any;
 
+/**
+ * Per-tab cap on captured console and network evidence. Both lists used to grow for the life of
+ * the tab, so a polling or hot-reloading dev server pushed entries forever and each `msg.text()`
+ * was retained with it. Oldest entries are dropped; recent evidence is what a diagnosis needs.
+ */
+const MAX_CAPTURED_ENTRIES = 500;
+
+function pushCapped<T>(list: T[], value: T, max = MAX_CAPTURED_ENTRIES): void {
+  list.push(value);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
 export class BrowserController {
   private browser: BrowserLike | undefined;
   /** The ACTIVE page; every interaction targets this one. */
@@ -261,18 +273,18 @@ export class BrowserController {
     if (this.capturingConsole) {
       page.on('console', (msg: any) => {
         const type = msg.type() as ConsoleMessage['type'];
-        if (type === 'error' || type === 'warning' || type === 'log') entry.console.push({ type, text: msg.text() });
+        if (type === 'error' || type === 'warning' || type === 'log') pushCapped(entry.console, { type, text: msg.text() });
       });
       page.on('pageerror', (err: any) => {
-        entry.console.push({ type: 'error', text: String(err?.message ?? err) });
+        pushCapped(entry.console, { type: 'error', text: String(err?.message ?? err) });
       });
     }
     if (this.capturingNetwork) {
       page.on('requestfailed', (req: any) => {
-        entry.network.push({ url: req.url(), method: req.method(), status: 0, failed: true, errorText: req.failure()?.errorText, resourceType: req.resourceType() });
+        pushCapped(entry.network, { url: req.url(), method: req.method(), status: 0, failed: true, errorText: req.failure()?.errorText, resourceType: req.resourceType() });
       });
       page.on('response', (res: any) => {
-        entry.network.push({ url: res.url(), method: res.request().method(), status: res.status(), failed: false, resourceType: res.request().resourceType() });
+        pushCapped(entry.network, { url: res.url(), method: res.request().method(), status: res.status(), failed: false, resourceType: res.request().resourceType() });
       });
     }
   }

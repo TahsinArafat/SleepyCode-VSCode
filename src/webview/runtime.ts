@@ -2,6 +2,7 @@ import { ESCAPE_HTML_SOURCE } from './runtime-core';
 import { CONTEXT_WINDOW_INFER_SOURCE } from '../context-window-core';
 import { HIGHLIGHT_SOURCE } from './highlight';
 import { STREAM_FRAME_SOURCE, STREAM_RENDER_SOURCE } from './stream-render';
+import { MARKDOWN_CACHE_SOURCE } from './markdown-cache';
 
 export function getWebviewRuntime(markUri: string, gitTracked: boolean): string {
   return String.raw`  const vscode=acquireVsCodeApi(),messages=document.getElementById('messages'),composerEl=document.querySelector('.composer'),input=document.getElementById('input'),send=document.getElementById('send'),modelDropdown=document.getElementById('modelDropdown'),modelButton=document.getElementById('modelButton'),modelMenu=document.getElementById('modelMenu'),conversationMenu=document.getElementById('conversationMenu'),conversationTitle=document.getElementById('conversationTitle'),projectIndicatorName=document.getElementById('projectIndicatorName'),projectIndicator=document.getElementById('projectIndicator'),jumpBottom=document.getElementById('jumpBottom'),queued=document.getElementById('queued'),plan=document.getElementById('plan'),composerBox=document.getElementById('composerBox'),attachmentRow=document.getElementById('attachmentRow'),mentionMenu=document.getElementById('mentionMenu'),composerEditBar=document.getElementById('composerEditBar'),composerEditLabel=document.getElementById('composerEditLabel'),cancelEditMessage=document.getElementById('cancelEditMessage'),slashMenu=document.getElementById('slashMenu');let runningSet=new Set(),activeConversationId='',projectIndicatorPath='',projectIndicatorFolder='No folder open',conversations=[],queuedByConversation=new Map(),currentTurn=null,current=null,activity=null,activityBody=null,reasoning=null,phaseStartedAt=0,taskCount=0,followOutput=true,gitTracked=${gitTracked},selectedModel='',reasoningEffort='none',modelGroups=[],modelGroupsLoading=true,modelLoadError='',liveByConversation=new Map(),attachments=[],editMessageState=null,activeConversationItems=[],compactionUndoable=false,compactionRedoable=false;
@@ -259,6 +260,7 @@ export function getWebviewRuntime(markUri: string, gitTracked: boolean): string 
   ${ESCAPE_HTML_SOURCE}
   ${STREAM_RENDER_SOURCE}
   ${STREAM_FRAME_SOURCE}
+  ${MARKDOWN_CACHE_SOURCE}
   ${HIGHLIGHT_SOURCE}
   ${CONTEXT_WINDOW_INFER_SOURCE}
   /**
@@ -750,7 +752,10 @@ function linkifyDevRefs(line,keep){
   line=line.replace(DEV_PATH_RE,function(m){const p=splitRefPosition(m);return keep(devRefAnchor(m,p.path,p.line,p.column))});
   return line}
 function inlineMarkdown(raw,allowMath){const tick=String.fromCharCode(96),tokenStart=String.fromCharCode(57344),tokenEnd=String.fromCharCode(57345),safeStart=String.fromCharCode(57346),safeEnd=String.fromCharCode(57347),codes=[],safe=[];const keep=html=>{safe.push(html);return safeStart+(safe.length-1)+safeEnd};let line=protectInlineMath(raw,allowMath);line=esc(line);line=line.replace(new RegExp(tick+'([^'+tick+'\\n]+)'+tick,'g'),(_,code)=>{codes.push(code);return tokenStart+(codes.length-1)+tokenEnd});line=line.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,label,url)=>keep('<a href="'+url+'">'+label+'</a>'));line=linkifyDevRefs(line,keep).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/__([^_]+)__/g,'<strong>$1</strong>').replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/_([^_]+)_/g,'<em>$1</em>');line=line.replace(new RegExp(tokenStart+'(\\d+)'+tokenEnd,'g'),(_,index)=>'<code>'+codes[Number(index)]+'</code>').replace(new RegExp(safeStart+'(\\d+)'+safeEnd,'g'),(_,index)=>safe[Number(index)]);return restoreMath(line)}
-  function markdown(raw,allowMath){
+  // Memoized markdown, so a transcript rebuild only parses the messages that changed. Streaming
+  // uses the uncached renderMarkdown below instead; see markdown-cache.ts.
+  const markdown=createMarkdownCache(renderMarkdown,400,4000000,50000);
+  function renderMarkdown(raw,allowMath){
     // Math placeholders are only meaningful inside one call: every token is consumed by the
     // restoreMath at the end of inlineMarkdown. Without the reset each render appended to the
     // table forever, so a long session pinned every formula it had ever drawn.
@@ -960,7 +965,9 @@ function createTextSegment() { if (activity) { finishActivity(); clearActivityRe
 // answer on each one is quadratic. streamRenderer settles every finished top-level markdown
 // block once and re-renders only the trailing partial block; streamPaint collapses however many
 // deltas land between frames into a single DOM write.
-const streamRenderer = createStreamRenderer(markdown);
+// It renders with the uncached renderMarkdown on purpose: every slice it asks for is new text, so
+// the cache would never hit and would evict the transcript entries it is meant to keep.
+const streamRenderer = createStreamRenderer(renderMarkdown);
 const streamPaint = createFrameCoalescer(raw => {
   if (!currentTurn) { currentTurn = document.querySelector('.turn:last-child'); if (!currentTurn) { document.getElementById('empty')?.remove(); currentTurn = document.createElement('section'); currentTurn.className = 'turn'; messages.appendChild(currentTurn) } }
   if (!current) createTextSegment();
@@ -980,7 +987,7 @@ const reasoningPaint = createFrameCoalescer(payload => {
   const el = payload && payload.el;
   if (!el || !el.isConnected) return;
   let renderer = reasoningRenderers.get(el);
-  if (!renderer) { renderer = createStreamRenderer(markdown); reasoningRenderers.set(el, renderer) }
+  if (!renderer) { renderer = createStreamRenderer(renderMarkdown); reasoningRenderers.set(el, renderer) }
   el.innerHTML = renderer.html(payload.raw, undefined);
   if (el === reasoning) scrollActivity()
 });

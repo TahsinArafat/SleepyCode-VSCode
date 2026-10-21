@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 
 export interface FileEntry {
@@ -303,33 +303,48 @@ export class RepoIndex {
   }
 }
 
-export function scanWorkspace(root: string, ignore: Set<string> = DEFAULT_IGNORE, maxBytes = 250_000): FileEntry[] {
+/** Upper bound on indexed files. Without it a large workspace reads unbounded content into memory. */
+export const SCAN_MAX_FILES = 4_000;
+
+/**
+ * Reads the workspace into memory for indexing. Async on purpose: the previous synchronous
+ * walk read the contents of every file on the extension host's only thread, so a large
+ * workspace froze the whole editor — every window, not just this panel. Awaiting the fs
+ * calls yields between files, and `maxFiles` bounds the worst case.
+ */
+export async function scanWorkspace(
+  root: string,
+  ignore: Set<string> = DEFAULT_IGNORE,
+  maxBytes = 250_000,
+  maxFiles = SCAN_MAX_FILES,
+): Promise<FileEntry[]> {
   const out: FileEntry[] = [];
-  const walk = (dir: string): void => {
+  const walk = async (dir: string): Promise<void> => {
     let entries: string[] = [];
     try {
-      entries = readdirSync(dir);
+      entries = await fsp.readdir(dir);
     } catch {
       return;
     }
     for (const name of entries) {
       if (ignore.has(name)) continue;
+      if (out.length >= maxFiles) return;
       const full = path.join(dir, name);
       let stat;
       try {
-        stat = statSync(full);
+        stat = await fsp.stat(full);
       } catch {
         continue;
       }
-      if (stat.isDirectory()) walk(full);
+      if (stat.isDirectory()) await walk(full);
       else if (stat.isFile() && stat.size <= maxBytes) {
         try {
-          out.push({ path: path.relative(root, full), content: readFileSync(full, 'utf8') });
+          out.push({ path: path.relative(root, full), content: await fsp.readFile(full, 'utf8') });
         } catch {}
       }
     }
   };
-  if (existsSync(root)) walk(root);
+  if (existsSync(root)) await walk(root);
   return out;
 }
 

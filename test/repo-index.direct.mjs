@@ -104,12 +104,12 @@ test('RepoIndex upsert and remove update the file set', () => {
 
 // --- scanWorkspace ---
 
-test('scanWorkspace reads files and honors the ignore set', () => {
+test('scanWorkspace reads files and honors the ignore set', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'repo-index-'));
   writeFileSync(path.join(root, 'keep.ts'), 'export const x = 1;');
   mkdirSync(path.join(root, 'node_modules'));
   writeFileSync(path.join(root, 'node_modules', 'skip.ts'), 'ignored');
-  const entries = scanWorkspace(root);
+  const entries = await scanWorkspace(root);
   const paths = entries.map(e => e.path);
   assert.ok(paths.includes('keep.ts'));
   assert.ok(!paths.some(p => p.includes('node_modules')));
