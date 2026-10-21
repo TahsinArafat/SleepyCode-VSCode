@@ -2985,7 +2985,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     conversation.updatedAt = Date.now();
     project.updatedAt = Date.now();
-    await this.persistProjects();
+    // Fire-and-forget: the user message is already in-memory and visible in the webview.
+    // Awaiting the persist chain here blocked every send on the previous turn's write
+    // (often several seconds of globalState I/O for a large conversation).
+    void this.persistProjects();
     this.syncConversations(false);
     this.post({ type: 'state', conversationId, running: true, label: 'Thinking' });
 
@@ -3139,7 +3142,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     }
     if (await this.ensureSelectedAgent()) {
-      await this.persistProjects();
+      // Fire-and-forget: agent fallback is already applied in-memory.
+      void this.persistProjects();
     }
     const conversationAgent = this.agentConfig(conversation.agentId ?? this.config().agentId);
     const selection = this.selectionFor(conversation);
