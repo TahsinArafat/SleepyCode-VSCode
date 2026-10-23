@@ -117,7 +117,10 @@ test('HTTP 404 from server maintenance is retryable and does not claim model una
 
 test('continuation messages resume from partial output and preserve context', () => {
   assert.match(agent, /isContinuation = \/\^\(\?:continue\|keep going\|go on\|please continue\|continue from where you stopped\|proceed\|finish\)\\\.\?\$\/i/);
-  assert.match(agent, /const errorPartial = fields\.partialText \|\| partialAnswer\.trim\(\) \|\| resume\?\.partialText/);
-  assert.match(agent, /runMessages\.push\(\{ role: 'assistant', content: errorPartial \}\)/);
+  // Both catch branches fold the streamed answer into history, including the deliberate stop.
+  assert.match(agent, /function appendPartialAnswer\(/);
+  const aborted = agent.slice(agent.indexOf('if (run.controller.signal.aborted) {'));
+  assert.match(aborted.slice(0, 400), /appendPartialAnswer\(runMessages, partialAnswer \|\| resume\?\.partialText\)/);
+  assert.match(agent, /appendPartialAnswer\(runMessages, fields\.partialText \|\| partialAnswer \|\| resume\?\.partialText\)/);
   assert.match(agent, /const historyUserText = resume \? \(resume\.originalUserText \|\| userText\) : userText;/);
 });

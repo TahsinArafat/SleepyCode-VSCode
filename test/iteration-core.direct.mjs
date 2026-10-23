@@ -61,6 +61,22 @@ test('recoverPendingHistory trims from the front when the checkpoint exceeds the
   assert.deepEqual(recovered?.map(message => message.content), ['2', '3', '4']);
 });
 
+test('recoverPendingHistory folds a mid-stream partial answer that never reached the step list', () => {
+  // A crash during streaming leaves `messages` empty: the answer only exists as partialText.
+  const pending = { userText: 'write the parser', messages: [], partialText: 'export function parse(source) {' };
+  const recovered = recoverPendingHistory(undefined, pending, 400);
+  assert.deepEqual(recovered, [
+    { role: 'user', content: 'write the parser' },
+    { role: 'assistant', content: 'export function parse(source) {' },
+  ]);
+  // Recovering twice must not duplicate it.
+  assert.deepEqual(recoverPendingHistory(recovered, pending, 400), recovered);
+
+  // When a finished step already stored the same text, it is not appended twice.
+  const stored = { userText: 'go', messages: [{ role: 'assistant', content: 'done so far' }], partialText: 'done so far' };
+  assert.deepEqual(recoverPendingHistory(undefined, stored, 400)?.map(message => message.content), ['go', 'done so far']);
+});
+
 test('selectStructuredHistory never starts on a tool result and cuts only at user turns', () => {
   const estimate = message => Math.ceil(String(message.content ?? '').length / 4);
   const stored = [

@@ -135,6 +135,31 @@ test('selectCarriedItems skips divider markers as carried content', () => {
   assert.equal(lastAssistant?.text, 'reply');
 });
 
+test('compaction keeps the streamed answer of a turn that never finished', () => {
+  // `text` is the reason the turn stopped; `partialText` is what the user already read.
+  const items = [
+    user('write the parser'),
+    assistant('SleepyAI server returned 404', { kind: 'error', partialText: 'export function parse(source) {' }),
+  ];
+
+  const input = compactionPromptInput(items);
+  assert.match(input, /export function parse\(source\) \{/, 'the summary prompt must include the partial answer');
+  assert.match(input, /SleepyAI server returned 404/, 'and still say why it stopped');
+
+  const { lastAssistant } = selectCarriedItems(items);
+  assert.equal(lastAssistant?.partialText, 'export function parse(source) {', 'carry-forward must keep the interrupted turn');
+
+  // A truncated turn stores the same string in both fields and must not be duplicated.
+  const truncated = compactionPromptInput([assistant('all of it', { partialText: 'all of it' })]);
+  assert.equal(truncated, '[Assistant] all of it');
+});
+
+test('estimateContextTokens counts the streamed answer of an interrupted turn', () => {
+  const partial = 'x'.repeat(4_000);
+  const tokens = estimateContextTokens([user('q'), assistant('stopped', { kind: 'error', partialText: partial })]);
+  assert.ok(tokens >= CONTEXT_SYSTEM_OVERHEAD_TOKENS + 1_000, `expected the partial answer to count, got ${tokens}`);
+});
+
 test('estimateContextTokens ignores divider markers', () => {
   const withDivider = [user('x'.repeat(400)), user('', { kind: 'divider' })];
   assert.equal(estimateContextTokens(withDivider), CONTEXT_SYSTEM_OVERHEAD_TOKENS + 400 / CHARS_PER_TOKEN);

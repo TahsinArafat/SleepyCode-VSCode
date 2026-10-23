@@ -36,28 +36,37 @@ function sameHistoryMessages(left: readonly HistoryMessage[] | undefined, right:
  * Fold `pending` onto the tail whenever it is newer work than the stored
  * history. An earlier empty-history-only rule dropped in-progress turns after
  * older messages already existed.
+ *
+ * A turn that crashed mid-stream keeps its answer only in `partialText` (the
+ * in-flight text never reaches the step-level message list), so it is folded in
+ * too: otherwise the first message after a reload cannot see work the user
+ * already watched arrive.
  */
 export function recoverPendingHistory<T extends HistoryMessage>(
   messages: T[] | undefined,
-  pending: { userText?: string; messages?: T[] } | undefined,
+  pending: { userText?: string; messages?: T[]; partialText?: string } | undefined,
   maxStored: number,
 ): T[] | undefined {
-  if (!pending?.messages?.length) return messages;
+  const pendingTail = pending?.messages ?? [];
+  const partial = pending?.partialText?.trim() ?? '';
+  const lastPending = pendingTail[pendingTail.length - 1];
+  const partialStored = Boolean(partial) && lastPending?.role === 'assistant' && typeof lastPending.content === 'string' && lastPending.content.includes(partial);
+  const tail: T[] = partial && !partialStored ? [...pendingTail, { role: 'assistant', content: partial } as T] : [...pendingTail];
+  if (!tail.length) return messages;
   const existing = messages ?? [];
-  const pendingTail = pending.messages;
   if (existing.length) {
-    const existingTail = existing.slice(-pendingTail.length);
-    if (sameHistoryMessages(existingTail, pendingTail)) return existing;
+    const existingTail = existing.slice(-tail.length);
+    if (sameHistoryMessages(existingTail, tail)) return existing;
   }
   let alreadyHasUser = false;
   for (let cursor = existing.length - 1; cursor >= 0; cursor--) {
     if (existing[cursor]?.role !== 'user') continue;
-    alreadyHasUser = existing[cursor]?.content === (pending.userText ?? '');
+    alreadyHasUser = existing[cursor]?.content === (pending?.userText ?? '');
     break;
   }
   const carried: T[] = alreadyHasUser
-    ? [...existing, ...pendingTail]
-    : [...existing, { role: 'user', content: pending.userText ?? '' } as T, ...pendingTail];
+    ? [...existing, ...tail]
+    : [...existing, { role: 'user', content: pending?.userText ?? '' } as T, ...tail];
   return carried.length > maxStored ? carried.slice(-maxStored) : carried;
 }
 

@@ -12,11 +12,23 @@
 export type CompactableItem = {
   role: 'user' | 'assistant';
   text?: string;
+  // An interrupted turn keeps its streamed answer here and its reason in `text`, so anything
+  // that compacts or measures an item has to read both or the answer disappears.
+  partialText?: string;
   // 'approval' items are UI records of what the user granted. They carry the same shape as any other
   // assistant item and are compacted like one; the model benefits from seeing what was approved.
   kind?: 'error' | 'divider' | 'approval';
   contextTokens?: number;
 };
+
+/**
+ * Model-visible text of an item: the streamed answer when it differs from `text`, otherwise `text`.
+ * A truncated turn stores the same string in both fields, so comparing them keeps it from doubling.
+ */
+function contentText(item: CompactableItem): string {
+  if (item.partialText && item.partialText !== item.text) return item.partialText;
+  return item.text ?? '';
+}
 
 /**
  * Rough token allowance for the system prompt, tool schemas, and formatting
@@ -91,7 +103,8 @@ export function estimateContextTokens(items: readonly CompactableItem[]): number
   let chars = 0;
   for (const item of recent) {
     if (item.kind === 'divider') continue; // markers carry no model-visible text
-    chars += (item.text ?? '').length;
+    // An interrupted turn's streamed answer is the bulk of its text and is not in `text`.
+    chars += contentText(item).length;
   }
   return CONTEXT_SYSTEM_OVERHEAD_TOKENS + Math.ceil(chars / CHARS_PER_TOKEN);
 }
@@ -257,7 +270,10 @@ export function compactionPromptInput(
     .filter(item => item.kind !== 'divider') // markers are never sent to the summarizer
     .map(item => {
       const role = item.role === 'user' ? 'User' : 'Assistant';
-      const content = (item.text ?? '')
+      // Keep the reason a turn was cut off next to the answer it managed to write, so the
+      // compacted transcript says both what was produced and why it stops where it does.
+      const reason = item.kind === 'error' && item.partialText && item.text ? `\n[${item.text}]` : '';
+      const content = `${contentText(item)}${reason}`
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
         .replace(/\s+/g, ' ')
         .trim()
@@ -284,7 +300,8 @@ export function compactionPromptInput(
 
 /**
  * Picks the latest exchange worth carrying into the compacted transcript.
- * Error items are never carried forward: they add bulk without continuity value.
+ * A plain error item adds bulk without continuity value, but an interrupted one that still holds a
+ * streamed answer is the whole point of carrying: dropping it erases work the user already saw.
  */
 export function selectCarriedItems<T extends CompactableItem>(items: readonly T[]): { lastUser?: T; lastAssistant?: T } {
   let lastUser: T | undefined;
@@ -293,7 +310,7 @@ export function selectCarriedItems<T extends CompactableItem>(items: readonly T[
     const item = items[index]!;
     if (item.kind === 'divider') continue;
     if (!lastUser && item.role === 'user') lastUser = item;
-    if (!lastAssistant && item.role === 'assistant' && item.kind !== 'error') lastAssistant = item;
+    if (!lastAssistant && item.role === 'assistant' && (item.kind !== 'error' || item.partialText)) lastAssistant = item;
     if (lastUser && lastAssistant) break;
   }
   return { lastUser, lastAssistant };

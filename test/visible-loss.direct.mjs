@@ -45,3 +45,12 @@ test('the orphaned error renders with a retry action', () => {
 test('a stopped turn still offers retry so its partial work is recoverable', () => {
   assert.match(agent, /stoppedItem\.errorInfo = \{ code: 'interrupted', retryable: true/);
 });
+
+test('memory trimming keeps a whole turn so the kept answer still shows', () => {
+  // The webview pairs a user item with the assistant item after it. A trim that lands mid-pair
+  // leaves a headless answer that renderConversation never draws, so the turn reads as lost.
+  const start = agent.indexOf('private boundConversationItems');
+  const body = agent.slice(start, start + 900);
+  assert.match(body, /role !== 'user'\) first\+\+/, 'the kept window must start on a user turn');
+  assert.match(body, /conversation\.items = conversation\.items\.slice\(first\)/);
+});

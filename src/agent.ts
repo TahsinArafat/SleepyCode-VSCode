@@ -210,6 +210,28 @@ function findLastAssistant(items: readonly TranscriptItem[]): TranscriptItem | u
   return undefined;
 }
 
+/**
+ * Fold the text a turn streamed before it was stopped or failed into the messages that become
+ * durable history. A step-level message list only exists once a step finishes, so a turn cut off
+ * mid-answer has none: without this the next message cannot see what the user already read.
+ */
+function appendPartialAnswer(messages: ModelMessage[], partial: string | undefined): void {
+  const text = partial?.trim();
+  if (!text) return;
+  const last = messages[messages.length - 1];
+  if (last?.role === 'assistant') {
+    if (typeof last.content === 'string') {
+      last.content = last.content ? `${last.content}\n${text}` : text;
+      return;
+    }
+    if (Array.isArray(last.content)) {
+      (last.content as unknown[]).push({ type: 'text', text });
+      return;
+    }
+  }
+  messages.push({ role: 'assistant', content: text });
+}
+
 function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted.'));
   return new Promise((resolve, reject) => {
@@ -1370,8 +1392,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private boundConversationItems(conversation: Conversation): void {
     if (conversation.items.length <= MAX_STORED_ITEMS) return;
-    const dropped = conversation.items.length - MAX_STORED_ITEMS;
-    conversation.items = conversation.items.slice(-MAX_STORED_ITEMS);
+    // Start the kept window on a user turn. A window that opens on an assistant item renders that
+    // answer without the question it answers, so the turn reads as missing rather than trimmed.
+    let first = conversation.items.length - MAX_STORED_ITEMS;
+    while (first < conversation.items.length && conversation.items[first]?.role !== 'user') first++;
+    if (first >= conversation.items.length) first = conversation.items.length - MAX_STORED_ITEMS;
+    const dropped = first;
+    conversation.items = conversation.items.slice(first);
     this.post({ type: 'contextNotice', conversationId: conversation.id, kind: 'trimmed', text: `Older history was trimmed (${dropped} item${dropped === 1 ? '' : 's'}) to keep this conversation within memory limits.` });
   }
 
@@ -3999,6 +4026,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (run.controller.signal.aborted) {
         // Keep whatever the turn accomplished before it was stopped so a later
         // message continues from real context instead of re-reading files.
+        appendPartialAnswer(runMessages, partialAnswer || resume?.partialText);
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         if (planState) { planState.interrupted = true; postPlan(); }
@@ -4065,19 +4093,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Keep the work already done: merge the partial turn's tool calls,
         // streamed text, and results into the structured history so a retry continues
         // instead of re-reading every file.
-        const errorPartial = fields.partialText || partialAnswer.trim() || resume?.partialText;
-        if (errorPartial) {
-          const lastMsg = runMessages[runMessages.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant') {
-            if (typeof lastMsg.content === 'string') {
-              lastMsg.content += (lastMsg.content ? '\n' : '') + errorPartial;
-            } else if (Array.isArray(lastMsg.content)) {
-              (lastMsg.content as Array<unknown>).push({ type: 'text', text: errorPartial });
-            }
-          } else {
-            runMessages.push({ role: 'assistant', content: errorPartial });
-          }
-        }
+        appendPartialAnswer(runMessages, fields.partialText || partialAnswer || resume?.partialText);
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         conversation.items.push(errorItem);
@@ -4408,7 +4424,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const carried = [lastUser, lastAssistant]
       .filter((item): item is TranscriptItem => Boolean(item))
       .map(item => {
-        const copy = createTranscriptItem(item.role, item.text, undefined, item.gitTree);
+        // An interrupted turn is carried as the answer it managed to write, not as an error card:
+        // after compaction the transcript must still read as the conversation the user had.
+        const copy = createTranscriptItem(item.role, item.partialText && item.partialText !== item.text ? item.partialText : item.text, undefined, item.gitTree);
         copy.timestamp = item.timestamp;
         if (item.model) copy.model = item.model;
         if (item.attachments?.length) copy.attachments = item.attachments;
