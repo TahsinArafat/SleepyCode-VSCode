@@ -26,7 +26,9 @@ function createMarkdownCache(render,maxEntries,maxChars,maxInput){
   let chars=0;
   return function markdown(raw,allowMath){
     const text=String(raw==null?'':raw);
-    const key=(allowMath?'M':'T')+text;
+    // The renderer enables math for anything except an explicit false (allowMath !== false),
+    // so the key must make the same distinction: 'undefined' and 'false' are different renders.
+    const key=(allowMath===false?'T':'M')+text;
     const hit=cache.get(key);
     if(hit!==undefined){cache.delete(key);cache.set(key,hit);return hit}
     const html=render(text,allowMath);

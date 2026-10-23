@@ -346,10 +346,7 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     };
   }
 
-  if (
-    status === 404
-    || /model[^\n]{0,45}(?:not found|unavailable|does not exist|unsupported)|unknown model/.test(lower)
-  ) {
+  if (/model[^\n]{0,45}(?:not found|unavailable|does not exist|unsupported)|unknown model/i.test(lower)) {
     return {
       code: 'model_unavailable',
       title: 'Selected model is unavailable',
@@ -371,10 +368,15 @@ export function classifyAgentError(error: unknown, provider?: Provider): AgentEr
     };
   }
 
-  if ((status !== undefined && status >= 500) || /service unavailable|bad gateway|gateway timeout|internal server error/.test(lower)) {
+  if (
+    (status !== undefined && (status >= 500 || status === 404))
+    || /service unavailable|bad gateway|gateway timeout|internal server error/.test(lower)
+  ) {
     return {
       code: 'service_unavailable',
-      title: sleepy ? 'SleepyAI is temporarily unavailable' : `${providerName} is temporarily unavailable`,
+      title: sleepy
+        ? (status === 404 ? 'SleepyAI server returned 404' : 'SleepyAI is temporarily unavailable')
+        : (status === 404 ? `${providerName} returned 404` : `${providerName} is temporarily unavailable`),
       message: raw,
       retryable: true,
       primaryAction: 'retry',

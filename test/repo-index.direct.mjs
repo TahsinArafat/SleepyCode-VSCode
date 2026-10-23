@@ -115,6 +115,15 @@ test('scanWorkspace reads files and honors the ignore set', async () => {
   assert.ok(!paths.some(p => p.includes('node_modules')));
 });
 
+test('scanWorkspace stops at the file cap', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'repo-index-cap-'));
+  for (let i = 0; i < 5; i++) writeFileSync(path.join(root, `f${i}.ts`), `export const x${i} = ${i};`);
+  const entries = await scanWorkspace(root, new Set(), 250_000, 2);
+  assert.equal(entries.length, 2, 'the walk must stop at the file cap');
+  const uncapped = await scanWorkspace(root);
+  assert.equal(uncapped.length, 5, 'without a cap every file is indexed');
+});
+
 // --- SourceCitedMemory ---
 
 test('SourceCitedMemory invalidates facts when the source hash changes', () => {

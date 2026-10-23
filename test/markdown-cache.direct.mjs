@@ -30,6 +30,19 @@ test('allowMath is part of the cache key', () => {
   assert.notEqual(markdown('$x$', true), markdown('$x$', false));
   assert.equal(calls.length, 2);
 });
+test('an omitted allowMath is not the same entry as an explicit false', () => {
+  const calls = [];
+  // The real renderer turns math on for anything except an explicit false (allowMath !== false),
+  // so 'undefined' and 'false' are different renders and must not share a cache entry.
+  const render = (text, allowMath) => {
+    calls.push(allowMath);
+    return allowMath !== false ? `<m>${text}` : `<t>${text}`;
+  };
+  const markdown = createMarkdownCache(render, 10, 10000, 1000);
+  assert.equal(markdown('$x$', undefined), '<m>$x$');
+  assert.equal(markdown('$x$', false), '<t>$x$');
+  assert.equal(calls.length, 2, 'the two calls must not share a cache entry');
+});
 
 test('null and empty inputs render once and share one entry', () => {
   const { render, calls } = countingRender();

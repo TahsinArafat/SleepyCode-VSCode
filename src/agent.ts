@@ -23,7 +23,7 @@ import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
 import { pickContextWindow } from './context-window-core';
-import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, originalUserText, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
+import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
 import { systemNotify } from './notifications';
@@ -1436,7 +1436,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let cost = 0;
     for (let index = tail.length - 1; index >= 0; index--) {
       const item = tail[index]!;
-      const itemCost = Math.ceil((item.text?.length ?? 0) / CHARS_PER_TOKEN);
+      const textToCount = item.partialText ? `${item.text}\n${item.partialText}` : item.text;
+      const itemCost = Math.ceil((textToCount?.length ?? 0) / CHARS_PER_TOKEN);
       if (picked.length >= COMPACTION_HISTORY_ITEMS && cost + itemCost > budgetTokens) break;
       picked.unshift(item);
       cost += itemCost;
@@ -2805,6 +2806,35 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const root = this.workspaceRoot();
       const mention = this.parseAgentMention(message.text);
       const sendText = mention.text.trim() || message.text.trim();
+
+      const targetConversation = project.conversations.find(conversation => conversation.id === conversationId);
+      const isContinuation = /^(?:continue|keep going|go on|please continue|continue from where you stopped|proceed|finish)\.?$/i.test(sendText.trim());
+      if (isContinuation && targetConversation && !this.runs.has(conversationId)) {
+        const resumeFrom = resumeFromLastAssistant(targetConversation.items);
+        if (resumeFrom && (resumeFrom.resume.partialText || resumeFrom.resume.work?.length)) {
+          const engine = await this.ensureEngine();
+          if (this.cliOwns(targetConversation, engine)) {
+            const resumed = await this.continueViaCli(conversationId, root);
+            this.log('info', 'cli.continuation.send', `conversation=${conversationId}; resumed=${resumed}`);
+            return;
+          }
+          targetConversation.items.pop();
+          project.activeConversationId = targetConversation.id;
+          project.updatedAt = Date.now();
+          await this.persistProjects();
+          this.syncConversations();
+          await this.run(resumeFrom.userText, targetConversation.id, {
+            work: resumeFrom.resume.work as WorkItem[] | undefined,
+            errorText: resumeFrom.resume.message,
+            changes: resumeFrom.resume.changes as FileChange[] | undefined,
+            fileSnapshot: resumeFrom.resume.fileSnapshot as FileSnapshot[] | undefined,
+            partialText: resumeFrom.resume.partialText,
+            originalUserText: resumeFrom.userText,
+          }, resumeFrom.resume.gitTree);
+          return;
+        }
+      }
+
       if (mention.agentId) {
         await this.context.globalState.update('sleepycode.agentId', mention.agentId);
         this.agentPromptCache.clear();
@@ -2965,7 +2995,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       project.conversations.unshift(conversation);
       conversationId = conversation.id;
     }
-    const historyUserText = resume?.originalUserText || originalUserText(conversation.items, userText);
+    const historyUserText = resume ? (resume.originalUserText || userText) : userText;
     const gitTracked = isGitTrackedWorkspace(root.fsPath);
     const run: ActiveRun = { conversationId, controller: new AbortController(), steering: false };
     this.runs.set(conversationId, run);
@@ -3639,7 +3669,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         } else {
           const budgetTokens = Math.max(2_000, Math.floor((DEFAULT_CONTEXT_WINDOW * AUTO_COMPACT_RATIO) / 2));
           const recent = this.recentContextItems(conversation, budgetTokens)
-            .map(item => `${item.role.toUpperCase()}: ${item.text}`)
+            .map(item => {
+              const text = item.partialText ? `${item.partialText}\n[${item.text}]` : item.text;
+              return `${item.role.toUpperCase()}: ${text}`;
+            })
             .join('\n\n');
           streamPrompt = recent
             ? `Previous conversation:\n${recent}\n\nCurrent request:\n${userText}${promptContext}`
@@ -4029,9 +4062,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         errorItem.partialText = fields.partialText;
         if (failedChanges.length) errorItem.changes = fields.changes as FileChange[];
         if (snapshotByPath.size) errorItem.fileSnapshot = fields.fileSnapshot as FileSnapshot[];
-        // Keep the work already done: merge the partial turn's tool calls and
-        // results into the structured history so a retry continues instead of
-        // re-reading every file.
+        // Keep the work already done: merge the partial turn's tool calls,
+        // streamed text, and results into the structured history so a retry continues
+        // instead of re-reading every file.
+        const errorPartial = fields.partialText || partialAnswer.trim() || resume?.partialText;
+        if (errorPartial) {
+          const lastMsg = runMessages[runMessages.length - 1];
+          if (lastMsg && lastMsg.role === 'assistant') {
+            if (typeof lastMsg.content === 'string') {
+              lastMsg.content += (lastMsg.content ? '\n' : '') + errorPartial;
+            } else if (Array.isArray(lastMsg.content)) {
+              (lastMsg.content as Array<unknown>).push({ type: 'text', text: errorPartial });
+            }
+          } else {
+            runMessages.push({ role: 'assistant', content: errorPartial });
+          }
+        }
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         conversation.items.push(errorItem);

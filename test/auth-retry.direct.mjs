@@ -97,3 +97,27 @@ test('a refresh is only attempted when refresh credentials exist', () => {
   assert.match(sleepyai, /getSleepyToken\(options: \{ forceRefresh\?: boolean \} = \{\}\)/);
   assert.match(sleepyai, /force \|\| Date\.now\(\) >= expiresAt/, 'a forced refresh must ignore the stored expiry');
 });
+
+test('HTTP 404 from server maintenance is retryable and does not claim model unavailable', () => {
+  const maintenanceError = Object.assign(new Error('Cannot POST /api/v1/chat/completions (503 Service Unavailable / 404 Not Found)'), { status: 404 });
+  const info = classifyAgentError(maintenanceError, SLEEPY);
+  assert.equal(info.code, 'service_unavailable');
+  assert.equal(info.retryable, true);
+  assert.equal(info.primaryAction, 'retry');
+  assert.match(info.title, /404/);
+  assert.doesNotMatch(info.title, /Selected model is unavailable/);
+
+  // A genuine model-not-found message is classified as model_unavailable
+  const modelNotFoundError = Object.assign(new Error('The model `claude-opus` does not exist or is not found'), { status: 404 });
+  const modelInfo = classifyAgentError(modelNotFoundError, SLEEPY);
+  assert.equal(modelInfo.code, 'model_unavailable');
+  assert.equal(modelInfo.retryable, false);
+  assert.equal(modelInfo.primaryAction, 'models');
+});
+
+test('continuation messages resume from partial output and preserve context', () => {
+  assert.match(agent, /isContinuation = \/\^\(\?:continue\|keep going\|go on\|please continue\|continue from where you stopped\|proceed\|finish\)\\\.\?\$\/i/);
+  assert.match(agent, /const errorPartial = fields\.partialText \|\| partialAnswer\.trim\(\) \|\| resume\?\.partialText/);
+  assert.match(agent, /runMessages\.push\(\{ role: 'assistant', content: errorPartial \}\)/);
+  assert.match(agent, /const historyUserText = resume \? \(resume\.originalUserText \|\| userText\) : userText;/);
+});
