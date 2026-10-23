@@ -4,11 +4,32 @@ src/**
 test/**
 scripts/**
 node_modules/**
-!node_modules/playwright-core/**
+# vsce lets an allowlist win, so a later deny can never carve a hole out of `!…/**`: playwright-core
+# is allowlisted file-by-file instead. Its type definitions and the trace/report viewer bundles are
+# build-time assets that never execute from here, and they were ~0.7 MB of the package.
+# test/package-shape.test.mjs fails if a playwright bump adds an entry this list does not cover.
 !node_modules/playwright-core/package.json
+!node_modules/playwright-core/index.js
+!node_modules/playwright-core/index.mjs
+!node_modules/playwright-core/cli.js
+!node_modules/playwright-core/browsers.json
+!node_modules/playwright-core/LICENSE
+!node_modules/playwright-core/NOTICE
+!node_modules/playwright-core/README.md
+!node_modules/playwright-core/ThirdPartyNotices.txt
+!node_modules/playwright-core/bin/**
+!node_modules/playwright-core/lib/*.js
+!node_modules/playwright-core/lib/*.wasm
+!node_modules/playwright-core/lib/*.LICENSE
+!node_modules/playwright-core/lib/entry/**
+!node_modules/playwright-core/lib/server/**
+!node_modules/playwright-core/lib/tools/**
+!node_modules/playwright-core/lib/xdg-open
 *.ts
 *.mjs
 *.map
+# `*.map` matches top-level files only, so the built source map shipped as ~1 MB of the package.
+**/*.map
 *.patch
 *.zip
 package-lock.json
