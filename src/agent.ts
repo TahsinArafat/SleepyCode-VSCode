@@ -787,7 +787,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    const useReact = this.context.globalState.get<boolean>('useReactWebview', false);
+    const useReact = this.context.globalState.get<boolean>('useReactWebview', true);
     view.webview.html = useReact
       ? renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode')
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
@@ -814,6 +814,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (this.view !== view) return;
       this.postConfig();
       void this.maybeShowFirstLaunchSettings();
+    });
+  }
+
+  public toggleReactWebview(): void {
+    const cur = this.context.globalState.get<boolean>('useReactWebview', true);
+    void this.context.globalState.update('useReactWebview', !cur).then(() => {
+      void vscode.window.showInformationMessage(`React UI ${!cur ? 'enabled' : 'disabled'}. Reload the window to apply.`);
     });
   }
 
