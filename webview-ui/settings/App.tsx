@@ -18,6 +18,7 @@ import { CacheUsage } from "./CacheUsage";
 import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
+import { filterSections, isSectionHidden } from "../shared/featureFlags";
 
 interface Settings {
   model: string;
@@ -703,12 +704,15 @@ export function App() {
     vscode.postMessage(payload);
   };
 
+  // OpenCursor-only sections stay in NAV so they can be switched back on, but
+  // the rail only ever renders sections SleepyCode actually implements.
+  const visibleNav = filterSections(NAV);
   const navFiltered = navQuery.trim()
-    ? NAV.filter((n) => {
+    ? visibleNav.filter((n) => {
         const q = navQuery.trim().toLowerCase();
         return n.label.toLowerCase().includes(q) || (SECTION_KEYWORDS[n.id] || "").includes(q);
       })
-    : NAV;
+    : visibleNav;
 
   return (
     <div className="layout">
@@ -920,7 +924,7 @@ export function App() {
             <UsagePanel usage={usage} oauthStatus={oauthStatus} features={features} setFeatures={setFeatures} />
           )}
 
-          {section === "providers" && <ProvidersPanel features={features} setFeatures={setFeatures} oauthStatus={oauthStatus} />}
+          {section === "providers" && !isSectionHidden("providers") && <ProvidersPanel features={features} setFeatures={setFeatures} oauthStatus={oauthStatus} />}
 
           {section === "models" && (
             <ModelsPanel
@@ -936,15 +940,15 @@ export function App() {
             />
           )}
 
-          {section === "llamacpp" && <LlamacppPanel features={features} status={llamacppStatus} />}
+          {section === "llamacpp" && !isSectionHidden("llamacpp") && <LlamacppPanel features={features} status={llamacppStatus} />}
 
-          {section === "ollama" && <OllamaPanel status={ollamaStatus} models={ollamaModels} />}
+          {section === "ollama" && !isSectionHidden("ollama") && <OllamaPanel status={ollamaStatus} models={ollamaModels} />}
 
-          {section === "personas" && <PersonasPanel features={features} setFeatures={setFeatures} builtinPersonas={builtinPersonas} />}
+          {section === "personas" && !isSectionHidden("personas") && <PersonasPanel features={features} setFeatures={setFeatures} builtinPersonas={builtinPersonas} />}
 
           {section === "rules" && <RulesPanel rules={rules} skills={skills} />}
 
-          {section === "subagents" && <SubagentsPanel features={features} setFeatures={setFeatures} models={models} modelList={modelList} />}
+          {section === "subagents" && !isSectionHidden("subagents") && <SubagentsPanel features={features} setFeatures={setFeatures} models={models} modelList={modelList} />}
 
           {section === "mcp" && (
             <McpPanel
@@ -955,7 +959,7 @@ export function App() {
             />
           )}
 
-          {section === "hooks" && <HooksPanel features={features} setFeatures={setFeatures} />}
+          {section === "hooks" && !isSectionHidden("hooks") && <HooksPanel features={features} setFeatures={setFeatures} />}
 
           {section === "behavior" && (
             <>
@@ -998,7 +1002,7 @@ export function App() {
             </>
           )}
 
-          {section === "indexing" && (
+          {section === "indexing" && !isSectionHidden("indexing") && (
             <IndexingPanel status={indexStatus} models={embedModels} modelList={modelList} docs={docSources} docsStatus={docsStatus} features={features} setFeatures={setFeatures} />
           )}
 

@@ -5342,9 +5342,16 @@ ${cached}`;
     // In React mode, translate SleepyCode messages into the React webview protocol.
     let outgoing: unknown = message;
     if (this.reactMode && message && typeof message === 'object') {
-      const t = adapter.toReactMessage(message as any);
-      if (t) outgoing = t;
-      else return; // drop untranslatable internal messages in React mode
+      const typed = message as { type?: string; selected?: string };
+      const t = adapter.toReactMessage(typed as any);
+      if (!t) return; // drop untranslatable internal messages in React mode
+      outgoing = t;
+      // The model catalog and the active selection travel together in SleepyCode
+      // but are two separate messages for React, which keeps the picker's
+      // selection in its own state.
+      if (typed.type === 'models' && typed.selected) {
+        void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
+      }
     }
     void this.view?.webview.postMessage(outgoing);
   }

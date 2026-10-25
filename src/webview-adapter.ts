@@ -103,6 +103,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'notifyResponse':
       return { type: 'notifyResponse', id: message.id, choice: message.choice };
 
+    case 'resolveApproval':
+      return { type: 'notifyResponse', id: Number(message.requestId), choice: message.approve ? 'ok' : 'cancel' };
+
     case 'revertToMessage':
       return { type: 'undoLastTurn', conversationId: message.convId };
 
@@ -179,6 +182,9 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'toast':
       return { type: 'toast', id: message.id, title: message.title, message: message.message, kind: message.kind };
 
+    case 'notify':
+      return approvalRequest(message);
+
     case 'restoreDraft':
       return { type: 'queueDraft', convId: message.conversationId ?? '', draft: { text: message.text ?? '', attachments: [] } };
 
@@ -189,6 +195,29 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     default:
       return null;
   }
+}
+
+/**
+ * SleepyCode asks for consent with one generic `notify` card. React expects a
+ * typed approval request, so the tool kind picks the action type and the
+ * numeric prompt id becomes the request id the webview echoes back.
+ */
+function approvalRequest(message: SleepyMsg): ReactMsg {
+  const approval = message.approval ?? {};
+  const isEdit = approval.kind === 'edit';
+  return {
+    type: 'approvalRequest',
+    convId: approval.conversationId ?? '',
+    request: {
+      requestId: String(message.id),
+      convId: approval.conversationId ?? '',
+      toolName: isEdit ? 'edit' : 'command',
+      actionType: isEdit ? 'edits' : 'shell',
+      subject: message.title ?? '',
+      detail: message.detail ?? '',
+      suggestion: message.secondaryLabel,
+    },
+  };
 }
 
 function agentEvent(conversationId: string | undefined, event: Record<string, any>): ReactMsg {

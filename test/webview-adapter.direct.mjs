@@ -241,3 +241,37 @@ test('initialState builds a React bootstrap payload', () => {
   assert.equal(out.hasProviders, true);
   assert.equal(out.workspaceRoot, '/w');
 });
+
+// ---------------------------------------------------------------- approvals
+
+test('notify approval maps to approvalRequest', () => {
+  const out = adapter.toReactMessage({
+    type: 'notify', id: 7, title: 'Run tests?', detail: 'npm test',
+    okLabel: 'Allow once', cancelLabel: 'Deny', risk: 'medium',
+    approval: { id: 7, conversationId: 'c1', kind: 'command', command: 'npm test' },
+  });
+  assert.equal(out.type, 'approvalRequest');
+  assert.equal(out.convId, 'c1');
+  assert.equal(out.request.requestId, '7');
+  assert.equal(out.request.subject, 'Run tests?');
+  assert.equal(out.request.detail, 'npm test');
+  assert.equal(out.request.actionType, 'shell');
+});
+
+test('notify for an edit uses the edits action type', () => {
+  const out = adapter.toReactMessage({
+    type: 'notify', id: 9, title: 'Edit file?', detail: 'write src/a.ts',
+    approval: { id: 9, conversationId: 'c1', kind: 'edit' },
+  });
+  assert.equal(out.request.actionType, 'edits');
+});
+
+test('resolveApproval approve -> notifyResponse ok', () => {
+  const out = adapter.toSleepyMessage({ type: 'resolveApproval', requestId: '7', approve: true });
+  assert.deepEqual(out, { type: 'notifyResponse', id: 7, choice: 'ok' });
+});
+
+test('resolveApproval deny -> notifyResponse cancel', () => {
+  const out = adapter.toSleepyMessage({ type: 'resolveApproval', requestId: '7', approve: false });
+  assert.deepEqual(out, { type: 'notifyResponse', id: 7, choice: 'cancel' });
+});

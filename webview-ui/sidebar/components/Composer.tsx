@@ -23,6 +23,7 @@ import { ComposerEditor, type ComposerCodeBlock } from "./ComposerEditor";
 import { CodeLanguagePicker } from "./CodeLanguagePicker";
 import { getCodeLanguage } from "../../shared/codeLanguages";
 import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PersonaInfo, TeamInfo } from "../types";
+import { filterModes } from "../../shared/featureFlags";
 
 /** Top-level @ menu categories. */
 const MENTION_CATEGORIES: { id: MentionCategory; label: string; icon: IconName; leaf?: boolean }[] = [
@@ -220,13 +221,17 @@ function fileToAttachment(file: File): Promise<Attachment | null> {
   });
 }
 
-const MODES: { id: Mode; label: string; icon: IconName }[] = [
+const ALL_MODES: { id: Mode; label: string; icon: IconName }[] = [
   { id: "agent", label: "Agent", icon: "agent" },
   { id: "plan", label: "Plan", icon: "list" },
   { id: "multitask", label: "Multitask", icon: "task" },
   { id: "project", label: "Project", icon: "users" },
   { id: "ask", label: "Ask", icon: "chat" },
 ];
+
+// Multitask/Project coordinate OpenCursor teams, which SleepyCode does not
+// have. They stay defined above so they can be switched back on later.
+const MODES = filterModes(ALL_MODES);
 
 /** Parse a context-size label ("200k", "1m", "128k") to a token count. */
 function parseContextSize(v: string | undefined): number {
