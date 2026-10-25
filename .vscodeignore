@@ -46,3 +46,8 @@ artifacts/**
 .witdiff/**
 witdiff.toml
 docs/**
+
+# React webview source (built into dist/webview)
+webview-ui/**
+# Reference clone (local only)
+reference/**
