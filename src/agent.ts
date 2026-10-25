@@ -26,6 +26,7 @@ import { pickContextWindow } from './context-window-core';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
+import { renderReactWebviewHtml } from './webview-react';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
 import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
@@ -786,7 +787,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.html = getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
+    const useReact = this.context.globalState.get<boolean>('useReactWebview', false);
+    view.webview.html = useReact
+      ? renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode')
+      : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: WebMessage) => {
       void this.onMessage(message).catch(error => {
         const detail = errorMessage(error);

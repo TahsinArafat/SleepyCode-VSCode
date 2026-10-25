@@ -1,0 +1,39 @@
+[project]
+language = "javascript"
+
+[verification]
+test_command = [
+    "npm",
+    "run",
+    "test:core",
+]
+test_globs = [
+    "test/**/*.direct.mjs",
+    "test/**/*.test.mjs",
+]
+extra_test_paths = [
+    "test",
+]
+block_on_integrity_findings = true
+max_output_bytes = 16384
+targeted_test_selection = false
+timeout_secs = 900
+flake_repeats = 1
+base_dependency_dirs = []
+sandbox_env = []
+sandbox_network = true
+mutation = false
+coverage = false
+max_mutants = 25
+max_mutants_per_function = 5
+framework = "javascript"
+signing_failure_exit_code = 1
+
+[gate]
+strict = false
+fail_on_no_changed_tests = false
+require_signature = false
+
+[policy]
+rules = []
+ignore_paths = []
