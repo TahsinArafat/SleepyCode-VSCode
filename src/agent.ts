@@ -26,6 +26,7 @@ import { pickContextWindow } from './context-window-core';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
+import * as adapter from './webview-adapter';
 import { renderReactWebviewHtml } from './webview-react';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
@@ -276,6 +277,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Minimum gap between coalesced mid-run checkpoint writes. */
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
+  private reactMode = false;
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -786,13 +788,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.reactMode = this.context.globalState.get<boolean>('useReactWebview', true);
     view.webview.options = { enableScripts: true };
-    const useReact = this.context.globalState.get<boolean>('useReactWebview', true);
-    view.webview.html = useReact
+    view.webview.html = this.reactMode
       ? renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode')
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
-    view.webview.onDidReceiveMessage((message: WebMessage) => {
-      void this.onMessage(message).catch(error => {
+    view.webview.onDidReceiveMessage((message: any) => {
+      const translated = this.reactMode ? adapter.toSleepyMessage(message) : message;
+      // React sends messages with no SleepyCode counterpart (drafts, queue
+      // actions, goals). Dropping them keeps the host handler from having to
+      // understand a protocol it does not speak.
+      if (!translated) return;
+      void this.onMessage(translated as WebMessage).catch(error => {
         const detail = errorMessage(error);
         this.log('error', 'webview.message.failed', detail);
         this.post({ type: 'error', text: detail });
@@ -815,6 +822,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.postConfig();
       void this.maybeShowFirstLaunchSettings();
     });
+  }
+
+  /**
+   * Hand the React webview its opening payload: the conversation list, the
+   * active transcript and the bootstrap state. The React app renders nothing
+   * until `initialState` arrives, so this runs on every `ready`.
+   */
+  private sendReactBootstrap(): void {
+    const active = this.activeConversation();
+    const selection = active ? this.selectionFor(active) : undefined;
+    this.post(adapter.buildInitialState({
+      activeId: active?.id,
+      workspaceRoot: this.workspaceRoot()?.fsPath,
+      selectedModel: selection?.model ?? '',
+      turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
+    }));
   }
 
   public toggleReactWebview(): void {
@@ -1663,6 +1686,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (getSleepyAccount().loggedIn) {
         void this.sendSleepyAccountData(true);
       }
+      if (this.reactMode) this.sendReactBootstrap();
       return;
     }
     if (message.type === 'stop') {
@@ -5315,7 +5339,14 @@ ${cached}`;
       const type = (message as { type?: unknown }).type;
       if (type === 'done' || type === 'generationError' || type === 'steered') this.stopBrowserPreviewPolling();
     }
-    void this.view?.webview.postMessage(message);
+    // In React mode, translate SleepyCode messages into the React webview protocol.
+    let outgoing: unknown = message;
+    if (this.reactMode && message && typeof message === 'object') {
+      const t = adapter.toReactMessage(message as any);
+      if (t) outgoing = t;
+      else return; // drop untranslatable internal messages in React mode
+    }
+    void this.view?.webview.postMessage(outgoing);
   }
 
   /** Continuous 2s captures so the preview stays live while the agent works, not just at tool boundaries. */

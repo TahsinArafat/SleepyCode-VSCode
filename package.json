@@ -152,6 +152,10 @@
       {
         "command": "sleepycode.checkpoints",
         "title": "SleepyCode: Undo History"
+      },
+      {
+        "command": "sleepycode.toggleReactUi",
+        "title": "SleepyCode: Toggle React UI (beta)"
       }
     ],
     "menus": {
