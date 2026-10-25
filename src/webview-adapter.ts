@@ -309,10 +309,22 @@ function conversationPayload(message: SleepyMsg): ReactMsg {
     type: 'loadConversation',
     activeId: message.id,
     turns: itemsToTurns(message.items),
-    usedTokens: message.usedTokens ?? 0,
+    usedTokens: message.usedTokens ?? contextTokensOf(message.items),
     running: message.running === true,
     workspaceRoot: message.workspaceRoot,
   };
+}
+
+/**
+ * Context-window usage for the composer ring: SleepyCode records it on the
+ * assistant item of each turn, so the last one that has it is current.
+ */
+function contextTokensOf(items: readonly any[] | undefined): number {
+  for (let i = (items?.length ?? 0) - 1; i >= 0; i--) {
+    const value = items?.[i]?.contextTokens;
+    if (typeof value === 'number' && value > 0) return value;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------- transcript -> turns
@@ -420,4 +432,33 @@ export function buildInitialState(input: {
     usedTokens: input.usedTokens ?? 0,
     workspaceRoot: input.workspaceRoot,
   };
+}
+
+// ---------------------------------------------------------------- panels
+
+const PANEL_TITLES: Record<string, string> = {
+  worktrees: 'Worktrees',
+  index: 'Project Index',
+  agents: 'Agents',
+  tasks: 'Scheduled Tasks',
+  checkpoints: 'Undo History',
+};
+
+/** Human title for a SleepyCode panel id. */
+export function panelTitle(panel: string): string {
+  return PANEL_TITLES[panel] ?? panel;
+}
+
+/**
+ * SleepyCode's side panels (worktrees, index, agents, tasks, checkpoints) have
+ * no React screen yet. Their rows become QuickPick items so the commands keep
+ * working until those panels are ported.
+ */
+export function panelToQuickPickItems(message: SleepyMsg): { label: string; description?: string }[] {
+  const rows: any[] = Array.isArray(message?.rows) ? message.rows : [];
+  return rows.map(row => {
+    const item: { label: string; description?: string } = { label: String(row?.title ?? '') };
+    if (row?.detail) item.description = String(row.detail);
+    return item;
+  });
 }

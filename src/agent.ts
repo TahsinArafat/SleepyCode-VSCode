@@ -5352,8 +5352,23 @@ ${cached}`;
       if (typed.type === 'models' && typed.selected) {
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
+      // Side panels have no React screen yet, so their rows go to a QuickPick
+      // instead of vanishing. The commands stay usable until they are ported.
+      if (typed.type === 'panel') {
+        this.showPanelAsQuickPick(typed as { panel: string; rows?: { title: string; detail?: string }[]; hint?: string });
+        return;
+      }
     }
     void this.view?.webview.postMessage(outgoing);
+  }
+
+  private showPanelAsQuickPick(message: { panel: string; rows?: { title: string; detail?: string }[]; hint?: string }): void {
+    const items = adapter.panelToQuickPickItems({ type: 'panel', ...message });
+    if (!items.length) {
+      void vscode.window.showInformationMessage(`${adapter.panelTitle(message.panel)}: ${message.hint ?? 'nothing to show yet.'}`);
+      return;
+    }
+    void vscode.window.showQuickPick(items, { title: adapter.panelTitle(message.panel), placeHolder: message.hint });
   }
 
   /** Continuous 2s captures so the preview stays live while the agent works, not just at tool boundaries. */

@@ -323,3 +323,47 @@ test('sleepycode tool names map to their React equivalents', () => {
   assert.equal(map('list_files'), 'Glob');
   assert.equal(map('get_diagnostics'), 'ReadLints');
 });
+
+// ---------------------------------------------------------------- usage
+
+test('loadConversation derives usedTokens from the last context count', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversation',
+    id: 'c1',
+    items: [
+      { id: 'i1', role: 'user', text: 'hi', timestamp: 1 },
+      { id: 'i2', role: 'assistant', text: 'yo', timestamp: 2, contextTokens: 1234 },
+    ],
+  });
+  assert.equal(out.usedTokens, 1234);
+});
+
+test('loadConversation falls back to zero without a context count', () => {
+  const out = adapter.toReactMessage({ type: 'conversation', id: 'c1', items: [] });
+  assert.equal(out.usedTokens, 0);
+});
+
+// ---------------------------------------------------------------- panels
+
+test('panel rows flatten to quick pick items', () => {
+  const items = adapter.panelToQuickPickItems({
+    type: 'panel', panel: 'tasks',
+    rows: [{ title: 'A', detail: 'one' }, { title: 'B' }],
+  });
+  assert.equal(items.length, 2);
+  assert.equal(items[0].label, 'A');
+  assert.equal(items[0].description, 'one');
+  assert.equal(items[1].label, 'B');
+  assert.equal(items[1].description, undefined);
+});
+
+test('panel title reflects the panel kind', () => {
+  assert.equal(adapter.panelTitle('worktrees'), 'Worktrees');
+  assert.equal(adapter.panelTitle('checkpoints'), 'Undo History');
+  assert.equal(adapter.panelTitle('mystery'), 'mystery');
+});
+
+test('empty panels produce no quick pick items', () => {
+  assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index', rows: [] }), []);
+  assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index' }), []);
+});
