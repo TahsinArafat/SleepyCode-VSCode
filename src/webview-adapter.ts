@@ -134,11 +134,11 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
 
     case 'tool':
       return message.phase === 'start'
-        ? agentEvent(message.conversationId, { type: 'tool-call-started', callId: message.id, name: message.tool ?? message.name, input: undefined })
+        ? agentEvent(message.conversationId, { type: 'tool-call-started', callId: message.id, name: reactToolName(message.tool ?? message.name), input: undefined })
         : agentEvent(message.conversationId, {
             type: 'tool-call-completed',
             callId: message.id,
-            name: message.tool ?? message.name,
+            name: reactToolName(message.tool ?? message.name),
             status: message.failed ? 'error' : 'completed',
             result: message.text ?? '',
           });
@@ -218,6 +218,43 @@ function approvalRequest(message: SleepyMsg): ReactMsg {
       suggestion: message.secondaryLabel,
     },
   };
+}
+
+/**
+ * SleepyCode tool ids are snake_case; the React tool cards are keyed by the
+ * OpenCursor names (icons, labels and the plan card all switch on them).
+ */
+const TOOL_NAMES: Record<string, string> = {
+  plan: 'WritePlan',
+  read_file: 'Read',
+  write_file: 'Write',
+  replace_text: 'StrReplace',
+  delete_file: 'Delete',
+  list_files: 'Glob',
+  search_files: 'Grep',
+  get_diagnostics: 'ReadLints',
+  run_command: 'Shell',
+  obs_recall: 'Read',
+  browser_navigate: 'BrowserNavigate',
+  browser_click: 'BrowserInteract',
+  browser_type: 'BrowserInteract',
+  browser_evaluate: 'BrowserInteract',
+  browser_snapshot: 'BrowserInspect',
+  browser_screenshot: 'BrowserScreenshot',
+  browser_close: 'BrowserClose',
+  web_search: 'WebSearch',
+  web_fetch: 'WebFetch',
+  delegate: 'Task',
+  use_skill: 'Read',
+  search_skills: 'FileSearch',
+  install_skill: 'Write',
+  list_skills: 'ListDir',
+};
+
+/** Map a SleepyCode tool id onto the React tool name it renders as. */
+export function reactToolName(tool: string | undefined): string {
+  if (!tool) return 'Tool';
+  return TOOL_NAMES[tool] ?? tool;
 }
 
 function agentEvent(conversationId: string | undefined, event: Record<string, any>): ReactMsg {
@@ -307,10 +344,14 @@ export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
         if (work.text) blocks.push({ kind: 'thinking', text: work.text });
         continue;
       }
+      if (work?.kind === 'plan') {
+        blocks.push(planBlock(work, blocks.length));
+        continue;
+      }
       blocks.push({
         kind: 'tool',
         callId: work?.tool ?? `tool-${blocks.length}`,
-        name: work?.tool ?? work?.title ?? work?.kind ?? 'tool',
+        name: reactToolName(work?.tool) || work?.title || work?.kind || 'tool',
         input: undefined,
         status: work?.interrupted ? 'error' : work?.done === false ? 'running' : 'completed',
         result: work?.text,
@@ -333,6 +374,28 @@ export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
     });
   }
   return turns;
+}
+
+/**
+ * SleepyCode stores the plan as a work item with ordered steps plus the
+ * completed/active indices. The React plan card renders a title and Markdown
+ * body, so the steps become a checklist and the status follows the active step.
+ */
+function planBlock(work: any, index: number): Block {
+  const steps: string[] = Array.isArray(work?.steps) ? work.steps : [];
+  const doneSteps: number[] = Array.isArray(work?.doneSteps) ? work.doneSteps : [];
+  const content = steps
+    .map((step, i) => `${doneSteps.includes(i) ? '- [x]' : '- [ ]'} ${step}`)
+    .join('\n');
+  const finished = steps.length > 0 && doneSteps.length >= steps.length;
+  return {
+    kind: 'tool',
+    callId: `plan-${index}`,
+    name: 'WritePlan',
+    input: { title: work?.title || 'Plan', content },
+    status: work?.interrupted ? 'error' : finished ? 'completed' : 'running',
+    result: work?.text,
+  };
 }
 
 // ---------------------------------------------------------------- bootstrap

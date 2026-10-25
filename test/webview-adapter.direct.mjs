@@ -75,7 +75,8 @@ test('tool start -> tool-call-started', () => {
   const out = adapter.toReactMessage({ type: 'tool', conversationId: 'c1', phase: 'start', id: 't1', tool: 'read_file', name: 'Read file' });
   assert.equal(out.event.type, 'tool-call-started');
   assert.equal(out.event.callId, 't1');
-  assert.equal(out.event.name, 'read_file');
+  // Tool ids are mapped to the React card names.
+  assert.equal(out.event.name, 'Read');
 });
 
 test('tool end -> tool-call-completed with status', () => {
@@ -175,7 +176,7 @@ test('assistant work items become tool blocks', () => {
   const blocks = out.turns[0].blocks;
   // Work happens before the answer, so tool blocks precede the final text.
   assert.equal(blocks[0].kind, 'tool');
-  assert.equal(blocks[0].name, 'read_file');
+  assert.equal(blocks[0].name, 'Read');
   assert.equal(blocks[0].status, 'completed');
   assert.equal(blocks[1].kind, 'text');
   assert.equal(blocks[1].text, 'done');
@@ -274,4 +275,51 @@ test('resolveApproval approve -> notifyResponse ok', () => {
 test('resolveApproval deny -> notifyResponse cancel', () => {
   const out = adapter.toSleepyMessage({ type: 'resolveApproval', requestId: '7', approve: false });
   assert.deepEqual(out, { type: 'notifyResponse', id: 7, choice: 'cancel' });
+});
+
+// ---------------------------------------------------------------- plan + tool names
+
+test('plan work items render as a WritePlan card', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversation',
+    id: 'c1',
+    items: [{
+      id: 'i1', role: 'assistant', text: 'done', timestamp: 1,
+      work: [{ kind: 'plan', text: '', title: 'Ship it', steps: ['a', 'b'], activeStep: 1, doneSteps: [0] }],
+    }],
+  });
+  const block = out.turns[0].blocks[0];
+  assert.equal(block.kind, 'tool');
+  assert.equal(block.name, 'WritePlan');
+  assert.equal(block.input.title, 'Ship it');
+  assert.match(block.input.content, /a/);
+  assert.equal(block.status, 'running');
+});
+
+test('a finished plan is marked completed', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversation',
+    id: 'c1',
+    items: [{
+      id: 'i1', role: 'assistant', text: '', timestamp: 1,
+      work: [{ kind: 'plan', text: '', title: 'P', steps: ['a'], activeStep: -1, doneSteps: [0] }],
+    }],
+  });
+  assert.equal(out.turns[0].blocks[0].status, 'completed');
+});
+
+test('live plan tool events use the React tool name', () => {
+  const out = adapter.toReactMessage({ type: 'tool', conversationId: 'c1', phase: 'start', id: 't1', tool: 'plan', name: 'Plan' });
+  assert.equal(out.event.name, 'WritePlan');
+});
+
+test('sleepycode tool names map to their React equivalents', () => {
+  const map = (tool) => adapter.toReactMessage({ type: 'tool', conversationId: 'c1', phase: 'start', id: 't', tool, name: tool }).event.name;
+  assert.equal(map('read_file'), 'Read');
+  assert.equal(map('write_file'), 'Write');
+  assert.equal(map('replace_text'), 'StrReplace');
+  assert.equal(map('run_command'), 'Shell');
+  assert.equal(map('search_files'), 'Grep');
+  assert.equal(map('list_files'), 'Glob');
+  assert.equal(map('get_diagnostics'), 'ReadLints');
 });
