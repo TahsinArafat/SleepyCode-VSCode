@@ -286,6 +286,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly reactChangeTarget = new Map<string, string>();
   /** Newest running tool call per conversation, so approvals land on its card. */
   private readonly reactLastToolCall = new Map<string, string>();
+  /** Last transcript items per conversation, for React actions that need a turn. */
+  private readonly reactItems = new Map<string, unknown[]>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -803,6 +805,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
+      if (this.reactMode && message?.type === 'continueRun') {
+        const conversationId = this.activeProject()?.activeConversationId;
+        const target = adapter.continueTarget(conversationId, conversationId ? this.reactItems.get(conversationId) : undefined);
+        if (target) void this.onMessage({ type: 'continueIteration', ...target } as WebMessage);
+        return;
+      }
       if (this.reactMode && message?.type === 'setApprovalPreset') {
         void this.applyApprovalPreset(message.preset);
         return;
@@ -5504,6 +5512,7 @@ ${cached}`;
         void this.view?.webview.postMessage(adapter.pendingChangesMessage(items));
         const target = adapter.latestAssistantItemId(items);
         if (typed.id && target) this.reactChangeTarget.set(typed.id, target);
+        if (typed.id) this.reactItems.set(typed.id, Array.isArray(items) ? items : []);
       }
       // Side panels have no React screen yet, so their rows go to a QuickPick
       // instead of vanishing. The commands stay usable until they are ported.

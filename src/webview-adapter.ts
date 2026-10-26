@@ -751,3 +751,15 @@ export function parseToolArgs(args: unknown): Record<string, any> {
     return {};
   }
 }
+
+// ---------------------------------------------------------------- continue
+
+/**
+ * React's "continue" names no target, but SleepyCode resumes a specific
+ * assistant turn. The newest one is what the user is looking at.
+ */
+export function continueTarget(conversationId: string | undefined, items: readonly any[] | undefined): { conversationId: string; itemId: string } | null {
+  if (!conversationId) return null;
+  const itemId = latestAssistantItemId(items);
+  return itemId ? { conversationId, itemId } : null;
+}

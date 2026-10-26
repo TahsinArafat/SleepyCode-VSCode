@@ -763,3 +763,19 @@ test('a malformed args string does not break the event', () => {
   assert.equal(out.event.type, 'tool-call-started');
   assert.deepEqual(out.event.input, {});
 });
+
+// ---------------------------------------------------------------- continue run
+
+test('continue targets the newest assistant turn', () => {
+  const target = adapter.continueTarget('c1', [
+    { id: 'u', role: 'user' },
+    { id: 'a1', role: 'assistant' },
+  ]);
+  assert.deepEqual(target, { conversationId: 'c1', itemId: 'a1' });
+});
+
+test('continue is unavailable without a conversation or assistant turn', () => {
+  assert.equal(adapter.continueTarget(undefined, [{ id: 'a', role: 'assistant' }]), null);
+  assert.equal(adapter.continueTarget('c1', [{ id: 'u', role: 'user' }]), null);
+  assert.equal(adapter.continueTarget('c1', undefined), null);
+});
