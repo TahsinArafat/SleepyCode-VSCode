@@ -59,3 +59,11 @@ test('resetting removes only that model', () => {
   const after = opts.resetModel(before, 'm1');
   assert.deepEqual(Object.keys(after), ['m2']);
 });
+
+test('a worktree name is derived from a conversation title safely', async () => {
+  const worktree = await import('../src/worktree-naming.ts');
+  assert.match(worktree.worktreeNameFor('Add auth: worktree "test"?'), /^[a-z0-9-]+$/);
+  assert.ok(!worktree.worktreeNameFor('///').includes('/'));
+  assert.ok(worktree.worktreeNameFor('').length > 0);
+  assert.ok(worktree.worktreeNameFor('a'.repeat(200)).length <= 60);
+});

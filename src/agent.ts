@@ -34,6 +34,7 @@ import * as fileIcons from './file-icons';
 import * as paste from './paste-core';
 import * as goalCore from './goal-core';
 import * as modelOptions from './model-options';
+import * as worktreeNaming from './worktree-naming';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -50,7 +51,7 @@ import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence
 import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
 import { fileChangeStats } from './line-diff';
-import { listWorktrees } from './worktrees';
+import { createWorktree, listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
 import { CliClient, isPreferredCliModel, pickCliModel, type CliProviderCatalog } from './cli-client';
 import { CliSessionRegistry, resolveEngine, type EngineStatus } from './cli-engine';
@@ -1196,6 +1197,46 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return modelOptions.normalizeOverrides(this.context.globalState.get<unknown>('sleepycode.modelOptions'));
   }
 
+  /**
+   * Create an isolated worktree for a piece of work and offer to open it.
+   *
+   * SleepyCode binds to ONE workspace root — 46 call sites resolve paths through
+   * `workspaceRoot()` — so a conversation cannot run in a second tree while the
+   * first stays open. Opening the worktree as the workspace is what isolation
+   * means here: it rebinds the extension, and the work happens in its own branch
+   * with the original folder untouched. Faking per-conversation roots would mean
+   * rewriting every path resolution, where a mistake writes to the wrong tree.
+   */
+  private async createWorktreeConversation(title?: string): Promise<void> {
+    const root = this.workspaceRoot();
+    if (!root) {
+      void vscode.window.showInformationMessage(adapter.noWorkspaceMessage());
+      return;
+    }
+    if (!isGitTrackedWorkspace(root.fsPath)) {
+      void vscode.window.showInformationMessage('Worktrees need a Git repository. This folder is not one.');
+      return;
+    }
+    const conversation = this.activeConversation();
+    const name = worktreeNaming.worktreeNameFor(title || conversation?.title);
+    try {
+      const tree = await createWorktree(root.fsPath, { name });
+      this.log('info', 'worktree.created', `${name} -> ${tree.path}`);
+      const choice = await vscode.window.showInformationMessage(
+        `Worktree "${name}" created on its own branch. Open it to work there?`,
+        'Open in new window',
+        'Reveal',
+      );
+      const uri = vscode.Uri.file(tree.path);
+      if (choice === 'Open in new window') await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: true });
+      else if (choice === 'Reveal') await vscode.commands.executeCommand('revealFileInOS', uri);
+    } catch (error) {
+      const detail = errorMessage(error);
+      this.log('error', 'worktree.create.failed', detail);
+      void vscode.window.showErrorMessage(`Could not create the worktree: ${detail}`);
+    }
+  }
+
   private settingsPanelHost(): SettingsPanelHost {
     return {
       readSettings: () => ({
@@ -2337,6 +2378,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'exportConversation') {
       await this.exportConversation(message.conversationId);
+      return;
+    }
+    if (message.type === 'createWorktreeConversation') {
+      await this.createWorktreeConversation(message.title);
       return;
     }
     if (message.type === 'saveModelOptions') {

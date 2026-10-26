@@ -183,6 +183,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'exportConversation':
       return { type: 'exportConversation', conversationId: message.convId };
 
+    case 'createWorktreeConversation':
+      return { type: 'createWorktreeConversation', title: message.title };
+
     case 'saveModelOptions':
       return { type: 'saveModelOptions', modelId: message.modelId, options: message.options };
 
