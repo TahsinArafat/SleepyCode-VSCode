@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
@@ -866,8 +866,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Open the OpenCursor settings window (also used by the command). */
-  public openSettingsWindow(): void {
-    SettingsPanel.show(this.context, this.settingsPanelHost());
+  public openSettingsWindow(section?: string): void {
+    SettingsPanel.show(this.context, this.settingsPanelHost(), section);
   }
 
   /**
@@ -969,6 +969,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.mcpCache = undefined;
       },
       log: (level, event, detail) => this.log(level, `panel.${event}`, detail),
+      skills: async () => {
+        const root = this.workspaceRoot();
+        if (!root) return [];
+        return listInstalledSkills(this.skillsRoot());
+      },
+      memory: () => {
+        const root = this.workspaceRoot();
+        if (!root) return { memoryPath: MEMORY_RELATIVE_PATH, memoryExists: false };
+        return { memoryPath: MEMORY_RELATIVE_PATH, memoryExists: existsSync(path.join(root.fsPath, MEMORY_RELATIVE_PATH)) };
+      },
       usage: () => aggregateUsage(loadUsage(this.context)),
       refreshModels: async () => {
         await this.refreshModels();
@@ -5643,8 +5653,13 @@ ${cached}`;
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
       if (adapter.shouldOfferSignIn(typed as any)) this.offerSignInOnce();
-      // Usage and the skill marketplace have no React screen yet. Say which
-      // command ran instead of letting it look broken.
+      // Usage is answerable: the settings window has a Usage section.
+      if (typed.type === 'showUsage') {
+        this.openSettingsWindow('usage');
+        return;
+      }
+      // Anything left has no React screen yet. Say which command ran instead of
+      // letting it look broken.
       const fallback = adapter.reactFallbackFor(typed as any);
       if (fallback) {
         void vscode.window.showInformationMessage(`${fallback} is not in the new React UI yet. Run "SleepyCode: Toggle React UI (beta)" to switch back to the classic view.`);

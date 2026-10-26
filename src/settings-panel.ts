@@ -43,6 +43,10 @@ export interface SettingsPanelHost {
   refreshModels(): Promise<string[]>;
   /** Report a panel-level event to the extension log. */
   log(level: 'info' | 'warn' | 'error', event: string, detail?: string): void;
+  /** Installed skills, for the Rules & Skills section. */
+  skills(): Promise<readonly { name: string; description?: string; skillMdPath?: string }[]>;
+  /** Whether the project memory file exists, so it can be listed as a rule. */
+  memory(): { memoryPath: string; memoryExists: boolean };
 }
 
 export class SettingsPanel {
@@ -56,10 +60,11 @@ export class SettingsPanel {
   }
 
   /** Open the settings window, revealing the existing one if it is already up. */
-  static show(context: vscode.ExtensionContext, host: SettingsPanelHost): SettingsPanel {
+  static show(context: vscode.ExtensionContext, host: SettingsPanelHost, section?: string): SettingsPanel {
     if (SettingsPanel.current) {
       SettingsPanel.current.panel.reveal();
       void SettingsPanel.current.pushAll();
+      if (section) SettingsPanel.current.post({ type: 'navigate', section });
       return SettingsPanel.current;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -81,6 +86,9 @@ export class SettingsPanel {
       if (SettingsPanel.current === instance) SettingsPanel.current = undefined;
     });
     panel.webview.html = renderReactWebviewHtml(panel.webview, context.extensionUri, 'settings', 'SleepyCode Settings');
+    // Posted after the HTML is set: the app only starts listening on mount, so
+    // an earlier navigate would be lost.
+    if (section) setTimeout(() => instance.post({ type: 'navigate', section }), 150);
     return instance;
   }
 
@@ -117,8 +125,9 @@ export class SettingsPanel {
     } catch (error) {
       this.host.log('error', 'settings.readConnections.failed', error instanceof Error ? error.message : String(error));
     }
-    this.host.log('info', 'settings.features.push', `servers=${connections.length} statuses=${statuses?.length ?? 0}`);
-    this.post(toPanelFeatures(connections, statuses ?? []));
+    const extras = { skills: await this.host.skills().catch(() => []), memory: this.host.memory() };
+    this.host.log('info', 'settings.features.push', `servers=${connections.length} statuses=${statuses?.length ?? 0} skills=${extras.skills.length}`);
+    this.post(toPanelFeatures(connections, statuses ?? [], extras));
   }
 
   /**

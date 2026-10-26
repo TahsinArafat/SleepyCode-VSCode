@@ -283,3 +283,47 @@ test('completion keeps tool names when the sync supplied them', () => {
   assert.deepEqual(rows[0].tools, ['search_inside', 'search_items']);
   assert.equal(rows[0].connected, true);
 });
+
+// ---------------------------------------------------------------- skills and rules
+
+test('installed skills map onto the panel skill rows', () => {
+  const skills = adapter.toPanelSkills([
+    { name: 'pdf', description: 'Read PDFs', folder: 'pdf', skillMdPath: '/skills/pdf/SKILL.md' },
+  ]);
+  assert.equal(skills.length, 1);
+  assert.equal(skills[0].name, 'pdf');
+  assert.equal(skills[0].description, 'Read PDFs');
+  assert.equal(skills[0].path, '/skills/pdf/SKILL.md');
+});
+
+test('a skill without a description still renders', () => {
+  const skills = adapter.toPanelSkills([{ name: 'x', folder: 'x', skillMdPath: '/s/x/SKILL.md' }]);
+  assert.equal(skills[0].description, '');
+});
+
+test('no installed skills means no rows', () => {
+  assert.deepEqual(adapter.toPanelSkills(undefined), []);
+  assert.deepEqual(adapter.toPanelSkills([]), []);
+});
+
+test('the project memory file is listed as an always-applied rule', () => {
+  const rules = adapter.toPanelRules({ memoryPath: '.sleepycode/memory.md', memoryExists: true });
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0].file, 'memory.md');
+  assert.equal(rules[0].path, '.sleepycode/memory.md');
+  assert.equal(rules[0].alwaysApply, true);
+});
+
+test('a missing memory file produces no rule', () => {
+  assert.deepEqual(adapter.toPanelRules({ memoryPath: '.sleepycode/memory.md', memoryExists: false }), []);
+  assert.deepEqual(adapter.toPanelRules(undefined), []);
+});
+
+test('features carry skills and rules so the section is not empty', () => {
+  const payload = adapter.toPanelFeatures([], [], {
+    skills: [{ name: 'pdf', description: '', folder: 'pdf', skillMdPath: '/s/pdf/SKILL.md' }],
+    memory: { memoryPath: '.sleepycode/memory.md', memoryExists: true },
+  });
+  assert.equal(payload.skills.length, 1);
+  assert.equal(payload.rules.length, 1);
+});

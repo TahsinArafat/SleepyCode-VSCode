@@ -149,6 +149,7 @@ export function toMcpPanelStatus(status: StoredMcpStatus): PanelMcpStatus {
 export function toPanelFeatures(
   connections: readonly StoredMcpConnection[],
   statuses: readonly (StoredMcpStatus | PanelMcpStatus)[] = [],
+  extras: PanelFeatureExtras = {},
 ): {
   type: 'features';
   /**
@@ -160,6 +161,9 @@ export function toPanelFeatures(
   features: { mcpServers: PanelMcpConfig[] };
   /** Read from `msg.mcpStatus` directly, so this one stays at the top level. */
   mcpStatus: PanelMcpStatus[];
+  /** Also top level: the window reads `msg.rules` and `msg.skills`. */
+  rules: PanelRuleInfo[];
+  skills: PanelSkillInfo[];
 } {
   return {
     type: 'features',
@@ -167,7 +171,58 @@ export function toPanelFeatures(
     // Accepts either shape: stored statuses are translated, already-panel
     // statuses (from `completeMcpStatuses`) pass straight through.
     mcpStatus: (statuses ?? []).map((status) => ('connected' in status ? status : toMcpPanelStatus(status))),
+    rules: toPanelRules(extras.memory),
+    skills: toPanelSkills(extras.skills),
   };
+}
+
+// ---------------------------------------------------------------- skills and rules
+
+/** A skill row as the settings window renders it. */
+export interface PanelSkillInfo {
+  name: string;
+  description: string;
+  path: string;
+  pluginId?: string;
+}
+
+/** A rule row as the settings window renders it. */
+export interface PanelRuleInfo {
+  file: string;
+  path?: string;
+  alwaysApply: boolean;
+  globs: string;
+  description: string;
+}
+
+export interface PanelFeatureExtras {
+  skills?: readonly { name: string; description?: string; folder?: string; skillMdPath?: string }[];
+  memory?: { memoryPath: string; memoryExists: boolean };
+}
+
+/** Installed skills -> the panel's rows. */
+export function toPanelSkills(skills: readonly { name: string; description?: string; skillMdPath?: string }[] | undefined): PanelSkillInfo[] {
+  return (skills ?? []).map((skill) => ({
+    name: skill.name,
+    description: skill.description ?? '',
+    path: skill.skillMdPath ?? '',
+  }));
+}
+
+/**
+ * SleepyCode's durable instructions are one project memory file. It applies to
+ * every request, which is exactly what the panel's "always apply" rule means.
+ */
+export function toPanelRules(memory: { memoryPath: string; memoryExists: boolean } | undefined): PanelRuleInfo[] {
+  if (!memory?.memoryExists) return [];
+  const file = memory.memoryPath.split('/').pop() || memory.memoryPath;
+  return [{
+    file,
+    path: memory.memoryPath,
+    alwaysApply: true,
+    globs: '',
+    description: 'Durable project decisions the agent reads on every request.',
+  }];
 }
 
 // ---------------------------------------------------------------- settings

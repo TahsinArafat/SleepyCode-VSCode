@@ -659,9 +659,13 @@ test('mentions merge with real attachments', () => {
 
 // ---------------------------------------------------------------- React fallbacks
 
-test('usage and marketplace have no React screen, so they ask for a fallback', () => {
-  assert.equal(adapter.reactFallbackFor({ type: 'showUsage' }), 'Usage & Billing');
+test('the marketplace still asks for a fallback', () => {
   assert.equal(adapter.reactFallbackFor({ type: 'showMarketplace' }), 'Skill Marketplace');
+});
+
+test('usage is served by the settings window, not a fallback', () => {
+  // It used to be a dead end; the settings window has a Usage section.
+  assert.equal(adapter.reactFallbackFor({ type: 'showUsage' }), null);
 });
 
 test('other messages have no fallback', () => {

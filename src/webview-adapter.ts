@@ -758,7 +758,8 @@ export function splitMentions(text: string): { text: string; files: { kind: 'fil
 // ---------------------------------------------------------------- fallbacks
 
 const REACT_FALLBACKS: Record<string, string> = {
-  showUsage: 'Usage & Billing',
+  // Usage is served by the settings window (navigate to its Usage section), so
+  // it is no longer a dead end. The marketplace still has no React screen.
   showMarketplace: 'Skill Marketplace',
 };
 
