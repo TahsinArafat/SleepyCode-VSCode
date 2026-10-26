@@ -164,6 +164,10 @@
       {
         "command": "sleepycode.settingsWindow",
         "title": "SleepyCode: Settings (new window)"
+      },
+      {
+        "command": "sleepycode.openLogs",
+        "title": "SleepyCode: Show Logs"
       }
     ],
     "menus": {

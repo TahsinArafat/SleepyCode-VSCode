@@ -143,13 +143,18 @@ export function toMcpPanelStatus(status: StoredMcpStatus): PanelMcpStatus {
  * fields this panel uses are sent; the rest of `FeatureConfig` belongs to
  * OpenCursor features SleepyCode hides.
  */
-export function toPanelFeatures(connections: readonly StoredMcpConnection[], statuses: readonly StoredMcpStatus[]): {
+export function toPanelFeatures(
+  connections: readonly StoredMcpConnection[],
+  statuses: readonly (StoredMcpStatus | PanelMcpStatus)[] = [],
+): {
   mcpServers: PanelMcpConfig[];
   mcpStatus: PanelMcpStatus[];
 } {
   return {
     mcpServers: (connections ?? []).map(toMcpPanelConfig),
-    mcpStatus: (statuses ?? []).map(toMcpPanelStatus),
+    // Accepts either shape: stored statuses are translated, already-panel
+    // statuses (from `completeMcpStatuses`) pass straight through.
+    mcpStatus: (statuses ?? []).map((status) => ('connected' in status ? status : toMcpPanelStatus(status))),
   };
 }
 
@@ -266,4 +271,80 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
 export function isPanelMessage(message: { type?: string } | null | undefined): boolean {
   if (!message || typeof message.type !== 'string') return false;
   return SUPPORTED_PANEL_MESSAGES.has(message.type);
+}
+// ---------------------------------------------------------------- status completeness
+
+/**
+ * Guarantee one status row per stored connection.
+ *
+ * The settings window shows "idle" for any server with no matching status, which
+ * is indistinguishable from "nothing was checked". A sync that omits a server —
+ * because it was filtered out, because the sync threw and reported a single
+ * unnamed failure, or because a connection errored before a status was written —
+ * therefore looked like a server that simply does nothing.
+ *
+ * Unnamed sync-level failures are folded into the real rows rather than kept as
+ * their own row, so an error can never hide behind a name no server has.
+ */
+export function completeMcpStatuses(
+  connections: readonly { name: string; enabled?: boolean }[] | undefined,
+  statuses: readonly StoredMcpStatus[] | undefined,
+): PanelMcpStatus[] {
+  const known = new Map<string, StoredMcpStatus>();
+  for (const status of statuses ?? []) {
+    if (status?.name) known.set(status.name, status);
+  }
+  const names = new Set((connections ?? []).map((connection) => connection.name));
+  // A sync-level failure carries the reason for every server it covered.
+  const syncLevel = (statuses ?? []).filter((status) => status?.name && !names.has(status.name));
+
+  return (connections ?? []).map((connection) => {
+    const match = known.get(connection.name);
+    if (match) return toMcpPanelStatus(match);
+    const disabled = connection.enabled === false;
+    const reason = syncLevel.map((status) => status.error).filter(Boolean).join(' · ');
+    return {
+      name: connection.name,
+      connected: false,
+      toolCount: 0,
+      authState: 'none',
+      error: disabled ? 'Disabled' : reason || 'The server did not report a connection result.',
+    };
+  });
+}
+
+// ---------------------------------------------------------------- url validation
+
+/**
+ * One rule for whether a remote MCP URL is usable, shared by the settings editor
+ * and the connection client.
+ *
+ * Previously the editor accepted any `http(s)` URL while the ported client
+ * required HTTPS (or plain HTTP on loopback only), so a server could be saved
+ * successfully and then never connect — with no explanation at save time.
+ *
+ * Everything that is not HTTPS is refused unless it is loopback, because a
+ * remote server receives configured headers, which are routinely secrets.
+ * Returns `null` when the URL is fine, or a message to show the user.
+ */
+export function validatePanelMcpUrl(value: string | undefined): string | null {
+  const raw = (value ?? '').trim();
+  if (!raw) return 'Enter the server URL.';
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return 'Enter a valid URL, for example https://example.com/mcp.';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return 'Use an HTTP(S) server URL.';
+  }
+  if (url.username || url.password) {
+    return 'Use an HTTP(S) server URL without embedded credentials.';
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !loopback) {
+    return 'Remote MCP requires HTTPS, or HTTP on localhost.';
+  }
+  return null;
 }

@@ -888,6 +888,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (patch.maxSteps !== undefined) await config.update('maxSteps', patch.maxSteps, vscode.ConfigurationTarget.Global);
         if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
         if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
+        this.log('info', 'settings.write', JSON.stringify(patch));
         this.postConfig();
       },
       readConnections: async () => (await loadMcpConnections(this.context)).map(settingsAdapter.toMcpPanelConfig),
@@ -900,14 +901,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         for (let index = 0; index < connections.length; index++) {
           await saveMcpConnection(this.context, settingsAdapter.fromMcpPanelConfig(connections[index]!, index) as McpConnectionData);
         }
+        this.log('info', 'mcp.connections.write', `${connections.length}: ${connections.map((c) => `${c.name}(${c.transport})`).join(', ') || 'none'}`);
+        for (const connection of connections) {
+          if (connection.transport === 'stdio') continue;
+          const problem = settingsAdapter.validatePanelMcpUrl(connection.url);
+          if (problem) this.log('warn', 'mcp.url.rejected', `${connection.name}: ${connection.url ?? '(none)'} -> ${problem}`);
+        }
+        const persisted = await loadMcpConnections(this.context);
+        this.log('info', 'mcp.connections.persisted', `${persisted.length}: ${persisted.map((c) => c.name).join(', ') || 'none'}`);
+        if (persisted.length !== connections.length) {
+          this.log('error', 'mcp.connections.lost', `wrote ${connections.length}, read back ${persisted.length}`);
+        }
         // The stored set changed, so any cached connection is stale.
         this.mcpCache = undefined;
       },
       syncConnections: async () => {
         const connections = await loadMcpConnections(this.context);
-        const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail));
-        await result.connection.close();
-        return result.statuses;
+        this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
+        let statuses: McpConnectionStatus[] = [];
+        try {
+          const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);
+          await result.connection.close();
+          statuses = result.statuses;
+          if (result.connection.errors.length) this.log('warn', 'mcp.sync.errors', result.connection.errors.join(' | '));
+        } catch (error) {
+          // A thrown sync used to vanish into a single status named "MCP",
+          // which matched no server and left every row reading "idle".
+          const detail = errorMessage(error);
+          this.log('error', 'mcp.sync.failed', detail);
+          statuses = [];
+        }
+        // One row per saved server, always: never leave the panel guessing.
+        return settingsAdapter.completeMcpStatuses(connections, statuses);
       },
       mcpLogin: async (name) => {
         const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
@@ -1016,6 +1041,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
     entries.push({ timestamp: Date.now(), level, event, detail });
     void this.context.globalState.update(AgentViewProvider.LOG_KEY, entries.slice(-AgentViewProvider.LOG_LIMIT));
+    // The React settings window has no log view, so the log is also written to
+    // the standard Output panel where View -> Output -> SleepyCode reaches it.
+    // Without this, a failed MCP connection had no readable trace anywhere.
+    this.outputChannel().appendLine(
+      `[${new Date().toISOString()}] ${level.toUpperCase()} ${event}${detail ? `: ${detail}` : ''}`,
+    );
+  }
+
+  private output?: vscode.OutputChannel;
+
+  private outputChannel(): vscode.OutputChannel {
+    if (!this.output) this.output = vscode.window.createOutputChannel('SleepyCode');
+    return this.output;
+  }
+
+  /** Reveal the extension log. Also registered as a command. */
+  public showLogs(): void {
+    this.outputChannel().show(true);
   }
 
   /**
@@ -2637,7 +2680,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           testable = { ...connection, enabled: true };
           this.post({ type: 'mcpConnectionResult', ok: true, text: 'Testing a disabled connection…' });
         }
-        const result = await connectToMcpConnections([testable], this.context, (title, detail) => this.approve('command', title, detail));
+        const result = await connectToMcpConnections([testable], this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);
         await result.connection.close();
         const status = result.statuses.find(item => item.name === connection.name) ?? result.statuses[0];
         const ok = status?.state === 'ok';

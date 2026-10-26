@@ -22,7 +22,6 @@ import {
   toPanelUsage,
   type PanelMcpConfig,
   type PanelMcpStatus,
-  type StoredMcpStatus,
   type StoredSettings,
 } from './settings-adapter';
 
@@ -34,8 +33,8 @@ export interface SettingsPanelHost {
   readConnections(): Promise<PanelMcpConfig[]>;
   /** Replace the stored MCP servers with what the panel now shows. */
   writeConnections(connections: PanelMcpConfig[]): Promise<void>;
-  /** Connect every enabled server and report per-server results. */
-  syncConnections(): Promise<StoredMcpStatus[]>;
+  /** Connect every server and report exactly one status row per stored server. */
+  syncConnections(): Promise<PanelMcpStatus[]>;
   /** Sign in / out of a remote MCP server. */
   mcpLogin(name: string): Promise<void>;
   mcpLogout(name: string): Promise<void>;
@@ -92,7 +91,7 @@ export class SettingsPanel {
     this.post({ type: 'modelsFetched', models });
   }
 
-  private async pushFeatures(statuses?: StoredMcpStatus[]): Promise<void> {
+  private async pushFeatures(statuses?: PanelMcpStatus[]): Promise<void> {
     const connections = await this.host.readConnections().catch(() => []);
     this.post({ type: 'features', ...toPanelFeatures(connections, statuses ?? []) });
   }
@@ -156,11 +155,16 @@ export class SettingsPanel {
     }
   }
 
-  private async safeSync(): Promise<StoredMcpStatus[]> {
+  /**
+   * Ask the host to sync. The host is responsible for returning one row per
+   * stored server; if it throws anyway, the failure is reported under a name no
+   * server has, which `completeMcpStatuses` folds into every real row.
+   */
+  private async safeSync(): Promise<PanelMcpStatus[]> {
     try {
       return await this.host.syncConnections();
     } catch (error) {
-      return [{ name: 'MCP', state: 'error', error: error instanceof Error ? error.message : String(error) }];
+      return [{ name: '', connected: false, toolCount: 0, error: error instanceof Error ? error.message : String(error) }];
     }
   }
 

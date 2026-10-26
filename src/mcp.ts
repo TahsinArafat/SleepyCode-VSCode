@@ -73,6 +73,7 @@ export async function connectToMcpConnections(
   connections: McpConnectionData[],
   context: vscode.ExtensionContext,
   approve: (title: string, detail: string) => Promise<void>,
+  workspaceRoot?: string,
 ): Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }> {
   const enabled = connections.filter((c) => c.enabled);
   // Resolve credentials here (they live in SecretStorage) and hand finished
@@ -100,7 +101,8 @@ export async function connectToMcpConnections(
     }
   }
 
-  const connection = await connectServerDefinitions(definitions, '', approve);
+  // stdio servers resolve `cwd` against this, so it cannot be empty.
+  const connection = await connectServerDefinitions(definitions, workspaceRoot ?? '', approve);
 
   for (const [name, error] of connection.errors.map((entry) => {
     const index = entry.indexOf(': ');

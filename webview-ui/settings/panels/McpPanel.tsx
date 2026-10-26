@@ -14,6 +14,7 @@ import { Icon } from "../../shared/icons";
 import { FeatureConfig, McpServerConfig, McpStatus } from "../features";
 import { Toggle } from "./Toggle";
 import { vscode } from "../../shared/vscode";
+import { validatePanelMcpUrl } from "../../../src/settings-adapter";
 
 export function McpPanel({
   features,
@@ -143,8 +144,12 @@ function McpModal({ server, isNew, onClose, onSave }: { server: McpServerConfig;
         if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("Arguments must be a JSON array of strings.");
         onSave({ ...draft, name: draft.name.trim(), args: values });
       } else {
+        // Shared with the connection client so a saveable URL is a connectable
+        // URL. Validating differently here meant a server could be saved and
+        // then never connect, with no explanation.
+        const urlError = validatePanelMcpUrl(draft.url);
+        if (urlError) throw new Error(urlError);
         const url = new URL(draft.url || "");
-        if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("Use an HTTP(S) server URL without embedded credentials.");
         const values = JSON.parse(headers);
         if (!values || Array.isArray(values) || typeof values !== "object" || Object.values(values).some(value => typeof value !== "string")) throw new Error("Headers must be a JSON object with string values.");
         onSave({ ...draft, name: draft.name.trim(), url: url.toString(), headers: values });

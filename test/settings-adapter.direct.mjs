@@ -149,3 +149,73 @@ test('unknown panel messages are ignored rather than forwarded', () => {
   assert.equal(adapter.isPanelMessage({ type: 'llamacppStart' }), false);
   assert.equal(adapter.isPanelMessage(null), false);
 });
+// ---------------------------------------------------------------- status completeness
+
+test('every stored connection gets a status row, so none can read as idle', () => {
+  const connections = [
+    { name: 'connected', enabled: true },
+    { name: 'broken', enabled: true },
+    { name: 'off', enabled: false },
+  ];
+  // Only one status came back; the others must still be represented.
+  const statuses = adapter.completeMcpStatuses(connections, [{ name: 'connected', state: 'ok', toolCount: 3 }]);
+  assert.deepEqual(statuses.map(s => s.name), ['connected', 'broken', 'off']);
+  assert.equal(statuses[0].connected, true);
+  assert.equal(statuses[1].connected, false);
+  assert.match(statuses[1].error, /did not report/);
+  assert.equal(statuses[2].error, 'Disabled');
+});
+
+test('a disabled server is never reported as an error', () => {
+  const statuses = adapter.completeMcpStatuses([{ name: 'off', enabled: false }], []);
+  assert.equal(statuses[0].connected, false);
+  assert.equal(statuses[0].error, 'Disabled');
+});
+
+test('an enabled server with no status is an explicit failure, not silence', () => {
+  const statuses = adapter.completeMcpStatuses([{ name: 'mystery', enabled: true }], []);
+  assert.equal(statuses[0].connected, false);
+  assert.ok(statuses[0].error, 'expected a visible reason instead of an idle row');
+});
+
+test('an unnamed sync fallback does not leak a fake server row', () => {
+  // safeSync previously reported a single status named "MCP", which matched no
+  // server and left every real row showing "idle".
+  const statuses = adapter.completeMcpStatuses(
+    [{ name: 'real', enabled: true }],
+    [{ name: 'MCP', state: 'error', error: 'boom' }],
+  );
+  assert.deepEqual(statuses.map(s => s.name), ['real']);
+  assert.match(statuses[0].error, /boom/);
+});
+
+test('statuses for servers no longer stored are dropped', () => {
+  const statuses = adapter.completeMcpStatuses([{ name: 'kept', enabled: true }], [
+    { name: 'kept', state: 'ok', toolCount: 1 },
+    { name: 'deleted', state: 'ok', toolCount: 9 },
+  ]);
+  assert.deepEqual(statuses.map(s => s.name), ['kept']);
+});
+
+test('no connections means no rows', () => {
+  assert.deepEqual(adapter.completeMcpStatuses([], [{ name: 'ghost', state: 'ok' }]), []);
+  assert.deepEqual(adapter.completeMcpStatuses(undefined, undefined), []);
+});
+
+// ---------------------------------------------------------------- url validation parity
+
+test('the panel and the client agree on which URLs are usable', () => {
+  // The modal accepted plain http, then the ported client refused it, so a
+  // saveable server could never connect. Both now use this one rule.
+  assert.equal(adapter.validatePanelMcpUrl('https://example.test/mcp'), null);
+  assert.equal(adapter.validatePanelMcpUrl('http://localhost:3000/mcp'), null);
+  assert.equal(adapter.validatePanelMcpUrl('http://127.0.0.1:3000/mcp'), null);
+  assert.match(adapter.validatePanelMcpUrl('http://192.168.1.5:3000/mcp'), /HTTPS/);
+  assert.match(adapter.validatePanelMcpUrl('ftp://example.test/mcp'), /HTTP/);
+  assert.match(adapter.validatePanelMcpUrl('https://user:pw@example.test/mcp'), /credentials/);
+});
+
+test('an empty or malformed URL is rejected with a readable reason', () => {
+  assert.match(adapter.validatePanelMcpUrl(''), /URL/);
+  assert.match(adapter.validatePanelMcpUrl('not a url'), /URL/);
+});
