@@ -1463,7 +1463,17 @@ export function App() {
   };
   const editQueued = (i: number) => {
     const item = queued[i];
-    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "edit" });
+    if (!activeId || !item || isQueuedSteering(item)) return;
+    // Editing a queued message pulls it back into the composer. That is handled
+    // here rather than on the host because the webview owns the draft and the
+    // attachments (the host's queue entry keeps neither), so the text and any
+    // attached files come back intact; the host only has to drop its copy.
+    const draft = { text: item.text, attachments: item.attachments ?? [] };
+    draftsRef.current.set(draftKey, draft);
+    setDraft(draft);
+    setDraftTick();
+    post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
+    post({ type: "queueAction", convId: activeId, id: item.id, action: "remove" });
   };
   const runQueuedNow = (i: number) => {
     const item = queued[i];

@@ -35,6 +35,7 @@ import * as paste from './paste-core';
 import * as goalCore from './goal-core';
 import * as modelOptions from './model-options';
 import * as worktreeNaming from './worktree-naming';
+import * as queueCore from './queue-core';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -911,6 +912,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // every reload.
       workspaceState: this.readChatWorkspace(),
     }));
+    // Queued prompts and goals are host state the webview holds a copy of. They
+    // must be re-sent here or a reload shows an empty queue while the host still
+    // intends to run those prompts — and "Resume interrupted request" has no row
+    // to resume from.
+    this.postWorkflow(active?.id);
   }
 
   /** Open the OpenCursor settings window (also used by the command). */
@@ -2434,7 +2440,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         conversation.goal = created;
         await this.persistProjects();
         this.log('info', 'conversation.goal', `${conversation.id}: ${created.objective}${created.tokenBudget ? ` (budget ${created.tokenBudget})` : ''}`);
-        this.postGoal(conversation);
+        this.postWorkflow(conversation.id);
       }
       return;
     }
@@ -2448,7 +2454,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (next.status !== before) {
           await this.persistProjects();
           this.log('info', 'conversation.goal.status', `${conversation.id}: ${before} -> ${next.status}`);
-          this.postGoal(conversation);
+          this.postWorkflow(conversation.id);
         }
       }
       return;
@@ -2499,8 +2505,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // conversation so optimistic (client-generated) ids still remove something.
       const own = this.queue.filter(entry => entry.conversationId === message.conversationId);
       const target = (message.id ? own.find(entry => entry.id === message.id) : undefined) ?? own[0];
-      if (target) this.queue = this.queue.filter(entry => entry !== target);
-      this.postQueued(message.conversationId);
+      if (target) this.queue = queueCore.removeEntry(this.queue, target.id);
+      this.postWorkflow(message.conversationId);
+      return;
+    }
+    if (message.type === 'moveQueued') {
+      const own = this.queue.filter(entry => entry.conversationId === message.conversationId);
+      const target = (message.id ? own.find(entry => entry.id === message.id) : undefined) ?? own[0];
+      if (target) this.queue = queueCore.moveUp(this.queue, target.id);
+      this.postWorkflow(message.conversationId);
+      return;
+    }
+    if (message.type === 'promoteQueued') {
+      // "Send queued request now" / "Resume interrupted request". The entry is
+      // made next for its conversation, so the drain that already exists picks
+      // it — reordering only the visible list would show an order that is not
+      // the one that runs.
+      const own = this.queue.filter(entry => entry.conversationId === message.conversationId);
+      const target = (message.id ? own.find(entry => entry.id === message.id) : undefined) ?? own[0];
+      if (!target) return;
+      this.queue = queueCore.promoteToFront(this.queue, target.id);
+      const active = this.runs.get(message.conversationId);
+      if (active) {
+        // A run owns this conversation; aborting it hands control to the drain in
+        // the run's `finally`, which now finds the promoted entry first.
+        active.controller.abort();
+        return;
+      }
+      // Nothing running here. Respect the global cap rather than bypassing it;
+      // if we are at the cap the promoted entry runs on the next drain.
+      if (this.runs.size >= MAX_CONCURRENT_RUNS) {
+        this.postWorkflow(message.conversationId);
+        return;
+      }
+      this.queue = queueCore.removeEntry(this.queue, target.id);
+      this.postWorkflow(target.conversationId);
+      void this.run(target.text, target.conversationId, undefined, undefined, target.context, target.promptContext);
       return;
     }
     if (message.type === 'steerQueued') {
@@ -3803,12 +3843,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string): void {
     // Multiple follow-ups may be queued for the same conversation; they run in FIFO order.
     this.queue.push({ id: `q${++this.queueSeq}`, text, conversationId, context, promptContext });
-    this.postQueued(conversationId);
+    this.postWorkflow(conversationId);
   }
 
-  private postQueued(conversationId: string): void {
-    const entries = this.queue.filter(item => item.conversationId === conversationId);
-    this.post({ type: 'queuedPrompt', conversationId, prompts: entries.map(entry => entry.text), ids: entries.map(entry => entry.id) });
+  /**
+   * Publish the whole workflow state — queued prompts and goals, for every
+   * conversation.
+   *
+   * React REPLACES both maps from the one `workflowState` message, so a partial
+   * publish is a delete: sending a goal emptied every queued row, and sending the
+   * queue called `setGoals(undefined)` and dropped the goal banner. The classic
+   * webview reads one conversation at a time, so it keeps the two narrow
+   * messages.
+   */
+  private postWorkflow(conversationId?: string): void {
+    if (!this.reactMode) {
+      const entries = this.queue.filter(item => item.conversationId === conversationId);
+      this.post({ type: 'queuedPrompt', conversationId, prompts: entries.map(entry => entry.text), ids: entries.map(entry => entry.id) });
+      const active = this.activeProject()?.conversations.find(item => item.id === conversationId);
+      if (active) this.postGoal(active);
+      return;
+    }
+    const queues: Record<string, { id: string; text: string }[]> = {};
+    for (const entry of this.queue) (queues[entry.conversationId] ??= []).push({ id: entry.id, text: entry.text });
+    const goals: Record<string, unknown> = {};
+    for (const conversation of this.activeProject()?.conversations ?? []) {
+      if (conversation.goal) goals[conversation.id] = conversation.goal;
+    }
+    this.post({ type: 'workflow', queues, goals });
   }
 
   private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string; originalUserText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string, userAlreadyPersisted = false): Promise<void> {
@@ -4816,7 +4878,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 conversation.goal = goalCore.addTokens(conversation.goal, uin + uout);
                 if (conversation.goal.status !== before) {
                   this.log('warn', 'conversation.goal.budgetExhausted', `${conversation.id}: ${conversation.goal.tokensUsed}/${conversation.goal.tokenBudget ?? '-'}`);
-                  this.postGoal(conversation);
+                  this.postWorkflow(conversation.id);
                 }
               }
             }
@@ -5017,10 +5079,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const next = own ?? this.queue[0];
       if (next && this.runs.size < MAX_CONCURRENT_RUNS) {
         this.queue = this.queue.filter(entry => entry !== next);
-        this.postQueued(next.conversationId);
+        this.postWorkflow(next.conversationId);
         void this.run(next.text, next.conversationId, undefined, carriedGitTree, next.context, next.promptContext);
       } else if (own) {
-        this.postQueued(conversationId);
+        this.postWorkflow(conversationId);
       }
     }
   }

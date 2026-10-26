@@ -23,6 +23,8 @@ export type WebMessage =
   | { type: 'copyText'; text: string }
   | { type: 'steerQueued'; conversationId: string; id?: string }
   | { type: 'removeQueued'; conversationId: string; id?: string }
+  | { type: 'promoteQueued'; conversationId: string; id?: string }
+  | { type: 'moveQueued'; conversationId: string; id?: string }
   | { type: 'setKey' }
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'selectReasoningEffort'; effort: string }

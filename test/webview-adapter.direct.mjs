@@ -720,8 +720,37 @@ test('queue steer maps to steerQueued', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action: 'steer' }), { type: 'steerQueued', conversationId: 'c1', id: 'q1' });
 });
 
-test('unsupported queue actions are dropped', () => {
-  for (const action of ['run', 'up', 'down', 'edit']) {
+test('queue run maps to promoteQueued so the row actually runs next', () => {
+  // "Send queued request now" and "Resume interrupted request" both post `run`.
+  // The host decides between aborting the current run and starting this entry.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q2', action: 'run' }),
+    { type: 'promoteQueued', conversationId: 'c1', id: 'q2' },
+  );
+});
+
+test('queue up maps to moveQueued', () => {
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q2', action: 'up' }),
+    { type: 'moveQueued', conversationId: 'c1', id: 'q2' },
+  );
+});
+
+test('an id-less queue action still names its conversation', () => {
+  // Rows React created optimistically, and "enter on an empty editor runs the
+  // next queued", have no host id yet — the host resolves the conversation's
+  // first entry rather than doing nothing.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', action: 'run' }),
+    { type: 'promoteQueued', conversationId: 'c1', id: undefined },
+  );
+});
+
+test('the two queue actions that are handled in the webview are dropped here', () => {
+  // `edit` pulls the text back into the composer (React owns the draft and the
+  // attachments) and `down` is not offered by any row. Neither has a host
+  // counterpart, so translating them would invent one.
+  for (const action of ['edit', 'down']) {
     assert.equal(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action }), null, `${action} should be dropped`);
   }
 });
@@ -889,6 +918,43 @@ test('a queue without ids still produces addressable rows', () => {
   const out = adapter.toReactMessage({ type: 'queuedPrompt', conversationId: 'c1', prompts: ['only'] });
   assert.equal(out.queues.c1.length, 1);
   assert.ok(out.queues.c1[0].id, 'a queued row needs an id to be removable');
+});
+
+// ---------------------------------------------------------------- workflow state
+//
+// React replaces BOTH of its maps from the one `workflowState` message. A
+// partial publish is therefore a delete: sending only queues called
+// `setGoals(undefined)` and dropped the goal banner, and sending only goals
+// emptied every queued row. These pin the complete message.
+
+test('the workflow message carries every conversation and the goals together', () => {
+  const out = adapter.toReactMessage({
+    type: 'workflow',
+    queues: { c1: [{ id: 'q1', text: 'first' }], c2: [{ id: 'q2', text: 'other tab' }] },
+    goals: { c1: { objective: 'ship it', status: 'active' } },
+  });
+  assert.equal(out.type, 'workflowState');
+  // Both conversations, so switching tabs does not show an empty queue.
+  assert.deepEqual(Object.keys(out.queues).sort(), ['c1', 'c2']);
+  assert.equal(out.queues.c2[0].text, 'other tab');
+  assert.deepEqual(out.goals, { c1: { objective: 'ship it', status: 'active' } });
+});
+
+test('a workflow message with no goals clears them explicitly', () => {
+  // `{}` and not `undefined`: React reads the key it is handed, and a missing
+  // key is what wiped the banner.
+  const out = adapter.toReactMessage({ type: 'workflow', queues: {}, goals: {} });
+  assert.deepEqual(out.goals, {});
+  assert.deepEqual(out.queues, {});
+});
+
+test('a malformed workflow payload degrades to empty state, never to undefined', () => {
+  for (const message of [{ type: 'workflow' }, { type: 'workflow', queues: null, goals: null }, { type: 'workflow', queues: [], goals: 7 }]) {
+    const out = adapter.toReactMessage(message);
+    assert.equal(out.type, 'workflowState');
+    assert.deepEqual(out.queues, {}, `queues for ${JSON.stringify(message)}`);
+    assert.deepEqual(out.goals, {}, `goals for ${JSON.stringify(message)}`);
+  }
 });
 
 test('a context notice is surfaced rather than dropped', () => {

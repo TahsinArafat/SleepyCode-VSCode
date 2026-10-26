@@ -288,7 +288,10 @@ test('context occupancy is measured from provider prompt_tokens, never from cumu
 });
 
 test('auto-compaction runs after the run leaves this.runs, with a cooldown', () => {
-  const finallyBlock = agent.match(/\} finally \{[\s\S]*?await mcpConnection\?\.close\(\);[\s\S]*?this\.postQueued/)?.[0] ?? '';
+  // Anchored on the drain's own call rather than on whichever publisher is in
+  // fashion: renaming `postQueued` to `postWorkflow` broke this while the
+  // invariant it protects was unchanged.
+  const finallyBlock = agent.match(/\} finally \{[\s\S]*?await mcpConnection\?\.close\(\);[\s\S]*?void this\.run\(next\.text/)?.[0] ?? '';
   assert.ok(finallyBlock, 'run() finally block found');
   assert.match(finallyBlock, /this\.runs\.delete\(conversationId\);[\s\S]*?maybeAutoCompact\(conversation/);
   assert.match(agent, /lastAutoCompactAt\.get\(conversation\.id\) \?\? 0\) < 120_000/);

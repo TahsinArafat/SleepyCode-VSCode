@@ -141,7 +141,15 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'queueAction':
       if (message.action === 'remove') return { type: 'removeQueued', conversationId: message.convId, id: message.id };
       if (message.action === 'steer') return { type: 'steerQueued', conversationId: message.convId, id: message.id };
-      // Reordering and editing queued rows have no SleepyCode counterpart.
+      // `run` covers both "Send queued request now" (stops the current run) and
+      // "Resume interrupted request"; the host decides which applies. `up` is
+      // the row's "Move earlier". Both need the host, because it owns the order
+      // the queue actually drains in — reordering only the visible list would
+      // show an order that is not the one that runs.
+      if (message.action === 'run') return { type: 'promoteQueued', conversationId: message.convId, id: message.id };
+      if (message.action === 'up') return { type: 'moveQueued', conversationId: message.convId, id: message.id };
+      // `edit` is handled inside the webview: React owns the composer draft and
+      // the attachments, so it restores those and posts a plain `remove`.
       return null;
 
     case 'cancelRun':
@@ -462,6 +470,15 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'queuedPrompt':
       return queuedPrompts(message);
 
+    case 'workflow':
+      // The complete workflow state. React replaces both maps from one message,
+      // so this is the only shape that cannot erase half of it.
+      return {
+        type: 'workflowState',
+        queues: queueRows(message.queues),
+        goals: message.goals && typeof message.goals === 'object' ? message.goals : {},
+      };
+
     case 'goal':
       // The webview reads goals from `workflowState.goals`, not from a message of
       // their own, so a goal change is delivered as the shape it consumes.
@@ -562,21 +579,46 @@ export function reactToolName(tool: string | undefined): string {
 }
 
 /**
+ * Turn the host's per-conversation queue map into React queue rows. Rows need
+ * an id to be moved or removed, so one is derived when the host did not supply
+ * ids.
+ */
+function queueRows(queues: unknown): Record<string, unknown[]> {
+  const now = Date.now();
+  const out: Record<string, unknown[]> = {};
+  if (!queues || typeof queues !== 'object') return out;
+  for (const [conversationId, list] of Object.entries(queues as Record<string, unknown>)) {
+    const entries = Array.isArray(list) ? list : [];
+    out[conversationId] = entries.map((entry, index) => {
+      const item = entry as { id?: unknown; text?: unknown };
+      return {
+        id: typeof item?.id === 'string' && item.id ? item.id : `queued-${now}-${index}`,
+        text: typeof item?.text === 'string' ? item.text : String(item?.text ?? ''),
+        status: 'queued',
+        createdAt: now,
+      };
+    });
+  }
+  return out;
+}
+
+/**
  * SleepyCode reports the queued prompts for a conversation; React keeps them in
- * `workflowState.queues`. Rows need an id to be removable, so one is derived
- * when the host did not supply ids.
+ * `workflowState.queues`.
+ *
+ * React REPLACES its whole map from this message, so the host sends every
+ * conversation's rows (`queues`); sending one conversation emptied the others.
  */
 function queuedPrompts(message: SleepyMsg): ReactMsg {
+  if (message.queues && typeof message.queues === 'object') {
+    return { type: 'workflowState', queues: queueRows(message.queues) };
+  }
   const prompts: unknown[] = Array.isArray(message.prompts) ? message.prompts : [];
   const ids: unknown[] = Array.isArray(message.ids) ? message.ids : [];
-  const now = Date.now();
-  const rows = prompts.map((prompt, index) => ({
-    id: typeof ids[index] === 'string' ? ids[index] : `queued-${now}-${index}`,
-    text: typeof prompt === 'string' ? prompt : String(prompt ?? ''),
-    status: 'queued',
-    createdAt: now,
-  }));
-  return { type: 'workflowState', queues: { [message.conversationId ?? '']: rows } };
+  return {
+    type: 'workflowState',
+    queues: queueRows({ [message.conversationId ?? '']: prompts.map((prompt, index) => ({ id: ids[index], text: prompt })) }),
+  };
 }
 
 function agentEvent(conversationId: string | undefined, event: Record<string, any>): ReactMsg {
