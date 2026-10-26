@@ -347,16 +347,15 @@ test('loadConversation falls back to zero without a context count', () => {
 
 // ---------------------------------------------------------------- panels
 
-test('panel rows flatten to quick pick items', () => {
-  const items = adapter.panelToQuickPickItems({
-    type: 'panel', panel: 'tasks',
-    rows: [{ title: 'A', detail: 'one' }, { title: 'B' }],
+test('panel rows reach the webview intact, including the ids row buttons need', () => {
+  const out = adapter.toReactMessage({
+    type: 'panel', panel: 'agents', hint: 'pick one',
+    rows: [{ id: 'reviewer', title: 'A', detail: 'one' }, { title: 'B' }],
   });
-  assert.equal(items.length, 2);
-  assert.equal(items[0].label, 'A');
-  assert.equal(items[0].description, 'one');
-  assert.equal(items[1].label, 'B');
-  assert.equal(items[1].description, undefined);
+  assert.equal(out.type, 'panel');
+  assert.equal(out.panel, 'agents');
+  assert.equal(out.hint, 'pick one');
+  assert.deepEqual(out.rows, [{ id: 'reviewer', title: 'A', detail: 'one' }, { title: 'B' }]);
 });
 
 test('panel title reflects the panel kind', () => {
@@ -365,9 +364,33 @@ test('panel title reflects the panel kind', () => {
   assert.equal(adapter.panelTitle('mystery'), 'mystery');
 });
 
-test('empty panels produce no quick pick items', () => {
-  assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index', rows: [] }), []);
-  assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index' }), []);
+test('a panel without rows still renders an empty screen', () => {
+  const out = adapter.toReactMessage({ type: 'panel', panel: 'index' });
+  assert.equal(out.type, 'panel');
+  assert.deepEqual(out.rows, []);
+});
+
+test('showPanel names the panel the drawer should open', () => {
+  assert.deepEqual(adapter.toReactMessage({ type: 'showPanel', panel: 'worktrees' }), {
+    type: 'showPanel', panel: 'worktrees',
+  });
+});
+
+test('panel row actions translate to the host messages the panels already use', () => {
+  // The drawer's row buttons post SleepyCode's own messages; without a mapping
+  // the adapter drops them and the button does nothing at all.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'selectAgent', agentId: 'reviewer' }),
+    { type: 'selectAgent', agentId: 'reviewer' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'restoreCheckpoint', conversationId: 'conv-1', itemId: 'item-2' }),
+    { type: 'restoreCheckpoint', conversationId: 'conv-1', itemId: 'item-2' },
+  );
+  // A row with no target must not reach the host as an empty selection.
+  assert.equal(adapter.toSleepyMessage({ type: 'selectAgent', agentId: '' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'restoreCheckpoint', conversationId: '', itemId: 'item-2' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'restoreCheckpoint', conversationId: 'conv-1', itemId: '' }), null);
 });
 
 // ---------------------------------------------------------------- send handshake

@@ -1544,12 +1544,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private async sendPanel(panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'): Promise<void> {
     const root = this.workspaceRoot();
     if (!root) return;
-    const rows: { title: string; detail?: string }[] = [];
+    // `id` is what a row's button acts on. Panels whose rows are informational
+    // leave it off, and the drawer then renders no button.
+    const rows: { id?: string; title: string; detail?: string }[] = [];
     let hint = '';
     try {
       if (panel === 'worktrees') {
         if (!isGitTrackedWorkspace(root.fsPath)) hint = 'This workspace is not a Git repository. Worktrees require Git.';
-        else for (const tree of await listWorktrees(root.fsPath)) rows.push({ title: tree.name, detail: `${tree.branch} · ${tree.commit.slice(0, 8)}${tree.isMain ? ' · main' : ''}` });
+        else for (const tree of await listWorktrees(root.fsPath)) rows.push({ id: tree.name, title: tree.name, detail: `${tree.branch} · ${tree.commit.slice(0, 8)}${tree.isMain ? ' · main' : ''}` });
       } else if (panel === 'index') {
         const index = await this.loadRepoIndex(root);
         const symbols = index.indexSymbols();
@@ -1559,12 +1561,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       } else if (panel === 'tasks') {
         const hooks = this.hookRules();
         if (!hooks.length) hint = 'No hook rules configured. Hook rules live in extension state and can allow, block, or require approval for tool calls.';
-        for (const rule of hooks) rows.push({ title: `${rule.name} (${rule.event})`, detail: `action: ${rule.action}${rule.matcher?.tool ? ` · tool ${rule.matcher.tool}` : ''}${rule.matcher?.pathGlob ? ` · ${rule.matcher.pathGlob}` : ''}` });
+        for (const rule of hooks) rows.push({ id: rule.name, title: `${rule.name} (${rule.event})`, detail: `action: ${rule.action}${rule.matcher?.tool ? ` · tool ${rule.matcher.tool}` : ''}${rule.matcher?.pathGlob ? ` · ${rule.matcher.pathGlob}` : ''}` });
       } else if (panel === 'agents') {
         const builtIns = new Set(AGENT_DEFINITIONS.map(agent => agent.id));
         for (const agent of this.allAgents()) {
           const detail = [agent.id, agent.model || 'default model', builtIns.has(agent.id) ? 'built-in' : 'custom'].join(' · ');
-          rows.push({ title: agent.name, detail });
+          rows.push({ id: agent.id, title: agent.name, detail });
         }
         hint = 'Select an agent from the composer pill, or type @agent-id at the start of a message to route it.';
       } else if (panel === 'checkpoints') {
@@ -1572,7 +1574,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const conversation = project?.conversations.find(item => item.id === project.activeConversationId);
         const withSnapshots = (conversation?.items ?? []).filter(item => item.fileSnapshot?.length || item.gitTree);
         if (!withSnapshots.length) hint = 'No restorable snapshots yet. Each assistant turn records one so undo works outside Git.';
-        for (const item of withSnapshots.slice(-40)) rows.push({ title: item.text.slice(0, 80) || '(no text)', detail: `${item.fileSnapshot?.length ?? 0} files snapshot${item.gitTree ? ' · git checkpoint' : ''}` });
+        for (const item of withSnapshots.slice(-40)) rows.push({ id: item.id, title: item.text.slice(0, 80) || '(no text)', detail: `${item.fileSnapshot?.length ?? 0} files snapshot${item.gitTree ? ' · git checkpoint' : ''}` });
       }
     } catch (error) {
       hint = errorMessage(error);
@@ -6276,12 +6278,6 @@ ${cached}`;
           this.reactPendingPaths.set(typed.id, adapter.pendingChangesOf(items).map((change) => change.path));
         }
       }
-      // Side panels have no React screen yet, so their rows go to a QuickPick
-      // instead of vanishing. The commands stay usable until they are ported.
-      if (typed.type === 'panel') {
-        this.showPanelAsQuickPick(typed as { panel: string; rows?: { title: string; detail?: string }[]; hint?: string });
-        return;
-      }
     }
     void this.view?.webview.postMessage(outgoing);
   }
@@ -6296,15 +6292,6 @@ ${cached}`;
     void vscode.window.showInformationMessage('Sign in to SleepyAI to use models and limits.', 'Sign in').then(choice => {
       if (choice === 'Sign in') this.signIn();
     });
-  }
-
-  private showPanelAsQuickPick(message: { panel: string; rows?: { title: string; detail?: string }[]; hint?: string }): void {
-    const items = adapter.panelToQuickPickItems({ type: 'panel', ...message });
-    if (!items.length) {
-      void vscode.window.showInformationMessage(`${adapter.panelTitle(message.panel)}: ${message.hint ?? 'nothing to show yet.'}`);
-      return;
-    }
-    void vscode.window.showQuickPick(items, { title: adapter.panelTitle(message.panel), placeHolder: message.hint });
   }
 
   /** Continuous 2s captures so the preview stays live while the agent works, not just at tool boundaries. */

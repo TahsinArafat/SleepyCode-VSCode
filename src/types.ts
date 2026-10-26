@@ -102,7 +102,9 @@ export type WebMessage =
   | { type: 'openPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
   | { type: 'requestPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
   | { type: 'showPanel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints' }
-  | { type: 'panel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'; rows: { title: string; detail?: string }[]; hint?: string }
+  // `id` names the thing a row acts on (an agent id, a turn id, a worktree
+  // name). Rows without one are informational and get no action button.
+  | { type: 'panel'; panel: 'worktrees' | 'index' | 'agents' | 'tasks' | 'checkpoints'; rows: { id?: string; title: string; detail?: string }[]; hint?: string }
   | { type: 'browserPreview'; conversationId?: string; dataUrl: string; cursor?: { x: number; y: number } }
   | { type: 'contextNotice'; conversationId: string; kind: 'trimmed' | 'compacted'; text: string };
 

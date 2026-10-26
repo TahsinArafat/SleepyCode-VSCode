@@ -186,6 +186,20 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'createWorktreeConversation':
       return { type: 'createWorktreeConversation', title: message.title };
 
+    case 'selectAgent':
+      // The Agents panel's row button. An empty id would reset the user's agent
+      // choice, so a row with no target never reaches the host.
+      return typeof message.agentId === 'string' && message.agentId
+        ? { type: 'selectAgent', agentId: message.agentId }
+        : null;
+
+    case 'restoreCheckpoint':
+      // The Undo History panel's row button. Both ids are required: the host
+      // resolves a snapshot through the conversation and the turn.
+      return typeof message.conversationId === 'string' && message.conversationId && typeof message.itemId === 'string' && message.itemId
+        ? { type: 'restoreCheckpoint', conversationId: message.conversationId, itemId: message.itemId }
+        : null;
+
     case 'saveModelOptions':
       return { type: 'saveModelOptions', modelId: message.modelId, options: message.options };
 
@@ -337,7 +351,7 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       return { type: 'showPanel', panel: message.panel };
 
     case 'panel':
-      return { type: 'panel', panel: message.panel, rows: message.rows ?? [], hint: message.hint };
+      return panelPayload(message);
 
     case 'toast':
       return { type: 'toast', id: message.id, title: message.title, message: message.message, kind: message.kind };
@@ -790,31 +804,31 @@ export function buildInitialState(input: {
 
 // ---------------------------------------------------------------- panels
 
-const PANEL_TITLES: Record<string, string> = {
-  worktrees: 'Worktrees',
-  index: 'Project Index',
-  agents: 'Agents',
-  tasks: 'Scheduled Tasks',
-  checkpoints: 'Undo History',
-};
-
-/** Human title for a SleepyCode panel id. */
-export function panelTitle(panel: string): string {
-  return PANEL_TITLES[panel] ?? panel;
-}
+/**
+ * Titles live in `panel-core` because the React drawer renders the same
+ * headings the host does. Re-exported here so the adapter stays the one import
+ * the host needs.
+ */
+export { panelTitle } from './panel-core.ts';
 
 /**
- * SleepyCode's side panels (worktrees, index, agents, tasks, checkpoints) have
- * no React screen yet. Their rows become QuickPick items so the commands keep
- * working until those panels are ported.
+ * A panel payload is already the shape the drawer renders: a title, an optional
+ * detail, and — for panels whose rows act on something — an id. The id has to
+ * survive the translation or the row's button has no target.
  */
-export function panelToQuickPickItems(message: SleepyMsg): { label: string; description?: string }[] {
-  const rows: any[] = Array.isArray(message?.rows) ? message.rows : [];
-  return rows.map(row => {
-    const item: { label: string; description?: string } = { label: String(row?.title ?? '') };
-    if (row?.detail) item.description = String(row.detail);
-    return item;
-  });
+function panelPayload(message: SleepyMsg): { type: 'panel'; panel: string; rows: { id?: string; title: string; detail?: string }[]; hint?: string } {
+  const rows = Array.isArray(message.rows) ? message.rows : [];
+  return {
+    type: 'panel',
+    panel: message.panel,
+    rows: rows.map(row => {
+      const out: { id?: string; title: string; detail?: string } = { title: String(row?.title ?? '') };
+      if (row?.id) out.id = String(row.id);
+      if (row?.detail) out.detail = String(row.detail);
+      return out;
+    }),
+    hint: message.hint,
+  };
 }
 
 // ---------------------------------------------------------------- streaming
