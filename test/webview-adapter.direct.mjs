@@ -367,3 +367,93 @@ test('empty panels produce no quick pick items', () => {
   assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index', rows: [] }), []);
   assert.deepEqual(adapter.panelToQuickPickItems({ type: 'panel', panel: 'index' }), []);
 });
+
+// ---------------------------------------------------------------- send handshake
+
+test('sendMessage carries the request id so the host can acknowledge it', () => {
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', convId: null, text: 'hi', requestId: 'req-1' });
+  assert.equal(out.type, 'send');
+  assert.equal(out.requestId, 'req-1');
+});
+
+test('requestAccepted passes through to the webview', () => {
+  const out = adapter.toReactMessage({ type: 'requestAccepted', requestId: 'req-1', convId: 'c9', created: true });
+  assert.equal(out.type, 'requestAccepted');
+  assert.equal(out.requestId, 'req-1');
+  assert.equal(out.convId, 'c9');
+  assert.equal(out.created, true);
+});
+
+// ---------------------------------------------------------------- streaming guard
+
+test('transcript snapshots are skipped while the conversation is streaming', () => {
+  const snapshot = { type: 'conversation', id: 'c1', items: [{ id: 'i', role: 'user', text: 'x', timestamp: 1 }] };
+  // A mid-run snapshot would replace the live turns and erase streamed text.
+  assert.equal(adapter.toReactMessageWhileStreaming(snapshot, true), null);
+});
+
+test('transcript snapshots flow once the run is over', () => {
+  const snapshot = { type: 'conversation', id: 'c1', items: [{ id: 'i', role: 'user', text: 'x', timestamp: 1 }] };
+  const out = adapter.toReactMessageWhileStreaming(snapshot, false);
+  assert.equal(out.type, 'loadConversation');
+  assert.equal(out.turns.length, 1);
+});
+
+test('streaming deltas are never suppressed', () => {
+  const out = adapter.toReactMessageWhileStreaming({ type: 'delta', conversationId: 'c1', text: 'a' }, true);
+  assert.equal(out.type, 'agentEvent');
+  assert.equal(out.event.text, 'a');
+});
+
+test('streaming guard still drops untranslatable messages', () => {
+  assert.equal(adapter.toReactMessageWhileStreaming({ type: 'modelsLoading' }, false), null);
+});
+
+// ---------------------------------------------------------------- live run signals
+
+test('retry maps to the React retry event', () => {
+  const out = adapter.toReactMessage({ type: 'retry', conversationId: 'c1', attempt: 2, max: 5, error: 'timeout', backoffMs: 800 });
+  assert.equal(out.type, 'agentEvent');
+  assert.equal(out.event.type, 'retry');
+  assert.equal(out.event.attempt, 2);
+  assert.equal(out.event.max, 5);
+  assert.equal(out.event.delayMs, 800);
+  assert.equal(out.event.error, 'timeout');
+});
+
+test('retryEnd is dropped so a successful retry leaves no empty error card', () => {
+  assert.equal(adapter.toReactMessage({ type: 'retryEnd', conversationId: 'c1', ok: true, attempt: 2, max: 5 }), null);
+  // A failed retry already surfaces through the run's error event.
+  assert.equal(adapter.toReactMessage({ type: 'retryEnd', conversationId: 'c1', ok: false, attempt: 5, max: 5 }), null);
+});
+
+test('steered maps to the user-steering event', () => {
+  const out = adapter.toReactMessage({ type: 'steered', conversationId: 'c1' });
+  assert.equal(out.event.type, 'user-steering');
+});
+
+test('liveUsage maps to the usage event', () => {
+  const out = adapter.toReactMessage({
+    type: 'liveUsage', conversationId: 'c1', model: 'm1',
+    inputTokens: 10, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 4,
+  });
+  assert.equal(out.event.type, 'usage');
+  assert.equal(out.event.promptTokens, 10);
+  assert.equal(out.event.completionTokens, 20);
+  assert.equal(out.event.totalTokens, 30);
+  assert.equal(out.event.model, 'm1');
+});
+
+test('workPhase maps to a shell-notify status line', () => {
+  const out = adapter.toReactMessage({ type: 'workPhase', conversationId: 'c1', first: 'Reading files' });
+  assert.equal(out.event.type, 'shell-notify');
+  assert.equal(out.event.message, 'Reading files');
+});
+
+test('permission requests map to an approval request', () => {
+  const out = adapter.toReactMessage({ type: 'permission', conversationId: 'c1', permissionId: 'p1', title: 'Allow write?' });
+  assert.equal(out.type, 'approvalRequest');
+  assert.equal(out.convId, 'c1');
+  assert.equal(out.request.requestId, 'p1');
+  assert.equal(out.request.subject, 'Allow write?');
+});

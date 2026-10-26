@@ -278,6 +278,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
   private reactMode = false;
+  /** Conversations whose React transcript is live-streaming (see `post`). */
+  private readonly reactStreaming = new Set<string>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -2865,6 +2867,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (!active) return;
         conversationId = active.id;
       }
+      // The React composer renders the user's turn immediately in a placeholder
+      // session. Tell it which conversation the message really landed in, or the
+      // optimistic turn is orphaned and the chat looks like it swallowed the text.
+      if (this.reactMode && (message as { requestId?: string }).requestId) {
+        this.post({
+          type: 'requestAccepted',
+          requestId: (message as { requestId?: string }).requestId,
+          convId: conversationId,
+          created: !message.conversationId,
+        });
+      }
       const root = this.workspaceRoot();
       const mention = this.parseAgentMention(message.text);
       const sendText = mention.text.trim() || message.text.trim();
@@ -5342,8 +5355,18 @@ ${cached}`;
     // In React mode, translate SleepyCode messages into the React webview protocol.
     let outgoing: unknown = message;
     if (this.reactMode && message && typeof message === 'object') {
-      const typed = message as { type?: string; selected?: string };
-      const t = adapter.toReactMessage(typed as any);
+      const typed = message as { type?: string; selected?: string; conversationId?: string; id?: string; running?: boolean };
+      // Streaming state is tracked per conversation. `state`/`done` carry
+      // `conversationId`; a transcript snapshot carries `id`.
+      const streamId = typed.conversationId ?? (typed.type === 'conversation' ? typed.id : undefined);
+      if (streamId) {
+        if (typed.type === 'state' && typed.running) this.reactStreaming.add(streamId);
+        if (typed.type === 'done' || typed.type === 'generationError' || (typed.type === 'state' && !typed.running)) {
+          this.reactStreaming.delete(streamId);
+        }
+      }
+      const streaming = Boolean(streamId && this.reactStreaming.has(streamId));
+      const t = adapter.toReactMessageWhileStreaming(typed as any, streaming);
       if (!t) return; // drop untranslatable internal messages in React mode
       outgoing = t;
       // The model catalog and the active selection travel together in SleepyCode

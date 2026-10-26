@@ -37,6 +37,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       const out: SleepyMsg = { type: 'send', text: message.text };
       if (message.convId) out.conversationId = message.convId;
       if (message.model) out.model = message.model;
+      // The webview keeps its optimistic turn in a placeholder session until the
+      // host says which conversation it actually landed in.
+      if (message.requestId) out.requestId = message.requestId;
       return out;
     }
 
@@ -185,11 +188,58 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'notify':
       return approvalRequest(message);
 
+    case 'permission':
+      return {
+        type: 'approvalRequest',
+        convId: message.conversationId ?? '',
+        request: {
+          requestId: String(message.permissionId ?? message.id ?? ''),
+          convId: message.conversationId ?? '',
+          toolName: 'command',
+          actionType: 'shell',
+          subject: message.title ?? '',
+          detail: message.detail ?? '',
+        },
+      };
+
+    case 'retry':
+      return agentEvent(message.conversationId, {
+        type: 'retry',
+        attempt: message.attempt,
+        max: message.max,
+        delayMs: message.backoffMs,
+        error: message.error ?? '',
+      });
+
+    case 'retryEnd':
+      // Both outcomes are already visible: a recovered run keeps streaming, and
+      // a run that ran out of retries reports through its `error` event. Emitting
+      // anything here would add an empty error card.
+      return null;
+
+    case 'steered':
+      return agentEvent(message.conversationId, { type: 'user-steering' });
+
+    case 'liveUsage':
+      return agentEvent(message.conversationId, {
+        type: 'usage',
+        promptTokens: message.inputTokens ?? 0,
+        completionTokens: message.outputTokens ?? 0,
+        totalTokens: (message.inputTokens ?? 0) + (message.outputTokens ?? 0),
+        model: message.model,
+        cachedReadTokens: message.cacheReadTokens,
+        cachedWriteTokens: message.cacheWriteTokens,
+      });
+
+    case 'workPhase':
+      return agentEvent(message.conversationId, { type: 'shell-notify', message: message.first ?? '' });
+
     case 'restoreDraft':
       return { type: 'queueDraft', convId: message.conversationId ?? '', draft: { text: message.text ?? '', attachments: [] } };
 
     case 'initialState':
-      // Already in React shape (built by `buildInitialState`).
+    case 'requestAccepted':
+      // Already in React shape.
       return message;
 
     default:
@@ -461,4 +511,17 @@ export function panelToQuickPickItems(message: SleepyMsg): { label: string; desc
     if (row?.detail) item.description = String(row.detail);
     return item;
   });
+}
+
+// ---------------------------------------------------------------- streaming
+
+/**
+ * SleepyCode republishes the whole active transcript whenever state changes.
+ * Replaying one mid-run would replace the webview's live turns and erase text
+ * that has streamed but not been committed yet, so snapshots wait until the
+ * run settles while every streaming event still goes straight through.
+ */
+export function toReactMessageWhileStreaming(message: SleepyMsg, streaming: boolean): ReactMsg | null {
+  if (streaming && message?.type === 'conversation') return null;
+  return toReactMessage(message);
 }
