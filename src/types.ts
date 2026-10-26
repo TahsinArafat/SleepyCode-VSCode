@@ -31,6 +31,8 @@ export type WebMessage =
   | { type: 'requestExtensionLogs' }
   | { type: 'logError'; message: string; info?: string }
   | { type: 'openBrowserTab'; url?: string }
+  | { type: 'exportConversation'; conversationId?: string }
+  | { type: 'cancelSubagent'; callId: string; reason?: 'timeout' | 'user' }
   | { type: 'clearExtensionLogs' }
   | { type: 'extensionLogs'; logs: string[] }
   | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number; useCli?: boolean; compact?: boolean }

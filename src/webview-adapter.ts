@@ -165,6 +165,12 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'searchFiles':
       return { type: 'fileMentionQuery', query: message.query };
 
+    case 'cancelSubagent':
+      return { type: 'cancelSubagent', callId: message.callId, reason: message.reason };
+
+    case 'exportConversation':
+      return { type: 'exportConversation', conversationId: message.convId };
+
     case 'logError':
       // The webview's own failures were invisible; the host log is where a
       // support report can actually be diagnosed.
@@ -332,6 +338,25 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
 
     case 'workPhase':
       return agentEvent(message.conversationId, { type: 'shell-notify', message: message.first ?? '' });
+
+    case 'subagent': {
+      // SleepyCode posts its own subagent lifecycle; React renders subagents as
+      // Task tool cards, so the two are bridged onto that shape. Without this the
+      // UI showed nothing at all while a subagent worked.
+      const callId = message.id ?? `subagent-${message.role ?? 'task'}`;
+      const input = { role: message.role, task: message.task ?? '', description: message.name };
+      if (message.phase !== 'end') {
+        return agentEvent(message.conversationId, { type: 'tool-call-started', callId, name: 'Task', input });
+      }
+      return agentEvent(message.conversationId, {
+        type: 'tool-call-completed',
+        callId,
+        name: 'Task',
+        status: message.ok === false ? 'error' : 'completed',
+        result: message.ok === false ? (message.error ?? 'The subagent failed.') : (message.result ?? ''),
+        input,
+      });
+    }
 
     case 'compactProgress':
       return agentEvent(message.conversationId, {
@@ -1000,4 +1025,96 @@ export function toStorableWorkspaceState(state: Partial<WorkspaceState> | undefi
     }
   }
   return { ...result, trimmed };
+}
+
+// ---------------------------------------------------------------- export
+
+/**
+ * Render a conversation as Markdown.
+ *
+ * Written for reading, not for re-import: internal ids, file snapshots and tool
+ * payloads are left out, because an export that leaks them is both noisy and a
+ * way to share things the user did not mean to share.
+ */
+export function conversationToMarkdown(conversation: { title?: string; updatedAt?: number; items?: readonly any[] }): string {
+  const title = conversation?.title?.trim() || 'Conversation';
+  const lines: string[] = [`# ${title}`, ''];
+  if (conversation?.updatedAt) {
+    lines.push(`_Exported ${new Date(conversation.updatedAt).toISOString()}_`, '');
+  }
+
+  for (const item of conversation?.items ?? []) {
+    if (!item || item.kind === 'divider') continue;
+
+    if (item.role === 'user') {
+      lines.push('## You', '', item.text ?? '');
+      const attachments = item.attachments ?? [];
+      if (attachments.length) {
+        lines.push('', `_Attached: ${attachments.map((a: any) => a.name || a.path || 'file').join(', ')}_`);
+      }
+      lines.push('');
+      continue;
+    }
+
+    lines.push(item.model ? `## Assistant (${item.model})` : '## Assistant', '');
+
+    for (const work of item.work ?? []) {
+      if (work?.kind === 'reasoning') {
+        if (work.text) lines.push('> ' + String(work.text).split('\n').join('\n> '), '');
+        continue;
+      }
+      if (work?.kind === 'plan') {
+        lines.push(`**Plan: ${work.title || 'Plan'}**`, '');
+        const done: number[] = Array.isArray(work.doneSteps) ? work.doneSteps : [];
+        (work.steps ?? []).forEach((step: string, index: number) => {
+          lines.push(`- [${done.includes(index) ? 'x' : ' '}] ${step}`);
+        });
+        lines.push('');
+        continue;
+      }
+      // Tool work becomes a one-line record; the arguments and results are the
+      // agent's working notes, not the outcome.
+      const label = work?.tool || work?.title || work?.kind || 'tool';
+      const detail = typeof work?.text === 'string' && work.text.trim() ? ` — ${work.text.trim()}` : '';
+      lines.push(`- \`${label}\`${detail}`);
+    }
+    if (item.work?.length) lines.push('');
+
+    if (item.kind === 'error') {
+      lines.push(`**Error:** ${item.errorInfo?.message ?? item.text ?? 'The turn failed.'}`, '');
+    } else if (item.text) {
+      lines.push(item.text, '');
+    }
+
+    if (item.changes?.length) {
+      lines.push('**Files changed**', '');
+      for (const change of item.changes) {
+        const delta = [
+          typeof change.additions === 'number' ? `+${change.additions}` : '',
+          typeof change.deletions === 'number' ? `-${change.deletions}` : '',
+        ].filter(Boolean).join(' ');
+        lines.push(`- ${change.path} (${change.action}${delta ? `, ${delta}` : ''})`);
+      }
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
+/**
+ * A filename derived from a conversation title.
+ *
+ * Titles are arbitrary user text, and Windows rejects a different character set
+ * than POSIX, so the safe set is the intersection. Falls back to a constant
+ * rather than producing `.md` for a title made only of symbols.
+ */
+export function exportFileName(title: string | undefined): string {
+  const base = (title ?? '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 70)
+    .trim();
+  return `${base || 'conversation'}.md`;
 }

@@ -1063,3 +1063,142 @@ test('junk workspace state is tolerated', () => {
   assert.deepEqual(adapter.toStorableWorkspaceState(undefined).openTabs, []);
   assert.deepEqual(adapter.toStorableWorkspaceState({ drafts: 'nope' }).drafts, {});
 });
+
+// ---------------------------------------------------------------- export
+
+test('a conversation exports to markdown with its turns in order', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 'Fix the parser',
+    updatedAt: Date.UTC(2026, 0, 2, 3, 4),
+    items: [
+      { id: 'i1', role: 'user', text: 'why does it drop commas', timestamp: 1 },
+      { id: 'i2', role: 'assistant', text: 'Because the lexer stops early.', timestamp: 2, model: 'm1' },
+    ],
+  });
+  assert.match(md, /^# Fix the parser/m);
+  assert.match(md, /why does it drop commas/);
+  assert.match(md, /Because the lexer stops early\./);
+  // Order matters: the user's question comes before the answer.
+  assert.ok(md.indexOf('why does it drop commas') < md.indexOf('Because the lexer'));
+});
+
+test('the export records which model produced an answer', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't', items: [{ id: 'a', role: 'assistant', text: 'hi', timestamp: 2, model: 'sleepy/auto' }],
+  });
+  assert.match(md, /sleepy\/auto/);
+});
+
+test('tool activity is summarised without internal ids', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't',
+    items: [{
+      id: 'a', role: 'assistant', text: 'done', timestamp: 2,
+      work: [{ kind: 'task', tool: 'read_file', text: 'read src/app.ts', done: true }],
+    }],
+  });
+  assert.match(md, /read_file|Read/);
+  assert.ok(!md.includes('callId'), 'internal ids should not leak into an export');
+});
+
+test('a plan exports as its steps', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't',
+    items: [{
+      id: 'a', role: 'assistant', text: '', timestamp: 1,
+      work: [{ kind: 'plan', title: 'Ship it', steps: ['one', 'two'], doneSteps: [0], activeStep: 1 }],
+    }],
+  });
+  assert.match(md, /Ship it/);
+  assert.match(md, /\[x\] one/);
+  assert.match(md, /\[ \] two/);
+});
+
+test('errors are exported as errors, not as empty turns', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't',
+    items: [{ id: 'a', role: 'assistant', text: '', timestamp: 1, kind: 'error', errorInfo: { message: 'rate limited' } }],
+  });
+  assert.match(md, /rate limited/);
+});
+
+test('edited files are listed at the end of their turn', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't',
+    items: [{
+      id: 'a', role: 'assistant', text: 'fixed', timestamp: 1,
+      changes: [{ path: 'src/a.ts', action: 'Modified', additions: 3, deletions: 1 }],
+    }],
+  });
+  assert.match(md, /src\/a\.ts/);
+  assert.match(md, /\+3/);
+});
+
+test('compaction dividers are not exported as content', () => {
+  const md = adapter.conversationToMarkdown({
+    title: 't',
+    items: [
+      { id: 'd', role: 'assistant', text: '', timestamp: 1, kind: 'divider' },
+      { id: 'u', role: 'user', text: 'after the divider', timestamp: 2 },
+    ],
+  });
+  assert.match(md, /after the divider/);
+  assert.equal(md.match(/^## /gm)?.length, 1, 'the divider should not add a section');
+});
+
+test('an empty conversation still exports a valid document', () => {
+  const md = adapter.conversationToMarkdown({ title: '', items: [] });
+  assert.match(md, /^# /m);
+  assert.ok(md.length > 0);
+});
+
+test('the export filename is safe on every platform', () => {
+  const name = adapter.exportFileName('Fix: the/parser "bug"?  \n on Windows');
+  assert.ok(!/[\\/:*?"<>|\n]/.test(name), `unsafe characters in ${name}`);
+  assert.match(name, /\.md$/);
+  assert.ok(name.length <= 80, `too long: ${name.length}`);
+});
+
+test('an empty or symbol-only title still yields a usable filename', () => {
+  assert.match(adapter.exportFileName(''), /^conversation.*\.md$/);
+  assert.match(adapter.exportFileName('///'), /^conversation.*\.md$/);
+});
+
+// ---------------------------------------------------------------- subagents
+
+test('a subagent start becomes a Task tool card', () => {
+  const out = adapter.toReactMessage({
+    type: 'subagent', conversationId: 'c1', id: 'sub-1', role: 'explorer',
+    task: 'find the parser', name: 'Subagent (explorer): find the parser', phase: 'start',
+  });
+  assert.equal(out.event.type, 'tool-call-started');
+  assert.equal(out.event.callId, 'sub-1');
+  // React only renders its subagent card for the Task tool name.
+  assert.equal(out.event.name, 'Task');
+  assert.equal(out.event.input.role, 'explorer');
+  assert.match(out.event.input.task, /find the parser/);
+});
+
+test('a finished subagent completes the Task card', () => {
+  const out = adapter.toReactMessage({
+    type: 'subagent', conversationId: 'c1', id: 'sub-1', role: 'explorer',
+    task: 't', phase: 'end', ok: true, result: 'found it',
+  });
+  assert.equal(out.event.type, 'tool-call-completed');
+  assert.equal(out.event.status, 'completed');
+  assert.match(out.event.result, /found it/);
+});
+
+test('a failed subagent completes the Task card as an error', () => {
+  const out = adapter.toReactMessage({
+    type: 'subagent', conversationId: 'c1', id: 'sub-1', role: 'worker', task: 't', phase: 'end', ok: false, error: 'boom',
+  });
+  assert.equal(out.event.status, 'error');
+  assert.match(out.event.result, /boom/);
+});
+
+test('cancelSubagent reaches the host with the subagent id', () => {
+  const out = adapter.toSleepyMessage({ type: 'cancelSubagent', callId: 'sub-1', reason: 'user' });
+  assert.equal(out.type, 'cancelSubagent');
+  assert.equal(out.callId, 'sub-1');
+});

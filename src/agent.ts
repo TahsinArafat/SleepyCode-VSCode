@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -295,6 +296,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly reactPendingPaths = new Map<string, string[]>();
   /** Serialises draft writes so a keystroke burst cannot interleave. */
   private chatWorkspaceWrite: Promise<void> = Promise.resolve();
+  /**
+   * Per-subagent abort controllers.
+   *
+   * A subagent used to share only the parent run's signal, so it could be stopped
+   * with the whole run but not on its own. Each entry is linked to the run's
+   * controller, so stopping the run still stops its subagents.
+   */
+  private readonly subagentControllers = new Map<string, AbortController>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -1004,6 +1013,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const { trimmed: _trimmed, ...state } = storable;
     this.chatWorkspaceWrite = this.chatWorkspaceWrite.then(() => this.context.globalState.update(key, state));
     return this.chatWorkspaceWrite;
+  }
+
+  /**
+   * Write a conversation to a Markdown file the user picks.
+   *
+   * Markdown rather than JSON: the point is a readable record to share or keep,
+   * and the transcript already reads as one.
+   */
+  private async exportConversation(conversationId?: string): Promise<void> {
+    const project = this.activeProject();
+    const conversation = conversationId
+      ? project?.conversations.find(item => item.id === conversationId)
+      : this.activeConversation();
+    if (!conversation) {
+      void vscode.window.showInformationMessage('There is no conversation to export.');
+      return;
+    }
+    const root = this.workspaceRoot();
+    const defaultUri = vscode.Uri.file(path.join(root?.fsPath ?? os.tmpdir(), adapter.exportFileName(conversation.title)));
+    const target = await vscode.window.showSaveDialog({
+      defaultUri,
+      filters: { Markdown: ['md'] },
+      saveLabel: 'Export',
+      title: 'Export conversation',
+    });
+    if (!target) return;
+    try {
+      await vscode.workspace.fs.writeFile(target, Buffer.from(adapter.conversationToMarkdown(conversation), 'utf8'));
+      this.log('info', 'conversation.exported', `${conversation.id} -> ${target.fsPath}`);
+      const choice = await vscode.window.showInformationMessage(`Exported to ${path.basename(target.fsPath)}.`, 'Open');
+      if (choice === 'Open') await vscode.window.showTextDocument(target, { preview: true });
+    } catch (error) {
+      const detail = errorMessage(error);
+      this.log('error', 'conversation.export.failed', detail);
+      void vscode.window.showErrorMessage(`Could not export the conversation: ${detail}`);
+    }
   }
 
   private settingsPanelHost(): SettingsPanelHost {
@@ -2105,6 +2150,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         for (const run of this.runs.values()) run.controller.abort();
         this.post({ type: 'state', conversationId: activeId, running: false, label: '' });
       }
+      return;
+    }
+    if (message.type === 'cancelSubagent') {
+      const controller = this.subagentControllers.get(message.callId);
+      if (controller) {
+        this.log('info', 'subagent.cancel', `${message.callId} (${message.reason ?? 'user'})`);
+        controller.abort();
+      } else {
+        // Nothing to cancel: the subagent already finished, or the id is stale.
+        this.log('warn', 'subagent.cancel.missing', message.callId);
+      }
+      return;
+    }
+    if (message.type === 'exportConversation') {
+      await this.exportConversation(message.conversationId);
       return;
     }
     if (message.type === 'logError') {
@@ -3880,6 +3940,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const cleanTask = task.trim();
         if (!cleanTask) throw new Error('Subagent task cannot be empty.');
         const subagentId = `subagent-${Date.now().toString(36)}-${(++this.subagentSequence).toString(36)}`;
+        const subagentAbort = new AbortController();
+        this.subagentControllers.set(subagentId, subagentAbort);
+        // Linked, not replaced: cancelling the run must still cancel every
+        // subagent it started.
+        const linkRunAbort = () => subagentAbort.abort();
+        run.controller.signal.addEventListener('abort', linkRunAbort, { once: true });
+        const releaseSubagent = () => {
+          run.controller.signal.removeEventListener('abort', linkRunAbort);
+          this.subagentControllers.delete(subagentId);
+        };
         const subagentPost = (message: unknown): void => {
           if (!message || typeof message !== 'object') {
             postToolEvent(message);
@@ -4008,7 +4078,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 this.notifyHooks('beforeTool', { tool: call.name });
                 this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id, tool: call.name, name: toolTask(call.name, input) });
                 try {
-                  const output = await executeTool({ tool, input, options: { toolCallId: id, messages: subagentMessages, abortSignal: run.controller.signal, context: undefined as never } });
+                  const output = await executeTool({ tool, input, options: { toolCallId: id, messages: subagentMessages, abortSignal: subagentAbort.signal, context: undefined as never } });
                   let finalOutput: unknown = '';
                   for await (const part of output) if (part.type === 'final') finalOutput = part.output;
                   xmlResults.push(`## ${call.name}\n${typeof finalOutput === 'string' ? finalOutput : JSON.stringify(finalOutput)}`);
@@ -4044,12 +4114,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
           const text = subagentText;
+          releaseSubagent();
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
           return text;
         } catch (error) {
+          releaseSubagent();
           const message = errorMessage(error);
-          this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: false, error: message });
-          throw new Error(`Subagent (${role}) failed: ${message}`);
+          // A cancelled subagent did not fail; say what happened so the parent
+          // does not treat a user's decision as a defect.
+          const cancelled = subagentAbort.signal.aborted && !run.controller.signal.aborted;
+          this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: false, error: cancelled ? 'Cancelled.' : message });
+          throw new Error(cancelled ? `Subagent (${role}) was cancelled.` : `Subagent (${role}) failed: ${message}`);
         }
       };
 

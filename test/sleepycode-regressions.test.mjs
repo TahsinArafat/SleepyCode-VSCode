@@ -48,7 +48,11 @@ test('subagent events have explicit lifecycle and child-parent routing', () => {
 test('subagents cannot recurse and failures propagate to the parent agent', () => {
   assert.match(agent, /delete subagentTools\.delegate_task/);
   assert.match(tools, /Subagents cannot recursively delegate/);
-  assert.match(agent, /throw new Error\(`Subagent \(\$\{role\}\) failed:/);
+  // A genuine failure still propagates with the same wording; a user-cancelled
+  // subagent is reported as cancelled rather than as a defect.
+  assert.match(agent, /throw new Error\(cancelled \?/);
+  assert.match(agent, /Subagent \(\$\{role\}\) failed:/);
+  assert.match(agent, /Subagent \(\$\{role\}\) was cancelled\./);
 });
 
 test('subagent results harvest leftover step text instead of returning empty', () => {
