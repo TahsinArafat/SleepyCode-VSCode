@@ -225,6 +225,12 @@ export async function connectServerDefinitions(
   for (const [serverName, server] of Object.entries(definitions)) {
     const { config, cwd } = toClientConfig(serverName, server);
     const root = cwd ? path.resolve(workspaceRoot, cwd) : workspaceRoot;
+    // Host environment (the user's login-shell PATH) is merged into the server's
+    // own env here, so the client only ever deals with one resolved map.
+    if (host?.env) {
+      const hostEnv = await Promise.resolve(host.env);
+      config.env = { ...hostEnv, ...(config.env ?? {}) };
+    }
     const connection = new McpServerConnection(config, root, host);
     try {
       await connection.connect();

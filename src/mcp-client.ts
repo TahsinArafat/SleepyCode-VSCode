@@ -47,6 +47,13 @@ export type McpAuthState = 'none' | 'required' | 'authorizing' | 'authenticated'
 export interface McpHost {
   secrets: McpSecretStorage;
   openExternal(url: string): PromiseLike<unknown>;
+  /**
+   * Extra environment for spawned stdio servers, merged under the server's own
+   * `env`. Needed on macOS: a VS Code launched from the Dock inherits a minimal
+   * PATH, so `npx`/`uvx` in /opt/homebrew/bin or an nvm dir are invisible and
+   * every stdio server fails to start.
+   */
+  env?: Record<string, string> | Promise<Record<string, string>>;
   elicit?(server: string, request: ElicitRequest['params'], signal: AbortSignal): Promise<ElicitResult>;
   notification?(server: string, method: string, params: unknown): void;
 }
@@ -95,6 +102,20 @@ export interface McpToolDef {
   inputSchema?: object;
   outputSchema?: object;
   annotations?: Record<string, unknown>;
+}
+
+/**
+ * Explain a failed spawn in terms the user can act on. `ENOENT` almost always
+ * means the command is not on the PATH this process inherited, which is the
+ * usual situation for a GUI-launched editor.
+ */
+export function describeSpawnFailure(command: string, error: Error): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    return `${command}: command not found. Install it, or make sure it is on the PATH your editor inherits (a VS Code launched from the Dock does not read your shell profile).`;
+  }
+  if (code === 'EACCES') return `${command}: not executable. Check its file permissions.`;
+  return `${command}: ${error.message}`;
 }
 
 interface JsonRpcResponse {
@@ -160,6 +181,26 @@ export class McpConnection {
       shell: useShell,
     });
     this.proc = proc;
+
+    // Wait for the spawn to succeed or fail before writing anything. Writing
+    // `initialize` into a process that never started produces "write EPIPE",
+    // which says nothing about the cause and hid "command not found".
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        proc.off('spawn', onSpawn);
+        proc.off('error', onError);
+      };
+      const onSpawn = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(new Error(describeSpawnFailure(this.config.command ?? cmd, error)));
+      };
+      proc.once('spawn', onSpawn);
+      proc.once('error', onError);
+    });
     proc.stdin.on('error', (error) => {
       this.lastError = error.message;
       for (const { reject } of this.pending.values()) reject(error);
@@ -539,7 +580,11 @@ export class McpConnection {
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.proc!.stdin.write(payload, (error) => {
-          if (error) finish(error);
+          if (!error) return;
+          // A closed pipe means the server died; its stderr explains why, so
+          // prefer that over the bare EPIPE.
+          const code = (error as NodeJS.ErrnoException).code;
+          finish(code === 'EPIPE' && this.lastError ? new Error(this.lastError) : error);
         });
       } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)));

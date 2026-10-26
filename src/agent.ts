@@ -3661,7 +3661,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
         const baseConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
           ? await Promise.race([
-            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => emptyMcpConnection([`MCP configuration: ${errorMessage(error)}`])),
+            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail), mcpHost(this.context)).catch(error => emptyMcpConnection([`MCP configuration: ${errorMessage(error)}`])),
             new Promise<McpConnection>(resolve => setTimeout(() => resolve(emptyMcpConnection(['MCP servers did not finish connecting within 10s.'])), 10_000)),
           ])
           : emptyMcpConnection();

@@ -391,3 +391,70 @@ function memorySecrets() {
     delete: async (key) => { store.delete(key); },
   };
 }
+
+// ---------------------------------------------------------------- spawn failures
+
+test('a command that cannot be found names the command, not "write EPIPE"', async () => {
+  const connection = await connectMcpServers(
+    JSON.stringify({ ghost: { command: 'definitely-not-a-real-binary-xyz', args: [] } }),
+    here,
+    async () => {},
+  );
+  try {
+    assert.equal(connection.errors.length, 1);
+    const error = connection.errors[0];
+    // EPIPE is what a write to a dead child's stdin reports; it says nothing
+    // about the cause and hid "command not found" from the user.
+    assert.doesNotMatch(error, /EPIPE/);
+    assert.match(error, /definitely-not-a-real-binary-xyz/);
+    assert.match(error, /not found|ENOENT/i);
+  } finally {
+    await connection.close();
+  }
+});
+
+test('a server that exits immediately reports its stderr, not EPIPE', async () => {
+  const connection = await connectMcpServers(
+    JSON.stringify({ failing: { command: process.execPath, args: [serverPath, '--fail'] } }),
+    here,
+    async () => {},
+  );
+  try {
+    assert.doesNotMatch(connection.errors[0], /EPIPE/);
+    assert.match(connection.errors[0], /FOO_API_KEY/);
+  } finally {
+    await connection.close();
+  }
+});
+
+test('a host-supplied PATH is used to resolve the command', async () => {
+  // This is the real defect: a VS Code launched from the Dock inherits a minimal
+  // PATH, so `npx` (in /opt/homebrew/bin or an nvm dir) is invisible and every
+  // stdio server fails. The host resolves the user's login-shell PATH and passes
+  // it here.
+  const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const bin = await mkdtemp(join(tmpdir(), 'sleepycode-bin-'));
+  const shim = join(bin, 'mcp-echo-shim');
+  await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${serverPath}" "$@"\n`);
+  await chmod(shim, 0o755);
+
+  const savedPath = process.env.PATH;
+  process.env.PATH = '/usr/bin:/bin';
+  try {
+    const connection = await connectMcpServers(
+      JSON.stringify({ shimmed: { command: 'mcp-echo-shim', args: [] } }),
+      here,
+      async () => {},
+      { secrets: memorySecrets(), openExternal: async () => undefined, env: { PATH: `${bin}:${savedPath}` } },
+    );
+    try {
+      assert.deepEqual(connection.errors, [], `errors: ${connection.errors.join(' | ')}`);
+      assert.equal(Object.keys(connection.tools).length, 1);
+    } finally {
+      await connection.close();
+    }
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});

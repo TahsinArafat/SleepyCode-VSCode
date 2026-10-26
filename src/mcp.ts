@@ -33,7 +33,49 @@ export function mcpHost(context: vscode.ExtensionContext): McpHost {
       delete: (key: string) => Promise.resolve(context.secrets.delete(key)),
     },
     openExternal: (url) => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
+    // Resolved lazily: spawning a shell costs ~100ms and only stdio servers
+    // need it.
+    get env() {
+      return loginShellEnv();
+    },
   };
+}
+
+let loginShellPath: Promise<Record<string, string>> | undefined;
+
+/**
+ * The PATH the user's shell actually has.
+ *
+ * A VS Code launched from the Dock (macOS) or a desktop launcher (Linux) does
+ * not read the shell profile, so its PATH is the bare system one and `npx`,
+ * `uvx`, `bunx` and nvm-installed binaries are invisible. Every stdio MCP server
+ * then fails with "command not found" while working fine in a terminal.
+ *
+ * Resolved once per session from the user's own shell, and falls back to the
+ * inherited PATH when that fails.
+ */
+export function loginShellEnv(): Promise<Record<string, string>> {
+  if (loginShellPath) return loginShellPath;
+  loginShellPath = (async () => {
+    const fallback = { PATH: process.env.PATH ?? '' };
+    const shell = process.env.SHELL || (process.platform === 'win32' ? '' : '/bin/zsh');
+    if (!shell || process.platform === 'win32') return fallback;
+    try {
+      const { execFile } = await import('node:child_process');
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(shell, ['-ilc', 'printf %s "$PATH"'], { timeout: 5000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout);
+        });
+      });
+      const path = output.trim();
+      // A login shell may print profile noise; only trust a plausible PATH.
+      return path.includes('/') ? { PATH: path } : fallback;
+    } catch {
+      return fallback;
+    }
+  })();
+  return loginShellPath;
 }
 
 /** The subset of `ExtensionContext.globalState` the connection store needs. */
