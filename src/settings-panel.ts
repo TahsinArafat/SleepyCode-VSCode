@@ -13,6 +13,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as settingsAdapter from './settings-adapter';
 import { renderReactWebviewHtml } from './webview-react';
 import {
   fromPanelSettings,
@@ -46,6 +47,8 @@ export interface SettingsPanelHost {
   refreshModels(): Promise<string[]>;
   /** Start the first-party sign-in flow. */
   signIn(): void;
+  /** Clear the recorded local usage. */
+  resetUsage(): Promise<void>;
   /** Store chat preferences for this workspace. */
   writeChatPrefs(patch: Partial<featurePrefs.ChatPrefs>): Promise<void>;
   /** The stored feature values, so the window shows reality rather than defaults. */
@@ -107,6 +110,16 @@ export class SettingsPanel {
     // an earlier navigate would be lost.
     if (section) setTimeout(() => instance.post({ type: 'navigate', section }), 150);
     return instance;
+  }
+
+  /**
+   * Reply to a Usage action. `usageActionResultMessage` returns null for a
+   * status or action the panel cannot match, so nothing is posted that would be
+   * ignored and then time out anyway.
+   */
+  private postUsageResult(requestId: unknown, action: 'refresh' | 'reset', status: 'success' | 'cancelled' | 'error', error?: string): void {
+    const result = settingsAdapter.usageActionResultMessage({ requestId, action, status, error });
+    if (result) this.post(result);
   }
 
   private post(message: unknown): void {
@@ -258,6 +271,27 @@ export class SettingsPanel {
       }
       case 'getUsage':
         this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });
+        // A bare `getUsage` is the page load; the panel's Refresh button sends a
+        // request id and then waits for a matching result. Answering only the
+        // bare form left Refresh timing out for 30 s on a read that works.
+        if (message.requestId) this.postUsageResult(message.requestId, 'refresh', 'success');
+        return;
+      case 'resetUsage': {
+        if (!message.requestId) return;
+        try {
+          await this.host.resetUsage();
+          this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });
+          this.postUsageResult(message.requestId, 'reset', 'success');
+        } catch (error) {
+          this.postUsageResult(message.requestId, 'reset', 'error', error instanceof Error ? error.message : String(error));
+        }
+        return;
+      }
+      case 'oauthGet':
+        // This build has no OAuth provider accounts. Answering with the truth
+        // stops the window waiting on a reply it never got, and the Account Quota
+        // section is hidden while the list is empty.
+        this.post({ type: 'oauthStatus', ...settingsAdapter.emptyOAuthStatus() });
         return;
       case 'fetchAllModels':
         this.post({ type: 'modelsFetched', models: await this.host.refreshModels().catch(() => []) });

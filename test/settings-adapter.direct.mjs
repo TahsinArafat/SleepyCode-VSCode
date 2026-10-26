@@ -428,3 +428,64 @@ test('the webview and the host agree on which sections are hidden', () => {
   assert.equal(adapter.isSectionHidden('general'), false);
   assert.equal(adapter.isSectionHidden('marketplace'), false);
 });
+
+// ---------------------------------------------------------------- usage actions
+//
+// Usage -> Refresh and Reset Usage both posted a message and then waited for a
+// `usageActionResult` that no code ever sent, so each one hung for 30 seconds and
+// reported "No response received" — a fake timeout on a read that works. These
+// pin the reply the window actually matches on.
+
+test('a usage action result echoes the request and the action it answers', () => {
+  // The window ignores a result whose requestId or action do not match the one
+  // it is waiting on, so both must be carried back verbatim.
+  assert.deepEqual(
+    adapter.usageActionResultMessage({ requestId: 'usage-7', action: 'refresh', status: 'success' }),
+    { type: 'usageActionResult', requestId: 'usage-7', action: 'refresh', status: 'success' },
+  );
+  assert.deepEqual(
+    adapter.usageActionResultMessage({ requestId: 'usage-8', action: 'reset', status: 'cancelled' }),
+    { type: 'usageActionResult', requestId: 'usage-8', action: 'reset', status: 'cancelled' },
+  );
+});
+
+test('an error result carries the reason, and only then', () => {
+  const failure = adapter.usageActionResultMessage({ requestId: 'u', action: 'reset', status: 'error', error: 'Disk is read-only.' });
+  assert.equal(failure.error, 'Disk is read-only.');
+  assert.equal(failure.status, 'error');
+  // A success has no `error` key at all, so the window cannot show a stale reason.
+  assert.equal('error' in adapter.usageActionResultMessage({ requestId: 'u', action: 'refresh', status: 'success' }), false);
+});
+
+test('an unsupported status is refused rather than sent', () => {
+  // The window only accepts success/cancelled/error; anything else leaves it
+  // waiting for its 30 s timeout, which is the bug being fixed.
+  assert.equal(adapter.usageActionResultMessage({ requestId: 'u', action: 'refresh', status: 'maybe' }), null);
+  assert.equal(adapter.usageActionResultMessage({ requestId: '', action: 'refresh', status: 'success' }), null);
+  assert.equal(adapter.usageActionResultMessage({ requestId: 'u', action: 'nonsense', status: 'success' }), null);
+});
+
+test('usage recording is gated on the Track Usage preference', () => {
+  // The toggle existed and saved nowhere; making it real means honouring it.
+  assert.equal(adapter.shouldRecordUsage({}), true);
+  assert.equal(adapter.shouldRecordUsage({ trackUsage: true }), true);
+  assert.equal(adapter.shouldRecordUsage({ trackUsage: false }), false);
+  assert.equal(adapter.shouldRecordUsage(undefined), true);
+});
+
+test('account quota is hidden when no OAuth provider exists in this build', () => {
+  // SleepyCode has one first-party account and optional key-based endpoints; it
+  // has no OAuth provider accounts at all. A permanently empty "Account Quota"
+  // section reads as broken rather than as absent.
+  assert.equal(adapter.shouldShowAccountQuota({ accounts: [], errors: {}, hasProviders: false }), false);
+  assert.equal(adapter.shouldShowAccountQuota({ accounts: [], errors: {}, hasProviders: true }), false);
+  // If a build ever does have accounts, the section comes back.
+  assert.equal(adapter.shouldShowAccountQuota({ accounts: [{ id: 'a1', kind: 'anthropic' }], errors: {}, hasProviders: true }), true);
+  assert.equal(adapter.shouldShowAccountQuota(undefined), false);
+});
+
+test('the empty OAuth status is the truthful one, not a placeholder', () => {
+  // Served for `oauthGet` so the window stops waiting for a reply it never gets.
+  // It says "no accounts", which is true, rather than inventing any.
+  assert.deepEqual(adapter.emptyOAuthStatus(), { accounts: [], errors: {} });
+});

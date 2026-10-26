@@ -179,3 +179,16 @@ test('an empty or junk payload routes to nothing at all', () => {
     assert.equal(routed.approvalMode, undefined);
   }
 });
+
+test('Track Usage can be turned off and stays off', () => {
+  // The toggle was persisted but never consulted, so turning it off changed
+  // nothing. It has to survive a save/read cycle AND read back as off.
+  assert.equal(prefs.DEFAULT_CHAT_PREFS.trackUsage, true, 'a fresh install records usage');
+  const off = prefs.applyPrefs(prefs.DEFAULT_CHAT_PREFS, prefs.prefsFromFeatures({ trackUsage: false }));
+  assert.equal(off.trackUsage, false);
+  assert.equal(prefs.normalizePrefs(off).trackUsage, false);
+  assert.equal(prefs.featuresFromHost({ prefs: off, settings: {} }).trackUsage, false);
+  // And an unrelated save does not silently turn it back on.
+  assert.equal(prefs.applyPrefs(off, prefs.prefsFromFeatures({ mcpServers: [] })).trackUsage, false);
+  assert.equal(prefs.applyPrefs(off, prefs.prefsFromFeatures({ chatTextSize: 'large' })).trackUsage, false);
+});

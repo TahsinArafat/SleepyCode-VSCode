@@ -330,6 +330,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'getFeatures',
   'saveFeatures',
   'getUsage',
+  // The Usage panel's two buttons and its quota read. Without these the window
+  // posted and waited for replies that could never come.
+  'resetUsage',
+  'oauthGet',
   'syncMcp',
   'mcpLogin',
   'mcpLogout',
@@ -554,4 +558,72 @@ export function isSectionHidden(id: string | undefined): boolean {
 export function visibleSection(id: string | undefined, fallback = 'general'): string {
   if (typeof id !== 'string' || !id) return fallback;
   return visibleSections.has(id) ? id : fallback;
+}
+
+// ---------------------------------------------------------------- usage actions
+
+export type UsageAction = 'refresh' | 'reset';
+export type UsageActionStatus = 'success' | 'cancelled' | 'error';
+
+/**
+ * The reply the Usage panel matches on.
+ *
+ * Both buttons post a request and then wait for `usageActionResult`; nothing used
+ * to send one, so each action hung for 30 seconds and reported "No response
+ * received" — a fake timeout on a read that works. The request id and the action
+ * are echoed verbatim, because the panel ignores a result that does not name the
+ * thing it is waiting on.
+ *
+ * Returns `null` for a status or action the panel cannot match, rather than
+ * posting something it will silently ignore (and then time out on anyway).
+ */
+export function usageActionResultMessage(input: {
+  requestId?: unknown;
+  action?: unknown;
+  status?: unknown;
+  error?: string;
+}): { type: 'usageActionResult'; requestId: string; action: UsageAction; status: UsageActionStatus; error?: string } | null {
+  const requestId = typeof input.requestId === 'string' ? input.requestId : '';
+  const action = input.action === 'refresh' || input.action === 'reset' ? input.action : undefined;
+  const status = input.status === 'success' || input.status === 'cancelled' || input.status === 'error'
+    ? input.status
+    : undefined;
+  if (!requestId || !action || !status) return null;
+  return {
+    type: 'usageActionResult',
+    requestId,
+    action,
+    status,
+    // Only on failure: a success with an `error` key would let a stale reason
+    // linger in the panel.
+    ...(status === 'error' && input.error ? { error: input.error } : {}),
+  };
+}
+
+/**
+ * Whether a request should be recorded at all.
+ *
+ * The Track Usage toggle was persisted but never consulted, so turning it off
+ * changed nothing. Absent means on: a user who never touched the setting still
+ * expects their usage to be counted.
+ */
+export function shouldRecordUsage(features: { trackUsage?: unknown } | undefined | null): boolean {
+  return (features as { trackUsage?: unknown } | undefined | null)?.trackUsage !== false;
+}
+
+/**
+ * Whether the Account Quota section has anything to say.
+ *
+ * SleepyCode has one first-party account plus optional key-based endpoints, and
+ * no OAuth provider accounts at all (`OAUTH_PROVIDER_DEFINITIONS` is empty), so
+ * this section can only ever be empty. A permanently empty block reads as broken
+ * rather than as absent, so it is hidden until a build actually has accounts.
+ */
+export function shouldShowAccountQuota(status: { accounts?: unknown[] } | undefined | null): boolean {
+  return Array.isArray(status?.accounts) && status.accounts.length > 0;
+}
+
+/** The truthful OAuth status for this build: no accounts, no errors. */
+export function emptyOAuthStatus(): { accounts: unknown[]; errors: Record<string, string> } {
+  return { accounts: [], errors: {} };
 }

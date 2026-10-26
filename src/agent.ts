@@ -1024,6 +1024,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return this.context.globalState.get<unknown>(this.chatWorkspaceKey(), undefined);
   }
 
+  /** Whether a finished request should be written to the local usage log. */
+  private shouldRecordUsage(): boolean {
+    return settingsAdapter.shouldRecordUsage(this.readChatPrefs());
+  }
+
   /** Chat preferences for this workspace, validated against their defaults. */
   private readChatPrefs(): featurePrefs.ChatPrefs {
     const stored = this.readChatWorkspace() as { prefs?: unknown } | undefined;
@@ -1268,6 +1273,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return {
       signIn: () => this.signIn(),
       writeChatPrefs: (patch) => this.writeChatPrefs(patch),
+      resetUsage: async () => {
+        await this.context.globalState.update('sleepycode.usage', []);
+        this.log('info', 'usage.reset', 'local usage cleared');
+      },
       readFeatures: async () => featurePrefs.featuresFromHost({
         prefs: this.readChatPrefs(),
         settings: {
@@ -4568,7 +4577,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           const harvested = harvestSubagentText(subagentText, leftoverText);
           subagentText = harvested.text;
           if (totalInput || totalOutput) {
-            recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
+            if (this.shouldRecordUsage()) recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
           const text = subagentText;
           releaseSubagent();
@@ -4912,7 +4921,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               runCacheWrite += ucacheWrite;
               const durationMs = Date.now() - streamStartTime;
               const tokensPerSecond = durationMs > 0 ? Math.round((uout / durationMs) * 1000) : 0;
-              recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
+              if (this.shouldRecordUsage()) recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
               // Count the step against the conversation's goal, so a bounded goal
               // actually limits the run instead of being decorative.
               if (conversation.goal) {
@@ -5374,7 +5383,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Every completed call costs tokens (reasoning included) — record it even
             // when the response is rejected, otherwise reasoning burn stays invisible.
             if (attemptUsage.inputTokens || attemptUsage.outputTokens) {
-              recordUsage(this.context, {
+              if (this.shouldRecordUsage()) recordUsage(this.context, {
                 model: candidateId,
                 provider: providerConfig.id,
                 inputTokens: attemptUsage.inputTokens ?? 0,

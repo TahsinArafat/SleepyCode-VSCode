@@ -23,6 +23,8 @@ export interface ChatPrefs {
   maxTabCount: number;
   completionSound: boolean;
   perTabDrafts: boolean;
+  /** Whether a finished request is written to the local usage log. */
+  trackUsage: boolean;
 }
 
 export const DEFAULT_CHAT_PREFS: ChatPrefs = {
@@ -32,6 +34,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   maxTabCount: 6,
   completionSound: false,
   perTabDrafts: false,
+  trackUsage: true,
 };
 
 /** A tab count is read from disk, so it is bounded rather than trusted. */
@@ -67,6 +70,9 @@ export function normalizePrefs(value: unknown): ChatPrefs {
     perTabDrafts: typeof input.perTabDrafts === 'boolean'
       ? input.perTabDrafts
       : DEFAULT_CHAT_PREFS.perTabDrafts,
+    trackUsage: typeof input.trackUsage === 'boolean'
+      ? input.trackUsage
+      : DEFAULT_CHAT_PREFS.trackUsage,
   };
 }
 
@@ -86,6 +92,7 @@ export function prefsFromFeatures(features: unknown): Partial<ChatPrefs> {
   if (typeof input.submitWithCtrlEnter === 'boolean') patch.submitWithCtrlEnter = input.submitWithCtrlEnter;
   if (typeof input.completionSound === 'boolean') patch.completionSound = input.completionSound;
   if (typeof input.perTabDrafts === 'boolean') patch.perTabDrafts = input.perTabDrafts;
+  if (typeof input.trackUsage === 'boolean') patch.trackUsage = input.trackUsage;
   const tabs = clampTabCount(input.maxTabCount);
   if (tabs !== undefined) patch.maxTabCount = tabs;
   return patch;
@@ -130,6 +137,7 @@ export function featuresFromHost(input: { prefs: ChatPrefs; settings: { systemNo
     maxTabCount: prefs.maxTabCount,
     completionSound: prefs.completionSound,
     perTabDrafts: prefs.perTabDrafts,
+    trackUsage: prefs.trackUsage,
     notifyOnComplete: settings.systemNotifications !== false,
     maxAgentSteps: settings.maxSteps ?? 200,
     indexingEnabled: settings.repoIndex !== false,

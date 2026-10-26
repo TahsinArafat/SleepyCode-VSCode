@@ -19,7 +19,7 @@ import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection"
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
-import { visibleSection } from "../../src/settings-adapter.ts";
+import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
 import { MarketplacePanel } from "./panels/MarketplacePanel";
 
 interface Settings {
@@ -414,14 +414,19 @@ function UsagePanel({
         </Row>
       </Group>
 
-      <div className="section-label">Account Quota</div>
-      <p className="panel-hint">Rate-limit windows for your connected OAuth accounts ({oauthStatus.accounts.map((a) => OAUTH_LABEL[a.kind]).join(", ") || "none connected"}).</p>
-      {oauthStatus.accounts.length === 0 ? (
-        <div className="empty-card">
-          No OAuth accounts connected. Add one in the <strong>Providers → OAuth Accounts</strong> tab to see its quota here.
-        </div>
-      ) : (
-        oauthStatus.accounts.map((a) => <OAuthAccountCard key={a.id} account={a} defaultOpen refreshToken={quotaRefresh} />)
+      {/*
+        Hidden unless there is an account to show. SleepyCode has one first-party
+        account and optional key-based endpoints — no OAuth provider accounts at
+        all — so this block could only ever be empty, and its empty state pointed
+        at a Providers page this build does not include. An empty block reads as
+        broken; absent reads as absent.
+      */}
+      {shouldShowAccountQuota(oauthStatus) && (
+        <>
+          <div className="section-label">Account Quota</div>
+          <p className="panel-hint">Rate-limit windows for your connected OAuth accounts ({oauthStatus.accounts.map((a) => OAUTH_LABEL[a.kind]).join(", ")}).</p>
+          {oauthStatus.accounts.map((a) => <OAuthAccountCard key={a.id} account={a} defaultOpen refreshToken={quotaRefresh} />)}
+        </>
       )}
     </>
   );
