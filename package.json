@@ -160,6 +160,10 @@
       {
         "command": "sleepycode.signIn",
         "title": "SleepyCode: Sign in to SleepyAI"
+      },
+      {
+        "command": "sleepycode.settingsWindow",
+        "title": "SleepyCode: Settings (new window)"
       }
     ],
     "menus": {

@@ -9,9 +9,18 @@ test('OpenCursor-only settings sections are hidden', () => {
   }
 });
 
-test('sections SleepyCode supports stay visible', () => {
-  for (const id of ['general', 'usage', 'agents', 'models', 'behavior', 'rules', 'mcp', 'advanced', 'about']) {
+test('sections SleepyCode actually backs stay visible', () => {
+  // These are the surfaces the settings window serves real SleepyCode data for.
+  for (const id of ['general', 'usage', 'behavior', 'rules', 'mcp', 'advanced', 'about']) {
     assert.equal(flags.isSectionHidden(id), false, `${id} should stay visible`);
+  }
+});
+
+test('sections backed only by OpenCursor stores are hidden', () => {
+  // Their data lives in OpenCursor's feature store, which SleepyCode does not
+  // have; rendering them would show controls that write nowhere.
+  for (const id of ['models', 'agents']) {
+    assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
 });
 
@@ -20,9 +29,9 @@ test('filterSections drops hidden entries and keeps order', () => {
     { id: 'general' },
     { id: 'providers' },
     { id: 'ollama' },
-    { id: 'models' },
+    { id: 'mcp' },
   ];
-  assert.deepEqual(flags.filterSections(input).map(s => s.id), ['general', 'models']);
+  assert.deepEqual(flags.filterSections(input).map(s => s.id), ['general', 'mcp']);
 });
 
 test('hidden list is exported so it can be re-enabled later', () => {

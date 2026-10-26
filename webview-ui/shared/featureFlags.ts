@@ -10,6 +10,7 @@
 
 /** Settings rail sections that belong to OpenCursor-only features. */
 export const HIDDEN_SETTINGS_SECTIONS = [
+  // OpenCursor-only connection and agent surfaces.
   'providers',
   'llamacpp',
   'ollama',
@@ -17,6 +18,11 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'subagents',
   'indexing',
   'hooks',
+  // Backed by OpenCursor's own stores, which SleepyCode does not have: showing
+  // them would present controls that write nowhere. MCP, General, Usage,
+  // Behavior, Advanced and About are the surfaces SleepyCode actually serves.
+  'models',
+  'agents',
 ] as const;
 
 export type HiddenSection = (typeof HIDDEN_SETTINGS_SECTIONS)[number];

@@ -327,12 +327,17 @@ export type McpOAuthTokens = {
   scope?: string;
 };
 
-export type McpTransportType = 'http' | 'sse';
+export type McpTransportType = 'http' | 'sse' | 'stdio';
 
 export type McpConnectionData = {
   name: string;
   description: string;
-  url: string;
+  /** Remote servers carry a URL; stdio servers carry a command instead. */
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
   transport: McpTransportType;
   auth: McpAuthConfig;
   enabled: boolean;

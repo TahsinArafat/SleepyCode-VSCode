@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import type { McpConnectionData, McpConnectionStatus, McpOAuthConfig, McpOAuthTokens } from './types';
 
+import { usableConnections } from './settings-adapter';
 import {
   connectServerDefinitions,
   expandEnvironment,
@@ -19,9 +20,25 @@ const MCP_CONNECTIONS_KEY = 'sleepycode.mcpConnections';
 export async function loadMcpConnections(context: vscode.ExtensionContext): Promise<McpConnectionData[]> {
   const stored = context.globalState.get<unknown[]>(MCP_CONNECTIONS_KEY, []);
   if (!Array.isArray(stored)) return [];
-  return stored
-    .filter((item): item is McpConnectionData => Boolean(item) && typeof item === 'object' && typeof (item as McpConnectionData).name === 'string' && typeof (item as McpConnectionData).url === 'string')
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  // A connection needs a URL *or* a command to be reachable. Requiring a URL
+  // silently dropped every stdio entry the settings window could save.
+  // Stored data is a trust boundary (globalState can hold anything), so each
+  // field is normalised rather than assumed present.
+  return usableConnections(stored as Partial<McpConnectionData>[])
+    .map((connection): McpConnectionData => ({
+      name: connection.name ?? '',
+      description: connection.description ?? '',
+      transport: connection.transport ?? (connection.command ? 'stdio' : 'http'),
+      auth: connection.auth?.type ? connection.auth : { type: 'none' },
+      enabled: connection.enabled !== false,
+      order: connection.order ?? 0,
+      ...(connection.url ? { url: connection.url } : {}),
+      ...(connection.command ? { command: connection.command } : {}),
+      ...(connection.args ? { args: connection.args } : {}),
+      ...(connection.env ? { env: connection.env } : {}),
+      ...(connection.headers ? { headers: connection.headers } : {}),
+    }))
+    .sort((a, b) => a.order - b.order);
 }
 
 export async function saveMcpConnection(context: vscode.ExtensionContext, connection: McpConnectionData): Promise<void> {
@@ -68,11 +85,15 @@ export async function connectToMcpConnections(
       const authHeaders = connection.auth?.type === 'oauth2'
         ? { Authorization: `Bearer ${await oauthAccessToken(connection, context)}` }
         : mcpAuthHeaders(connection);
-      definitions[connection.name] = {
-        url: connection.url,
-        transport: connection.transport ?? 'http',
-        headers: { ...expandEnvironment(connection.auth?.customHeaders), ...authHeaders },
-      };
+      // stdio servers are launched, not fetched, so they take the command path
+      // and never carry OAuth headers.
+      definitions[connection.name] = connection.transport === 'stdio' || connection.command
+        ? { command: connection.command ?? '', args: connection.args, env: connection.env }
+        : {
+          url: connection.url ?? '',
+          transport: connection.transport === 'sse' ? 'sse' : 'http',
+          headers: { ...connection.headers, ...expandEnvironment(connection.auth?.customHeaders), ...authHeaders },
+        };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statuses.push({ name: connection.name, state: isMcpAuthRequired(message) ? 'auth_required' : 'error', error: message });

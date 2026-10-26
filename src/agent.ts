@@ -28,6 +28,8 @@ import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from '
 import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
 import { renderReactWebviewHtml } from './webview-react';
+import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
+import * as settingsAdapter from './settings-adapter';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
 import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
@@ -862,6 +864,68 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }));
   }
 
+  /** Open the OpenCursor settings window (also used by the command). */
+  public openSettingsWindow(): void {
+    SettingsPanel.show(this.context, this.settingsPanelHost());
+  }
+
+  /**
+   * Adapt SleepyCode's configuration and MCP storage to the settings window.
+   * The panel owns no storage of its own, so every read and write lands on the
+   * same state the rest of the extension uses.
+   */
+  private settingsPanelHost(): SettingsPanelHost {
+    return {
+      readSettings: () => ({
+        model: this.config().model,
+        maxSteps: this.config().maxSteps,
+        systemPrompt: this.config().systemPrompt,
+        repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+      }),
+      writeSettings: async (patch) => {
+        const config = vscode.workspace.getConfiguration('sleepycode');
+        if (patch.model !== undefined) await config.update('model', patch.model, vscode.ConfigurationTarget.Global);
+        if (patch.maxSteps !== undefined) await config.update('maxSteps', patch.maxSteps, vscode.ConfigurationTarget.Global);
+        if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
+        if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
+        this.postConfig();
+      },
+      readConnections: async () => (await loadMcpConnections(this.context)).map(settingsAdapter.toMcpPanelConfig),
+      writeConnections: async (connections) => {
+        const previous = await loadMcpConnections(this.context);
+        const keep = new Set(connections.map((connection) => connection.name));
+        for (const connection of previous) {
+          if (!keep.has(connection.name)) await deleteMcpConnection(this.context, connection.name);
+        }
+        for (let index = 0; index < connections.length; index++) {
+          await saveMcpConnection(this.context, settingsAdapter.fromMcpPanelConfig(connections[index]!, index) as McpConnectionData);
+        }
+        // The stored set changed, so any cached connection is stale.
+        this.mcpCache = undefined;
+      },
+      syncConnections: async () => {
+        const connections = await loadMcpConnections(this.context);
+        const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail));
+        await result.connection.close();
+        return result.statuses;
+      },
+      mcpLogin: async (name) => {
+        const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
+        if (!connection) throw new Error(`MCP connection "${name}" was not found.`);
+        await beginMcpOAuth({ name: connection.name, auth: connection.auth }, this.context);
+      },
+      mcpLogout: async (name) => {
+        await this.context.secrets.delete(`sleepycode.mcpOAuth.tokens.${name}`);
+        this.mcpCache = undefined;
+      },
+      usage: () => aggregateUsage(loadUsage(this.context)),
+      refreshModels: async () => {
+        await this.refreshModels();
+        return this.lastModelGroups.flatMap((group) => group.models.map((model) => (typeof model === 'string' ? model : model.id)));
+      },
+    };
+  }
+
   /**
    * Fold React's composer attachments into a SleepyCode `ComposerContext`.
    * Images are materialised to temp files (the run reads them from disk); file
@@ -1245,11 +1309,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showSettings(initialSetup = false): Promise<void> {
-    // The React settings webview is OpenCursor's, backed by SleepyCode data it
-    // cannot edit yet. VS Code's own settings page is the honest surface until
-    // the panel is ported.
+    // In React mode the OpenCursor settings window is the real surface: it is
+    // the only structured editor for MCP servers. The classic webview keeps its
+    // own settings view for the fallback path.
     if (this.reactMode && !initialSetup) {
-      void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:TahsinArafat.sleepycode-agent');
+      SettingsPanel.show(this.context, this.settingsPanelHost());
       return;
     }
     const config = this.config();
