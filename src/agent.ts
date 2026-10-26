@@ -848,6 +848,43 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Fold React's composer attachments into a SleepyCode `ComposerContext`.
+   * Images are materialised to temp files (the run reads them from disk); file
+   * attachments pass their workspace path straight through.
+   */
+  private async withReactAttachments(message: Extract<WebMessage, { type: 'send' }>): Promise<ComposerContext | undefined> {
+    const raw = (message as { attachments?: unknown }).attachments;
+    const split = adapter.reactAttachmentsOf(raw);
+    if (!split.images.length && !split.files.length) return message.context;
+    const images = await Promise.all(split.images.map(image => this.materializeImage(image)));
+    const attachments: Attachment[] = [
+      ...images.filter((image): image is Extract<Attachment, { kind: 'image' }> => Boolean(image)),
+      ...split.files.map(file => ({ kind: 'file' as const, path: file.path })),
+    ];
+    return { ...(message.context ?? {}), attachments };
+  }
+
+  /** Write a data-URL image to a temp file the provider can read. */
+  private async materializeImage(image: { name: string; mimeType: string; dataUrl: string }): Promise<Attachment | undefined> {
+    const match = image.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
+    if (!match?.[1]) return undefined;
+    const bytes = Buffer.from(match[1], 'base64');
+    if (bytes.byteLength > 10_000_000) {
+      void vscode.window.showWarningMessage(`Skipped ${image.name}: images must be under 10 MB.`);
+      return undefined;
+    }
+    try {
+      const folder = await mkdtemp(path.join(tmpdir(), 'sleepycode-image-'));
+      const extension = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
+      const filePath = path.join(folder, `pasted.${extension}`);
+      await writeFile(filePath, bytes);
+      return { kind: 'image', name: image.name, size: bytes.byteLength, mimeType: image.mimeType, tempPath: filePath, previewDataUrl: image.dataUrl };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * React's change-review actions name only a path. SleepyCode resolves an edit
    * through the conversation and the assistant turn that made it, so the action
    * is rewritten here using the tracked target before reaching `onMessage`.
@@ -2956,8 +2993,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         this.postConfig();
       }
-      const editorContext = root ? await this.composerContextBlock(root, message.context) : '';
-      const projectContext = root && message.context?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
+      // The React composer sends its own attachment shape. Images arrive as data
+      // URLs, so they are written to temp files here before the run reads them.
+      const composerContext = await this.withReactAttachments(message);
+      const editorContext = root ? await this.composerContextBlock(root, composerContext) : '';
+      const projectContext = root && composerContext?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
 
       // The CLI owns the loop, tools, permissions, and history for a conversation
@@ -2976,10 +3016,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
         this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
-        this.enqueue(sendText, conversationId, message.context, promptContext);
+        this.enqueue(sendText, conversationId, composerContext, promptContext);
       } else {
         this.log('info', 'message.send.starting', `conversation=${conversationId}; contextChars=${promptContext.length}`);
-        void this.run(sendText, conversationId, undefined, undefined, message.context, promptContext).catch(error => {
+        void this.run(sendText, conversationId, undefined, undefined, composerContext, promptContext).catch(error => {
           const detail = errorMessage(error);
           this.log('error', 'run.unhandled', detail);
           // The user turn is persisted before the run starts, so a failure escaping the

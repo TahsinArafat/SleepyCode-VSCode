@@ -40,6 +40,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       // The webview keeps its optimistic turn in a placeholder session until the
       // host says which conversation it actually landed in.
       if (message.requestId) out.requestId = message.requestId;
+      // Attachments stay in the React shape here; the host owns the filesystem
+      // and materialises images into temp files it can actually read.
+      if (Array.isArray(message.attachments) && message.attachments.length) out.attachments = message.attachments;
       return out;
     }
 
@@ -616,4 +619,32 @@ export function latestAssistantItemId(items: readonly any[] | undefined): string
     if (item?.role === 'assistant' && item.id) return String(item.id);
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------- attachments
+
+/**
+ * Split React's composer attachments into the two things SleepyCode can act on
+ * without guessing. Images carry a data URL the host writes to a temp file;
+ * text attachments have no on-disk path, so they are not forwarded as file
+ * context (a fabricated path would make the agent read the wrong file).
+ */
+export function reactAttachmentsOf(attachments: unknown): { images: { name: string; mimeType: string; dataUrl: string }[]; files: { path: string }[] } {
+  const images: { name: string; mimeType: string; dataUrl: string }[] = [];
+  const files: { path: string }[] = [];
+  if (!Array.isArray(attachments)) return { images, files };
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== 'object') continue;
+    const a = attachment as { kind?: string; name?: string; mime?: string; data?: string; path?: string };
+    if (a.kind === 'image' && typeof a.data === 'string' && a.data.startsWith('data:image/')) {
+      images.push({
+        name: a.name || 'image.png',
+        mimeType: a.mime || a.data.slice(5, a.data.indexOf(';')) || 'image/png',
+        dataUrl: a.data,
+      });
+      continue;
+    }
+    if (typeof a.path === 'string' && a.path) files.push({ path: a.path });
+  }
+  return { images, files };
 }

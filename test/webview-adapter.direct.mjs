@@ -584,3 +584,39 @@ test('latestAssistantItemId is undefined without an assistant turn', () => {
   assert.equal(adapter.latestAssistantItemId([{ id: 'u', role: 'user' }]), undefined);
   assert.equal(adapter.latestAssistantItemId(undefined), undefined);
 });
+
+// ---------------------------------------------------------------- attachments
+
+test('sendMessage carries attachments through to the host', () => {
+  const out = adapter.toSleepyMessage({
+    type: 'sendMessage', text: 'look',
+    attachments: [{ id: '1', name: 'shot.png', mime: 'image/png', data: 'data:image/png;base64,AAA', kind: 'image' }],
+  });
+  assert.equal(out.attachments.length, 1);
+  assert.equal(out.attachments[0].name, 'shot.png');
+});
+
+test('image attachments are split out for materialising', () => {
+  const split = adapter.reactAttachmentsOf([
+    { id: '1', name: 'shot.png', mime: 'image/png', data: 'data:image/png;base64,AAA', kind: 'image' },
+    { id: '2', name: 'notes.txt', mime: 'text/plain', data: 'hello', kind: 'text' },
+  ]);
+  assert.equal(split.images.length, 1);
+  assert.equal(split.images[0].dataUrl, 'data:image/png;base64,AAA');
+  assert.equal(split.images[0].mimeType, 'image/png');
+  assert.equal(split.files.length, 0);
+});
+
+test('non-image and malformed attachments are not treated as images', () => {
+  const split = adapter.reactAttachmentsOf([
+    { id: '1', name: 'notes.txt', kind: 'text', data: 'plain text' },
+    { id: '2', name: 'broken', kind: 'image', data: 'not-a-data-url' },
+    undefined,
+    null,
+  ]);
+  assert.deepEqual(split.images, []);
+});
+
+test('reactAttachmentsOf tolerates a missing list', () => {
+  assert.deepEqual(adapter.reactAttachmentsOf(undefined), { images: [], files: [] });
+});
