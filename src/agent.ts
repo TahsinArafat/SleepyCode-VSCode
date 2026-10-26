@@ -8,7 +8,7 @@ import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
 import { executeTool } from '@ai-sdk/provider-utils';
 import { captureGitTree, commitGit, gitChangedPathsBetween, gitFileAtTree, gitHeadShort, gitHeadTreeOrEmpty, gitPorcelain, gitTreeChanges, invalidateGitTrackedCache, isGitTrackedWorkspace, restoreGitPath, restoreGitTree, stageGitPaths } from './git';
 import { cloneProviders, fetchProviderModels, getProvider, SLEEPY_AUTO_MODEL_ID, type Provider } from './providers';
-import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR } from './skills';
+import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, readSkillMarkdown, resolveInstallPath, sanitizeSkillName, searchSkills, uninstallSkill, SKILL_FILE_NAMES, SKILLS_SUBDIR, type InstalledSkill, type SkillInfo } from './skills';
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
@@ -889,6 +889,84 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * The panel owns no storage of its own, so every read and write lands on the
    * same state the rest of the extension uses.
    */
+  /**
+   * Search the SkillsMP catalogue.
+   *
+   * Extracted so the sidebar's marketplace view and the settings window's
+   * Marketplace section share one implementation: two copies of a search is how
+   * the MCP transports diverged.
+   */
+  private async searchMarketplace(query: string, sortBy?: 'stars' | 'recent'): Promise<{ skills: SkillInfo[]; total: number }> {
+    return searchSkills(query, { limit: 20, sortBy: sortBy ?? 'stars' });
+  }
+
+  /** Installed skills, read from the global skills folder. */
+  private async installedSkillList(): Promise<InstalledSkill[]> {
+    await this.ensureGlobalSkills();
+    return listInstalledSkills(this.skillsRoot());
+  }
+
+  /**
+   * Install a skill from a repository reference (a URL or `owner/repo`).
+   * Returns a user-facing outcome instead of posting, so every surface can
+   * present it its own way.
+   */
+  private async installMarketplaceSkill(
+    source: string,
+    requested?: string,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ ok: boolean; text: string }> {
+    await this.ensureGlobalSkills();
+    try {
+      const reference = resolveInstallPath(source, requested ?? '', 'main');
+      let folderPath = reference.folderPath;
+      if (!folderPath) {
+        const skills = await listRepositorySkills(reference.owner, reference.repo, reference.branch);
+        const match = requested
+          ? skills.find(candidate => candidate.name === sanitizeSkillName(requested) || candidate.name.toLowerCase() === requested.trim().toLowerCase())
+          : undefined;
+        if (!match) {
+          return {
+            ok: false,
+            text: skills.length
+              ? `${reference.owner}/${reference.repo} has ${skills.length} skills. Pick one: ${skills.slice(0, 20).map(skill => skill.name).join(', ')}`
+              : `No SKILL.md skills found in ${reference.owner}/${reference.repo}.`,
+          };
+        }
+        folderPath = match.path;
+      }
+      const installName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? requested ?? 'skill');
+      await this.approve('edit', 'Install skill "' + installName + '"?', 'Source: ' + reference.owner + '/' + reference.repo + (folderPath ? ' (' + folderPath + ')' : '') + '\n\nThe skill will be installed into your global skills folder as \'' + installName + '\' and is available in every workspace. Its SKILL.md will be added to the agent\'s instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.');
+      await installSkillFromRepository(this.skillsRoot(), { owner: reference.owner, repo: reference.repo, branch: reference.branch, folderPath, installName }, undefined, onProgress);
+      const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
+      sources[installName] = reference.owner + '/' + reference.repo;
+      await this.context.globalState.update('sleepycode.skillSources', sources);
+      return { ok: true, text: `Installed '${installName}'. Ask SleepyCode to use the '${installName}' skill by name.` };
+    } catch (error) {
+      return { ok: false, text: errorMessage(error) };
+    }
+  }
+
+  /** Remove an installed skill by folder name. */
+  private async uninstallMarketplaceSkill(folder: string): Promise<{ ok: boolean; text: string }> {
+    await this.ensureGlobalSkills();
+    try {
+      const safeName = sanitizeSkillName(folder);
+      const installed = await listInstalledSkills(this.skillsRoot());
+      const skill = installed.find(item => item.folder === safeName || sanitizeSkillName(item.name) === safeName);
+      if (!skill) return { ok: false, text: `Skill '${folder || ''}' not found.` };
+      const choice = await this.prompt('Uninstall skill \'' + skill.name + '\'?', 'This removes \'' + skill.name + '\' from your global skills folder. It will no longer be offered to the agent in any workspace.', { ok: 'Uninstall', cancel: 'Cancel', danger: true });
+      if (choice !== 'ok') return { ok: false, text: 'Uninstall cancelled.' };
+      await uninstallSkill(this.skillsRoot(), skill.folder);
+      const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
+      delete sources[skill.folder];
+      await this.context.globalState.update('sleepycode.skillSources', sources);
+      return { ok: true, text: `Removed '${skill.name}'.` };
+    } catch (error) {
+      return { ok: false, text: errorMessage(error) };
+    }
+  }
+
   private settingsPanelHost(): SettingsPanelHost {
     return {
       readSettings: () => ({
@@ -988,6 +1066,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (!root) return [];
         return listInstalledSkills(this.skillsRoot());
       },
+      marketplaceSearch: (query, sortBy) => this.searchMarketplace(query, sortBy),
+      marketplaceInstalled: () => this.installedSkillList(),
+      marketplaceInstall: (source, skill) => this.installMarketplaceSkill(source, skill),
+      marketplaceUninstall: (folder) => this.uninstallMarketplaceSkill(folder),
       memory: () => {
         const root = this.workspaceRoot();
         if (!root) return { memoryPath: MEMORY_RELATIVE_PATH, memoryExists: false };
@@ -2415,7 +2497,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (message.type === 'requestMarketplaceInstalled') return void this.sendMarketplaceInstalled();
     if (message.type === 'marketplaceTop') {
       try {
-        const { skills, total } = await searchSkills('skill', { limit: 20, sortBy: message.sortBy ?? 'stars' });
+        const { skills, total } = await this.searchMarketplace('skill', message.sortBy);
         this.post({ type: 'marketplaceResults', query: '', total, skills });
       } catch (error) {
         this.post({ type: 'marketplaceError', text: errorMessage(error) });
@@ -2424,7 +2506,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'marketplaceSearch') {
       try {
-        const { skills, total } = await searchSkills(message.query, { limit: Math.max(1, Math.min(50, message.limit || 10)), sortBy: message.sortBy });
+        const { skills, total } = await this.searchMarketplace(message.query, message.sortBy);
         this.post({ type: 'marketplaceResults', query: message.query, total, skills });
       } catch (error) {
         this.post({ type: 'marketplaceError', text: errorMessage(error) });
@@ -2465,60 +2547,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'marketplaceInstall') {
       const key = message.key ?? '';
-      await this.ensureGlobalSkills();
-      try {
-        const reference = resolveInstallPath(message.source, message.skill ?? '', message.branch ?? 'main');
-        const requested = message.skill ?? '';
-        let folderPath = reference.folderPath;
-        if (!folderPath) {
-          const skills = await listRepositorySkills(reference.owner, reference.repo, reference.branch);
-          const match = requested
-            ? skills.find(candidate => candidate.name === sanitizeSkillName(requested) || candidate.name.toLowerCase() === requested.trim().toLowerCase())
-            : undefined;
-          if (!match) {
-            this.post({ type: 'marketplaceResult', ok: false, text: skills.length ? reference.owner + '/' + reference.repo + ' has ' + skills.length + ' skills. Pick one: ' + skills.slice(0, 20).map(skill => skill.name).join(', ') : 'No SKILL.md skills found in ' + reference.owner + '/' + reference.repo + '.', key });
-            return;
-          }
-          folderPath = match.path;
-        }
-        const installName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? message.skill ?? 'skill');
-        await this.approve('edit', 'Install skill "' + installName + '"?', 'Source: ' + reference.owner + '/' + reference.repo + (folderPath ? ' (' + folderPath + ')' : '') + '\n\nThe skill will be installed into your global skills folder as \'' + installName + '\' and is available in every workspace. Its SKILL.md will be added to the agent\'s instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.');
-        await installSkillFromRepository(this.skillsRoot(), { owner: reference.owner, repo: reference.repo, branch: reference.branch, folderPath, installName }, undefined, (done, total) => {
-          this.post({ type: 'marketplaceInstallProgress', key, done, total });
-        });
-        const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
-        sources[installName] = reference.owner + '/' + reference.repo;
-        await this.context.globalState.update('sleepycode.skillSources', sources);
-        this.post({ type: 'marketplaceResult', ok: true, text: `Installed '${installName}'. Open Installed and click Use, or ask SleepyCode to use the '${installName}' skill by name.`, key });
-        await this.sendMarketplaceInstalled();
-      } catch (error) {
-        this.post({ type: 'marketplaceResult', ok: false, text: errorMessage(error), key });
-      }
+      const result = await this.installMarketplaceSkill(message.source, message.skill ?? undefined, (done, total) => {
+        this.post({ type: 'marketplaceInstallProgress', key, done, total });
+      });
+      this.post({ type: 'marketplaceResult', ok: result.ok, text: result.text, key });
+      if (result.ok) await this.sendMarketplaceInstalled();
       return;
     }
     if (message.type === 'marketplaceUninstall') {
-      await this.ensureGlobalSkills();
-      try {
-        const safeName = sanitizeSkillName(message.folder);
-        const installed = await listInstalledSkills(this.skillsRoot());
-        const skill = installed.find(item => item.folder === safeName || sanitizeSkillName(item.name) === safeName);
-        if (!skill) {
-          this.post({ type: 'marketplaceResult', ok: false, text: 'Skill \'' + (message.folder || '') + '\' not found.' });
-          return;
-        }
-        const choice = await this.prompt('Uninstall skill \'' + skill.name + '\'?', 'This removes \'' + skill.name + '\' from your global skills folder. It will no longer be offered to the agent in any workspace.', { ok: 'Uninstall', cancel: 'Cancel', danger: true });
-        if (choice !== 'ok') return;
-        await uninstallSkill(this.skillsRoot(), skill.folder);
-        const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
-        delete sources[skill.folder];
-        await this.context.globalState.update('sleepycode.skillSources', sources);
-        this.post({ type: 'marketplaceResult', ok: true, text: '' });
-        await this.sendMarketplaceInstalled();
-      } catch (error) {
-        this.post({ type: 'marketplaceResult', ok: false, text: errorMessage(error) });
-      }
+      const result = await this.uninstallMarketplaceSkill(message.folder);
+      this.post({ type: 'marketplaceResult', ok: result.ok, text: result.text });
+      if (result.ok) await this.sendMarketplaceInstalled();
       return;
     }
+
     if (message.type === 'saveSettings') {
       try {
         const searxngUrl = message.searxngUrl.trim().replace(/\/$/, '');
@@ -5692,9 +5734,13 @@ ${cached}`;
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
       if (adapter.shouldOfferSignIn(typed as any)) this.offerSignInOnce();
-      // Usage is answerable: the settings window has a Usage section.
+      // Both are settings-window sections now.
       if (typed.type === 'showUsage') {
         this.openSettingsWindow('usage');
+        return;
+      }
+      if (typed.type === 'showMarketplace') {
+        this.openSettingsWindow('marketplace');
         return;
       }
       // Anything left has no React screen yet. Say which command ran instead of

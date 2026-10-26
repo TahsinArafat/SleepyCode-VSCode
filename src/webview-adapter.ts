@@ -802,11 +802,10 @@ export function splitMentions(text: string): { text: string; files: { kind: 'fil
 
 // ---------------------------------------------------------------- fallbacks
 
-const REACT_FALLBACKS: Record<string, string> = {
-  // Usage is served by the settings window (navigate to its Usage section), so
-  // it is no longer a dead end. The marketplace still has no React screen.
-  showMarketplace: 'Skill Marketplace',
-};
+// Every command that used to land here now has a real surface: Usage and the
+// Skill Marketplace are settings-window sections. Kept as the mechanism for the
+// next screen that is not ported yet.
+const REACT_FALLBACKS: Record<string, string> = {};
 
 /**
  * Screens SleepyCode has but the React base does not. They cannot be rendered,

@@ -19,6 +19,7 @@ import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection"
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
+import { MarketplacePanel } from "./panels/MarketplacePanel";
 
 interface Settings {
   model: string;
@@ -38,7 +39,7 @@ const DEFAULTS: Settings = {
   systemPrompt: "",
 };
 
-type Section = "general" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
+type Section = "general" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
 
 interface IndexStatus {
   indexing: boolean;
@@ -77,6 +78,7 @@ const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "behavior", label: "Behavior", icon: "tools" },
   { id: "personas", label: "Personas", icon: "bot", sep: true },
   { id: "rules", label: "Rules & Skills", icon: "ruler" },
+  { id: "marketplace", label: "Skill Marketplace", icon: "book" },
   { id: "subagents", label: "Subagents & Teams", icon: "agent" },
   { id: "mcp", label: "Tools & MCPs", icon: "task" },
   { id: "hooks", label: "Hooks", icon: "infinity" },
@@ -947,6 +949,8 @@ export function App() {
           {section === "personas" && !isSectionHidden("personas") && <PersonasPanel features={features} setFeatures={setFeatures} builtinPersonas={builtinPersonas} />}
 
           {section === "rules" && <RulesPanel rules={rules} skills={skills} />}
+
+          {section === "marketplace" && <MarketplacePanel />}
 
           {section === "subagents" && !isSectionHidden("subagents") && <SubagentsPanel features={features} setFeatures={setFeatures} models={models} modelList={modelList} />}
 

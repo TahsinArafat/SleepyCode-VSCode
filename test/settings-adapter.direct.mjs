@@ -144,6 +144,12 @@ test('missing usage data yields an empty map, not a broken row set', () => {
   assert.deepEqual(adapter.toPanelUsage({}), {});
 });
 
+test('marketplace messages are routed, not ignored', () => {
+  for (const type of ['marketplaceTop', 'marketplaceSearch', 'marketplaceInstall', 'marketplaceUninstall', 'requestMarketplaceInstalled']) {
+    assert.equal(adapter.isPanelMessage({ type }), true, `${type} should be routed`);
+  }
+});
+
 test('MCP sign-in messages are routed, not ignored', () => {
   assert.equal(adapter.isPanelMessage({ type: 'mcpLogin' }), true);
   assert.equal(adapter.isPanelMessage({ type: 'mcpLogout' }), true);
@@ -326,4 +332,54 @@ test('features carry skills and rules so the section is not empty', () => {
   });
   assert.equal(payload.skills.length, 1);
   assert.equal(payload.rules.length, 1);
+});
+
+// ---------------------------------------------------------------- marketplace
+
+test('marketplace search results map onto installable rows', () => {
+  const rows = adapter.toMarketplaceSkillRows([
+    { name: 'pdf', description: 'Read PDFs', author: 'ada', stars: 42, githubUrl: 'https://github.com/ada/skills', skillUrl: 'https://x/1' },
+  ], []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'pdf');
+  assert.equal(rows[0].author, 'ada');
+  assert.equal(rows[0].stars, 42);
+  // The install source is the repo URL, which is what resolveInstallPath parses.
+  assert.equal(rows[0].source, 'https://github.com/ada/skills');
+  assert.equal(rows[0].installed, false);
+});
+
+test('an already installed skill is marked so the button can be disabled', () => {
+  const rows = adapter.toMarketplaceSkillRows(
+    [{ name: 'pdf', description: '', author: 'ada', stars: 1, githubUrl: 'https://github.com/ada/skills' }],
+    ['pdf'],
+  );
+  assert.equal(rows[0].installed, true);
+});
+
+test('installed matching ignores case, since folder names are sanitized', () => {
+  const rows = adapter.toMarketplaceSkillRows(
+    [{ name: 'PDF Tools', description: '', author: '', stars: 0, githubUrl: 'https://github.com/a/b' }],
+    ['pdf-tools'],
+  );
+  assert.equal(rows[0].installed, true);
+});
+
+test('a row without a repo URL cannot be installed', () => {
+  const rows = adapter.toMarketplaceSkillRows([{ name: 'mystery', description: '', author: '', stars: 0 }], []);
+  assert.equal(rows[0].source, undefined);
+});
+
+test('marketplace rows tolerate a missing list and junk entries', () => {
+  assert.deepEqual(adapter.toMarketplaceSkillRows(undefined, []), []);
+  assert.deepEqual(adapter.toMarketplaceSkillRows([null, undefined, { description: 'no name' }], []), []);
+});
+
+test('installed skill rows carry the folder needed to uninstall', () => {
+  const rows = adapter.toInstalledSkillRows([
+    { name: 'pdf', description: 'Read PDFs', folder: 'pdf', skillMdPath: '/s/pdf/SKILL.md' },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].folder, 'pdf');
+  assert.equal(rows[0].name, 'pdf');
 });

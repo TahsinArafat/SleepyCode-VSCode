@@ -659,13 +659,15 @@ test('mentions merge with real attachments', () => {
 
 // ---------------------------------------------------------------- React fallbacks
 
-test('the marketplace still asks for a fallback', () => {
-  assert.equal(adapter.reactFallbackFor({ type: 'showMarketplace' }), 'Skill Marketplace');
+test('usage and the marketplace are served by the settings window', () => {
+  // Both used to be dead ends; the settings window has a section for each.
+  assert.equal(adapter.reactFallbackFor({ type: 'showUsage' }), null);
+  assert.equal(adapter.reactFallbackFor({ type: 'showMarketplace' }), null);
 });
 
-test('usage is served by the settings window, not a fallback', () => {
-  // It used to be a dead end; the settings window has a Usage section.
-  assert.equal(adapter.reactFallbackFor({ type: 'showUsage' }), null);
+test('the fallback mechanism still works for an unported surface', () => {
+  // No command needs it today; it must not silently rot before the next one.
+  assert.equal(adapter.reactFallbackFor({ type: 'delta', text: 'x' }), null);
 });
 
 test('other messages have no fallback', () => {

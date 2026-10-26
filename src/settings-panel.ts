@@ -19,6 +19,7 @@ import {
   isPanelMessage,
   toPanelFeatures,
   toPanelSettings,
+  toMarketplaceSkillRows,
   toPanelUsage,
   type PanelMcpConfig,
   type PanelMcpStatus,
@@ -47,6 +48,12 @@ export interface SettingsPanelHost {
   skills(): Promise<readonly { name: string; description?: string; skillMdPath?: string }[]>;
   /** Whether the project memory file exists, so it can be listed as a rule. */
   memory(): { memoryPath: string; memoryExists: boolean };
+  /** Search the skill marketplace. */
+  marketplaceSearch(query: string, sortBy?: 'stars' | 'recent'): Promise<{ skills: any[]; total: number }>;
+  /** Installed skills, with the folder name needed to uninstall. */
+  marketplaceInstalled(): Promise<{ name: string; description: string; folder: string; skillMdPath: string }[]>;
+  marketplaceInstall(source: string, skill?: string): Promise<{ ok: boolean; text: string }>;
+  marketplaceUninstall(folder: string): Promise<{ ok: boolean; text: string }>;
 }
 
 export class SettingsPanel {
@@ -183,6 +190,40 @@ export class SettingsPanel {
         await this.host.mcpLogout(String(message.name ?? '')).catch((error) => this.reportMcpError(error));
         this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         return;
+      case 'requestMarketplaceInstalled':
+        this.post({ type: 'marketplaceInstalled', skills: await this.host.marketplaceInstalled().catch(() => []) });
+        return;
+      case 'marketplaceTop':
+      case 'marketplaceSearch': {
+        // `marketplaceTop` browses the catalogue with a neutral query, the same
+        // way the sidebar's marketplace view does.
+        const query = message.type === 'marketplaceTop' ? 'skill' : String(message.query ?? '');
+        try {
+          const { skills, total } = await this.host.marketplaceSearch(query, message.sortBy);
+          const installed = await this.host.marketplaceInstalled().catch(() => []);
+          this.post({
+            type: 'marketplaceResults',
+            query: message.type === 'marketplaceTop' ? '' : query,
+            total,
+            skills: toMarketplaceSkillRows(skills, installed.map((skill) => skill.folder)),
+          });
+        } catch (error) {
+          this.post({ type: 'marketplaceError', text: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      case 'marketplaceInstall': {
+        const result = await this.host.marketplaceInstall(String(message.source ?? ''), message.skill ? String(message.skill) : undefined);
+        this.post({ type: 'marketplaceResult', ok: result.ok, text: result.text });
+        if (result.ok) this.post({ type: 'marketplaceInstalled', skills: await this.host.marketplaceInstalled().catch(() => []) });
+        return;
+      }
+      case 'marketplaceUninstall': {
+        const result = await this.host.marketplaceUninstall(String(message.folder ?? ''));
+        this.post({ type: 'marketplaceResult', ok: result.ok, text: result.text });
+        if (result.ok) this.post({ type: 'marketplaceInstalled', skills: await this.host.marketplaceInstalled().catch(() => []) });
+        return;
+      }
       case 'getUsage':
         this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });
         return;

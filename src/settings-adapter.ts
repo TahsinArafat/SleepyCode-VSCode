@@ -327,6 +327,13 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'syncMcp',
   'mcpLogin',
   'mcpLogout',
+  // The Marketplace section is SleepyCode's own, and reuses SleepyCode's
+  // existing marketplace messages rather than inventing a parallel API.
+  'marketplaceTop',
+  'marketplaceSearch',
+  'marketplaceInstall',
+  'marketplaceUninstall',
+  'requestMarketplaceInstalled',
   'fetchAllModels',
   'openVsCodeSettings',
   'openEditorSettings',
@@ -378,6 +385,66 @@ export function completeMcpStatuses(
       error: disabled ? 'Disabled' : reason || 'The server did not report a connection result.',
     };
   });
+}
+
+// ---------------------------------------------------------------- marketplace
+
+/** A marketplace search result as the panel renders it. */
+export interface PanelMarketplaceRow {
+  name: string;
+  description: string;
+  author: string;
+  stars: number;
+  /** Repository URL used as the install source, absent when uninstallable. */
+  source?: string;
+  installed: boolean;
+}
+
+/** A skill folder name, normalized the way installs are sanitized. */
+function skillKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Marketplace search results -> installable rows.
+ *
+ * The install source is the skill's repository URL: `resolveInstallPath` on the
+ * host parses that form, and a row without one is shown but not installable
+ * rather than offering a button that cannot work.
+ */
+export function toMarketplaceSkillRows(
+  skills: readonly any[] | undefined,
+  installedNames: readonly string[] = [],
+): PanelMarketplaceRow[] {
+  const installed = new Set((installedNames ?? []).map(skillKey));
+  const rows: PanelMarketplaceRow[] = [];
+  for (const skill of skills ?? []) {
+    if (!skill || typeof skill.name !== 'string' || !skill.name) continue;
+    const row: PanelMarketplaceRow = {
+      name: skill.name,
+      description: typeof skill.description === 'string' ? skill.description : '',
+      author: typeof skill.author === 'string' ? skill.author : '',
+      stars: typeof skill.stars === 'number' ? skill.stars : 0,
+      // Matching is on the sanitized name, because the installed folder is
+      // derived from it rather than kept verbatim.
+      installed: installed.has(skillKey(skill.name)),
+    };
+    if (typeof skill.githubUrl === 'string' && skill.githubUrl) row.source = skill.githubUrl;
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** Installed skills -> rows that carry the folder needed to uninstall. */
+export function toInstalledSkillRows(
+  skills: readonly { name: string; description?: string; folder?: string; skillMdPath?: string }[] | undefined,
+): { name: string; description: string; folder: string; path: string }[] {
+  return (skills ?? []).map((skill) => ({
+    name: skill.name,
+    description: skill.description ?? '',
+    folder: skill.folder ?? '',
+    path: skill.skillMdPath ?? '',
+  }));
 }
 
 // ---------------------------------------------------------------- url validation
