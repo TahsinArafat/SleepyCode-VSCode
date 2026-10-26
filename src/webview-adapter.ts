@@ -702,6 +702,30 @@ export function shouldOfferSignIn(message: SleepyMsg | null | undefined): boolea
 // ---------------------------------------------------------------- change review
 
 /**
+ * Build the host messages for the change-review bulk actions.
+ *
+ * React sends `acceptAllChanges` / `rejectAllChanges` with no target, while
+ * SleepyCode resolves an edit through a conversation and the assistant turn that
+ * made it. Without a target the action is refused: staging or reverting the
+ * wrong turn's files is worse than doing nothing.
+ *
+ * Keep All stages, because staging is the reversible, inspectable step.
+ * Undo All reverts each file, which is what the button says.
+ */
+export function bulkChangeMessages(
+  type: 'acceptAllChanges' | 'rejectAllChanges',
+  conversationId: string | undefined,
+  itemId: string | undefined,
+  paths: readonly string[] | undefined,
+): SleepyMsg[] {
+  if (!conversationId || !itemId) return [];
+  const list = (paths ?? []).filter((path) => typeof path === 'string' && path);
+  if (!list.length) return [];
+  if (type === 'acceptAllChanges') return [{ type: 'gitStageChanges', conversationId, itemId, paths: list }];
+  return list.map((path) => ({ type: 'gitRevertFile', conversationId, itemId, path }));
+}
+
+/**
  * SleepyCode identifies a turn's edits by conversation + assistant item id,
  * which the React change-review actions do not carry. The host remembers the
  * newest assistant item so `diffChange`/`acceptChange`/`rejectChange` can be

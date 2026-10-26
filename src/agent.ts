@@ -291,6 +291,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly reactLastToolCall = new Map<string, string>();
   /** Last transcript items per conversation, for React actions that need a turn. */
   private readonly reactItems = new Map<string, unknown[]>();
+  /** Files the latest turn touched per conversation, for the bulk review buttons. */
+  private readonly reactPendingPaths = new Map<string, string[]>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -1042,6 +1044,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * is rewritten here using the tracked target before reaching `onMessage`.
    */
   private handleReactChangeAction(message: any): boolean {
+    if (message?.type === 'acceptAllChanges' || message?.type === 'rejectAllChanges') {
+      const conversationId = this.activeProject()?.activeConversationId;
+      const itemId = conversationId ? this.reactChangeTarget.get(conversationId) : undefined;
+      const messages = adapter.bulkChangeMessages(
+        message.type,
+        conversationId,
+        itemId,
+        conversationId ? this.reactPendingPaths.get(conversationId) : undefined,
+      );
+      this.log('info', `react.changes.${message.type}`, `${messages.length} action(s)`);
+      for (const translated of messages) void this.onMessage(translated as WebMessage);
+      return true;
+    }
     const conversationId = this.activeProject()?.activeConversationId;
     const itemId = conversationId ? this.reactChangeTarget.get(conversationId) : undefined;
     if (!conversationId || !itemId || typeof message?.path !== 'string') return false;
@@ -5690,7 +5705,10 @@ ${cached}`;
         void this.view?.webview.postMessage(adapter.pendingChangesMessage(items));
         const target = adapter.latestAssistantItemId(items);
         if (typed.id && target) this.reactChangeTarget.set(typed.id, target);
-        if (typed.id) this.reactItems.set(typed.id, Array.isArray(items) ? items : []);
+        if (typed.id) {
+          this.reactItems.set(typed.id, Array.isArray(items) ? items : []);
+          this.reactPendingPaths.set(typed.id, adapter.pendingChangesOf(items).map((change) => change.path));
+        }
       }
       // Side panels have no React screen yet, so their rows go to a QuickPick
       // instead of vanishing. The commands stay usable until they are ported.

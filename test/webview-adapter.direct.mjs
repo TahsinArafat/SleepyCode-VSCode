@@ -947,3 +947,30 @@ test('conversation search tolerates missing text', () => {
   const list = adapter.searchConversationSummaries([{ id: 'c1' }, { id: 'c2', items: [{}] }], 'x');
   assert.deepEqual(list, []);
 });
+
+// ---------------------------------------------------------------- bulk change review
+
+test('acceptAllChanges stages every pending file', () => {
+  const out = adapter.bulkChangeMessages('acceptAllChanges', 'c1', 'i1', ['a.ts', 'b.ts']);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].type, 'gitStageChanges');
+  assert.deepEqual(out[0].paths, ['a.ts', 'b.ts']);
+});
+
+test('rejectAllChanges reverts every pending file individually', () => {
+  const out = adapter.bulkChangeMessages('rejectAllChanges', 'c1', 'i1', ['a.ts', 'b.ts']);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map(m => m.path), ['a.ts', 'b.ts']);
+  assert.ok(out.every(m => m.type === 'gitRevertFile'));
+});
+
+test('bulk actions with nothing pending do nothing', () => {
+  assert.deepEqual(adapter.bulkChangeMessages('acceptAllChanges', 'c1', 'i1', []), []);
+  assert.deepEqual(adapter.bulkChangeMessages('rejectAllChanges', 'c1', 'i1', undefined), []);
+});
+
+test('bulk actions without a conversation target are refused', () => {
+  // Staging or reverting the wrong turn's files is worse than doing nothing.
+  assert.deepEqual(adapter.bulkChangeMessages('acceptAllChanges', undefined, undefined, ['a.ts']), []);
+  assert.deepEqual(adapter.bulkChangeMessages('rejectAllChanges', 'c1', undefined, ['a.ts']), []);
+});
