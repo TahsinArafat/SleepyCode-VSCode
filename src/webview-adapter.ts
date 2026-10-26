@@ -115,9 +115,42 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'startReview':
       return { type: 'reviewChanges', conversationId: message.target?.conversationId ?? '', itemId: message.target?.itemId ?? '' };
 
+    case 'cancelRun':
+      return { type: 'stop' };
+
+    case 'fetchModels':
+      return { type: 'refreshModels' };
+
+    case 'openFile': {
+      const out: SleepyMsg = { type: 'openFile', path: message.path };
+      if (typeof message.startLine === 'number') out.line = message.startLine;
+      return out;
+    }
+
+    case 'openMention':
+      return { type: 'openFile', path: message.path };
+
+    case 'browseAttachments':
+      return { type: 'requestFilePicker' };
+
+    case 'openSettings':
+      return { type: 'requestSettings' };
+
+    case 'openLog':
+      return { type: 'requestExtensionLogs' };
+
+    case 'searchFiles':
+      return { type: 'fileMentionQuery', query: message.query };
+
+    case 'selectConversation':
+      return { type: 'openConversation', id: message.id };
+
+    case 'deleteConversation':
+      return { type: 'deleteConversation', id: message.id };
+
     default:
-      // React-only messages (`persistTurns`, queue actions, steering, goals,
-      // worktrees, approvals) have no SleepyCode counterpart yet.
+      // React-only messages (persistTurns, queue actions, steering, goals,
+      // personas, teams, worktrees, file icons) have no SleepyCode counterpart.
       return null;
   }
 }
@@ -524,4 +557,17 @@ export function panelToQuickPickItems(message: SleepyMsg): { label: string; desc
 export function toReactMessageWhileStreaming(message: SleepyMsg, streaming: boolean): ReactMsg | null {
   if (streaming && message?.type === 'conversation') return null;
   return toReactMessage(message);
+}
+
+// ---------------------------------------------------------------- sign-in
+
+/**
+ * SleepyCode's sign-in banner lives in the vanilla webview, which the React
+ * base replaces. Rather than leave a signed-out user with no way to sign in,
+ * the host offers it once when the account status comes back signed out.
+ */
+export function shouldOfferSignIn(message: SleepyMsg | null | undefined): boolean {
+  if (!message || message.type !== 'sleepyStatus') return false;
+  if (message.busy) return false;
+  return message.loggedIn === false;
 }

@@ -280,6 +280,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private reactMode = false;
   /** Conversations whose React transcript is live-streaming (see `post`). */
   private readonly reactStreaming = new Set<string>();
+  /** The React base has no sign-in banner, so the offer is surfaced once. */
+  private signInOffered = false;
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -840,6 +842,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
     }));
+  }
+
+  /** Start the SleepyAI browser sign-in, used by the command and the React nudge. */
+  public signIn(): void {
+    void this.onMessage({ type: 'sleepyLogin' } as WebMessage);
   }
 
   public toggleReactWebview(): void {
@@ -5375,6 +5382,7 @@ ${cached}`;
       if (typed.type === 'models' && typed.selected) {
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
+      if (adapter.shouldOfferSignIn(typed as any)) this.offerSignInOnce();
       // Side panels have no React screen yet, so their rows go to a QuickPick
       // instead of vanishing. The commands stay usable until they are ported.
       if (typed.type === 'panel') {
@@ -5383,6 +5391,18 @@ ${cached}`;
       }
     }
     void this.view?.webview.postMessage(outgoing);
+  }
+
+  /**
+   * The React base replaces the vanilla sign-in banner, so a signed-out user
+   * would otherwise have no way in. Offer it once per window.
+   */
+  private offerSignInOnce(): void {
+    if (this.signInOffered) return;
+    this.signInOffered = true;
+    void vscode.window.showInformationMessage('Sign in to SleepyAI to use models and limits.', 'Sign in').then(choice => {
+      if (choice === 'Sign in') this.signIn();
+    });
   }
 
   private showPanelAsQuickPick(message: { panel: string; rows?: { title: string; detail?: string }[]; hint?: string }): void {

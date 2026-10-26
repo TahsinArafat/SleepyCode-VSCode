@@ -457,3 +457,65 @@ test('permission requests map to an approval request', () => {
   assert.equal(out.request.requestId, 'p1');
   assert.equal(out.request.subject, 'Allow write?');
 });
+
+// ---------------------------------------------------------------- remaining outgoing
+
+test('cancelRun maps to stop', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'cancelRun', convId: 'c1' }), { type: 'stop' });
+});
+
+test('fetchModels maps to refreshModels', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'fetchModels' }), { type: 'refreshModels' });
+});
+
+test('openFile carries the path and optional line', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openFile', path: 'src/a.ts' }), { type: 'openFile', path: 'src/a.ts' });
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openFile', path: 'src/a.ts', startLine: 12 }), { type: 'openFile', path: 'src/a.ts', line: 12 });
+});
+
+test('openMention opens the mentioned path', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openMention', kind: 'file', path: 'src/b.ts' }), { type: 'openFile', path: 'src/b.ts' });
+});
+
+test('browseAttachments maps to the file picker', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'browseAttachments' }), { type: 'requestFilePicker' });
+});
+
+test('openSettings requests the settings surface', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openSettings' }), { type: 'requestSettings' });
+});
+
+test('openLog requests extension logs', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openLog' }), { type: 'requestExtensionLogs' });
+});
+
+test('searchFiles maps to a mention query', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'searchFiles', query: 'app', requestId: 1 }), { type: 'fileMentionQuery', query: 'app' });
+});
+
+test('selectConversation maps to openConversation', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'selectConversation', id: 'c3' }), { type: 'openConversation', id: 'c3' });
+});
+
+test('deleteConversation passes through', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'deleteConversation', id: 'c3' }), { type: 'deleteConversation', id: 'c3' });
+});
+
+test('messages with no SleepyCode counterpart are dropped', () => {
+  for (const type of ['setGoal', 'setMode', 'persistTurns', 'setPersona', 'getFileIcon', 'updateChatWorkspace']) {
+    assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
+  }
+});
+
+// ---------------------------------------------------------------- sign-in nudge
+
+test('signed-out status asks for a sign-in offer', () => {
+  assert.equal(adapter.shouldOfferSignIn({ type: 'sleepyStatus', loggedIn: false }), true);
+});
+
+test('signed-in or in-progress status does not', () => {
+  assert.equal(adapter.shouldOfferSignIn({ type: 'sleepyStatus', loggedIn: true }), false);
+  assert.equal(adapter.shouldOfferSignIn({ type: 'sleepyStatus', loggedIn: false, busy: true }), false);
+  assert.equal(adapter.shouldOfferSignIn({ type: 'delta', text: 'x' }), false);
+  assert.equal(adapter.shouldOfferSignIn(null), false);
+});
