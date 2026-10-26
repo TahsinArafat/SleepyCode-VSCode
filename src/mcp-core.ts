@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
-import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';
-import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
+import { jsonSchema } from 'ai';
+import { McpConnection as McpServerConnection, type McpHost } from './mcp-client.ts';
 
 /**
  * Pure MCP configuration and naming helpers.
@@ -19,8 +19,15 @@ export type McpConnection = {
   errors: string[];
   /** Tool count per server name, so a "test connection" can report it. */
   toolCounts: Record<string, number>;
+  /** Resources exposed by a connected server (empty when it has none). */
+  listResources(serverName: string): Promise<{ uri: string; name?: string; description?: string; mimeType?: string }[]>;
+  /** Read one resource's text contents. */
+  readResource(serverName: string, uri: string): Promise<string>;
   close(): Promise<void>;
 };
+
+/** Auth/transport state reported per server, used by the settings surface. */
+export type McpServerState = 'ok' | 'auth_required' | 'error';
 
 
 /** Most OpenAI-compatible providers reject tool names longer than this. */
@@ -161,51 +168,107 @@ export function parseMcpServers(raw: string): Record<string, McpServer> {
  * Lives here (not `mcp.ts`) so the strip-types test runner can exercise a real
  * connection without a `vscode` shim.
  */
-/**
- * Connect one MCP server and merge its tools into the accumulating result.
- *
- * This is the single connection routine: both the legacy `mcpServers` JSON and
- * the saved-connections UI route through it, so a transport fix lands in both
- * places instead of only one.
- */
-async function connectOne(
-  serverName: string,
-  server: McpServer & { headers?: Record<string, string> },
-  workspaceRoot: string,
-  approve: (title: string, detail: string) => Promise<void>,
-  into: { clients: MCPClient[]; tools: Record<string, any>; usedNames: Set<string>; instructions: string[]; toolCounts: Record<string, number> },
-): Promise<void> {
-  const client = 'url' in server && server.url
-    ? await createMCPClient({ transport: { type: server.transport ?? 'http', url: server.url, headers: server.headers } })
-    : await createMCPClient({
-      transport: new Experimental_StdioMCPTransport({
-        command: (server as StdioServer).command,
-        args: (server as StdioServer).args,
-        // Only the environment the command actually references (plus PATH and
-        // friends) is forwarded, so a server cannot read unrelated secrets.
-        env: (server as StdioServer).env
-          ? { ...restrictedEnv(server as StdioServer), ...(server as StdioServer).env }
-          : restrictedEnv(server as StdioServer),
-        cwd: (server as StdioServer).cwd ? path.resolve(workspaceRoot, (server as StdioServer).cwd!) : workspaceRoot,
-      }),
-    });
-  into.clients.push(client);
-  if (client.instructions?.trim()) into.instructions.push(`${serverName}: ${client.instructions.trim()}`);
-  const serverTools = await client.tools();
-  into.toolCounts[serverName] = Object.keys(serverTools).length;
-  for (const [toolName, definition] of Object.entries(serverTools)) {
-    const exposedName = uniqueToolName(mcpToolName(serverName, toolName), into.usedNames);
-    const original = definition as any;
-    into.tools[exposedName] = {
-      ...original,
-      description: `[MCP: ${serverName}] ${original.description ?? toolName}`,
-      execute: async (input: unknown, options: unknown) => {
-        await approve(`Use ${serverName}: ${toolName}?`, JSON.stringify(input ?? {}, null, 2));
-        if (typeof original.execute !== 'function') throw new Error(`MCP tool '${toolName}' is not executable.`);
-        return original.execute(input, options);
+/** Turn one configured server definition into an `McpServerConfig` for the client. */
+function toClientConfig(name: string, server: McpServer & { headers?: Record<string, string>; oauth?: { clientId?: string; scopes?: string[] } }): {
+  config: { name: string; transport: 'stdio' | 'sse' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string>; oauth?: { clientId?: string; scopes?: string[] }; enabled: boolean };
+  cwd?: string;
+} {
+  if ('url' in server && server.url) {
+    return {
+      config: {
+        name,
+        transport: server.transport === 'sse' ? 'sse' : 'http',
+        url: server.url,
+        headers: server.headers,
+        oauth: server.oauth,
+        enabled: true,
       },
     };
   }
+  const stdio = server as StdioServer;
+  return {
+    config: { name, transport: 'stdio', command: stdio.command, args: stdio.args, env: stdio.env, enabled: true },
+    cwd: stdio.cwd,
+  };
+}
+
+/**
+ * Connect a prepared set of server definitions and expose their tools.
+ *
+ * One routine serves both the legacy `mcpServers` JSON and the saved-connections
+ * UI: credentials are resolved by the caller, transport and tool discovery
+ * happen here. Callers that own credential lookup (OAuth, API keys) resolve
+ * their headers first and hand the finished definitions over.
+ */
+export async function connectServerDefinitions(
+  definitions: Record<string, McpServer & { headers?: Record<string, string>; oauth?: { clientId?: string; scopes?: string[] } }>,
+  workspaceRoot: string,
+  approve: (title: string, detail: string) => Promise<void>,
+  host?: McpHost,
+): Promise<McpConnection> {
+  const connections = new Map<string, McpServerConnection>();
+  const tools: Record<string, any> = {};
+  const usedNames = new Set<string>();
+  const instructions: string[] = [];
+  const errors: string[] = [];
+  const toolCounts: Record<string, number> = {};
+
+  for (const [serverName, server] of Object.entries(definitions)) {
+    const { config, cwd } = toClientConfig(serverName, server);
+    const root = cwd ? path.resolve(workspaceRoot, cwd) : workspaceRoot;
+    const connection = new McpServerConnection(config, root, host);
+    try {
+      await connection.connect();
+      connections.set(serverName, connection);
+      if (connection.tools.length === 0 && connection.lastError) throw new Error(connection.lastError);
+      toolCounts[serverName] = connection.tools.length;
+      // Server-provided guidance goes into the system prompt, so it is scoped by
+      // server name in the same way the tools are.
+      if (connection.instructions?.trim()) instructions.push(`${serverName}: ${connection.instructions.trim()}`);
+      for (const tool of connection.tools) {
+        const exposedName = uniqueToolName(mcpToolName(serverName, tool.name), usedNames);
+        const schema = tool.inputSchema ?? { type: 'object', properties: {} };
+        tools[exposedName] = {
+          description: `[MCP: ${serverName}] ${tool.description ?? tool.name}`,
+          inputSchema: jsonSchema(schema as Record<string, unknown>),
+          execute: async (input: unknown, options: { abortSignal?: AbortSignal } = {}) => {
+            await approve(`Use ${serverName}: ${tool.name}?`, JSON.stringify(input ?? {}, null, 2));
+            return connection.callTool(tool.name, input ?? {}, options.abortSignal);
+          },
+        };
+      }
+    } catch (error) {
+      await connection.dispose?.bind(connection)?.();
+      connection.dispose();
+      const message = error instanceof Error ? error.message : String(error);
+      // A server that needs interactive sign-in is not a failure to report as
+      // "broken"; the settings surface turns this into a Sign in action.
+      errors.push(`${serverName}: ${message}`);
+    }
+  }
+
+  return {
+    tools,
+    instructions,
+    errors,
+    toolCounts,
+    listResources: async (serverName: string) => {
+      const connection = connections.get(serverName);
+      if (!connection) return [];
+      return connection.listResources();
+    },
+    readResource: async (serverName: string, uri: string) => {
+      const connection = connections.get(serverName);
+      if (!connection) return '';
+      return connection.readResource(uri);
+    },
+    close: async () => {
+      await Promise.allSettled([...connections.values()].map((connection) => {
+        connection.dispose();
+        return Promise.resolve();
+      }));
+    },
+  };
 }
 
 /**
@@ -217,41 +280,31 @@ export async function connectMcpServers(
   raw: string,
   workspaceRoot: string,
   approve: (title: string, detail: string) => Promise<void>,
+  host?: McpHost,
 ): Promise<McpConnection> {
   const definitions = parseMcpServers(raw);
-  const resolved: Record<string, McpServer> = {};
+  const resolved: Record<string, McpServer & { headers?: Record<string, string> }> = {};
   for (const [name, server] of Object.entries(definitions)) {
     resolved[name] = 'url' in server
       ? { ...server, headers: expandEnvironment(server.headers) }
       : { ...server, env: expandEnvironment(server.env) };
   }
-  return connectServerDefinitions(resolved, workspaceRoot, approve);
+  return connectServerDefinitions(resolved, workspaceRoot, approve, host);
 }
 
 /**
- * Connect a prepared set of server definitions. Callers that own credential
- * lookup (OAuth, API keys) resolve their headers first and hand the finished
- * definitions here.
+ * An MCP connection with nothing in it, for the timeout and failure paths.
+ * Keeping one constructor means the placeholders cannot drift from the real
+ * shape as capabilities are added.
  */
-export async function connectServerDefinitions(
-  definitions: Record<string, McpServer & { headers?: Record<string, string> }>,
-  workspaceRoot: string,
-  approve: (title: string, detail: string) => Promise<void>,
-): Promise<McpConnection> {
-  const into = { clients: [] as MCPClient[], tools: {} as Record<string, any>, usedNames: new Set<string>(), instructions: [] as string[], toolCounts: {} as Record<string, number> };
-  const errors: string[] = [];
-  for (const [serverName, server] of Object.entries(definitions)) {
-    try {
-      await connectOne(serverName, server, workspaceRoot, approve, into);
-    } catch (error) {
-      errors.push(`${serverName}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+export function emptyMcpConnection(errors: string[] = []): McpConnection {
   return {
-    tools: into.tools,
-    instructions: into.instructions,
+    tools: {},
+    instructions: [],
     errors,
-    toolCounts: into.toolCounts,
-    close: async () => { await Promise.allSettled(into.clients.map(client => client.close())); },
+    toolCounts: {},
+    listResources: async () => [],
+    readResource: async () => '',
+    close: async () => {},
   };
 }

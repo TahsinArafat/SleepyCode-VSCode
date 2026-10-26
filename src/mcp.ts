@@ -11,7 +11,7 @@ import {
   type McpServer,
 } from './mcp-core';
 
-export { connectMcpServers, expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
+export { connectMcpServers, emptyMcpConnection, expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
 export type { HttpServer, McpConnection, McpServer, StdioServer } from './mcp-core';
 
 const MCP_CONNECTIONS_KEY = 'sleepycode.mcpConnections';

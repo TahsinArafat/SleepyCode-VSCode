@@ -30,7 +30,7 @@ import * as adapter from './webview-adapter';
 import { renderReactWebviewHtml } from './webview-react';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
-import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
+import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
 import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, refreshSleepyToken, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
 import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
 import { TerminalManager } from './terminal';
@@ -3297,7 +3297,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let workStartedAt = 0;
     let planItem: WorkItem | undefined;
     let planState: PlanState | undefined;
-    let mcpConnection: McpConnection | undefined;
+    // Seeded with an empty connection so the run path always has a usable
+    // object; every branch below replaces it with a real one when it can.
+    let mcpConnection: McpConnection = emptyMcpConnection();
     let mcpCached = false;
     // Keep the in-progress record durable while text is streaming and whenever
     // a tool starts/finishes or changes a file. Completed SDK response messages
@@ -3530,17 +3532,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
         const baseConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
           ? await Promise.race([
-            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], toolCounts: {}, close: async () => { } })),
-            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], toolCounts: {}, close: async () => { } }), 10_000)),
+            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => emptyMcpConnection([`MCP configuration: ${errorMessage(error)}`])),
+            new Promise<McpConnection>(resolve => setTimeout(() => resolve(emptyMcpConnection(['MCP servers did not finish connecting within 10s.'])), 10_000)),
           ])
-          : { tools: {}, instructions: [], errors: [], toolCounts: {}, close: async () => { } };
+          : emptyMcpConnection();
         this.log('info', 'run.mcp.legacy.done');
         this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
         if (savedConnections.some((c) => c.enabled)) {
           this.log('info', 'run.mcp.saved.start');
           const extra = await Promise.race([
             connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
-            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], toolCounts: {}, close: async () => { } }, statuses: [] }), 10_000)),
+            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: emptyMcpConnection(['Saved MCP timed out']), statuses: [] }), 10_000)),
           ]);
           this.log('info', 'run.mcp.saved.done');
           mcpConnection = {
@@ -3548,6 +3550,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             instructions: [...baseConnection.instructions, ...extra.connection.instructions],
             errors: [...baseConnection.errors, ...extra.connection.errors],
             toolCounts: { ...baseConnection.toolCounts, ...extra.connection.toolCounts },
+            // Resources are looked up by server name, so the merged view asks
+            // each side and takes whichever knows the server.
+            listResources: async (serverName: string) => {
+              const fromBase = await baseConnection.listResources(serverName).catch(() => []);
+              if (fromBase.length) return fromBase;
+              return extra.connection.listResources(serverName).catch(() => []);
+            },
+            readResource: async (serverName: string, uri: string) => {
+              const fromBase = await baseConnection.readResource(serverName, uri).catch(() => '');
+              if (fromBase) return fromBase;
+              return extra.connection.readResource(serverName, uri).catch(() => '');
+            },
             close: async () => {
               await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
             },

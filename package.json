@@ -272,6 +272,7 @@
   "dependencies": {
     "@ai-sdk/mcp": "^2.0.30",
     "@ai-sdk/openai-compatible": "^3.0.26",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "ai": "^7.0.57",
     "katex": "^0.18.7",
     "marked": "^18.1.1",
