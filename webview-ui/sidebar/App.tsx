@@ -20,7 +20,7 @@ import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTi
 import { History } from "./components/History";
 import { MessageActions } from "./components/MessageActions";
 import { WorkingSection } from "./components/WorkingSection";
-import { splitWork, hasLiveWork } from "./workPresentation";
+import { collapsePlanBlocks, splitWork, hasLiveWork } from "./workPresentation";
 import { QueuedMessageRow } from "./components/QueuedMessageRow";
 import { ThinkingStatus } from "../shared/ThinkingStatus";
 import { StaggerReveal, TextSwap } from "../shared/TextTransitions";
@@ -491,7 +491,14 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
 }) {
-  const { activity, conclusion } = splitWork(turn, running);
+  // Collapse duplicate plan cards before anything is rendered: SleepyCode's
+  // stateful plan tool is re-called for progress, and the plan file is a second
+  // card, so a run showed several with the last one empty.
+  const collapsedTurn = React.useMemo(
+    () => ({ ...turn, blocks: collapsePlanBlocks(turn.blocks) }),
+    [turn],
+  );
+  const { activity, conclusion } = splitWork(collapsedTurn, running);
   const forceOpen = turn.blocks.some(block => block.kind === "tool" && (
     !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
     block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")

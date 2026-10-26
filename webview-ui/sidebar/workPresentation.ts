@@ -9,7 +9,42 @@
 
 import type { AssistantBlock, AssistantTurn } from "./types";
 
-import { isPlanToolName } from "../../src/webview-adapter";
+import { isPlanToolName } from "../../src/webview-adapter.ts";
+
+/**
+ * Collapse the plan cards into the one that carries the artefact.
+ *
+ * SleepyCode has two plan tools: `plan` is stateful and re-called after every
+ * step (each call arrives as its own tool event), and `write_plan` saves the
+ * Markdown file. Both render as a plan card, so a run showed several cards — and
+ * the last one, a progress call that omits `steps`, was empty.
+ *
+ * Preference order: the file-backed card, then the last card that still has
+ * steps. Everything else is dropped.
+ */
+export function collapsePlanBlocks<T extends { kind: string; name?: string; input?: any; result?: string }>(blocks: T[]): T[] {
+  const plans = blocks.filter((block) => block.kind === "tool" && isPlanToolName(block.name));
+  if (plans.length < 2) return blocks;
+  const fileBacked = [...plans].reverse().find((block) => Boolean(block.result && /\.md\b/.test(block.result)));
+  const withSteps = [...plans].reverse().find((block) => Array.isArray(block.input?.steps) && block.input.steps.length);
+  const keep = fileBacked ?? withSteps ?? plans[plans.length - 1];
+  return blocks.filter((block) => !isPlanToolName(block.kind === "tool" ? block.name : undefined) || block === keep);
+}
+
+/**
+ * The body a plan card should render.
+ *
+ * A file-backed plan carries `content`. The stateful `plan` tool carries ordered
+ * `steps` instead, so the checklist is synthesised rather than leaving the card
+ * blank when the step list is all the model supplied.
+ */
+export function planBlockContent(input: any): string {
+  if (typeof input?.content === "string" && input.content.trim()) return input.content;
+  const steps: unknown = input?.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return "";
+  const done: number[] = Array.isArray(input?.doneSteps) ? input.doneSteps : [];
+  return steps.map((step, index) => `${done.includes(index) ? "- [x]" : "- [ ]"} ${String(step)}`).join("\n");
+}
 
 /**
  * Blocks kept out of the folded work history.

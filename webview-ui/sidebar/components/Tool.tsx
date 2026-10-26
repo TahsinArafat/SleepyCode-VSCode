@@ -354,7 +354,10 @@ const SUBAGENT_TOOL_ACTIVITY: Record<string, string> = {
 function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (path: string) => void }) {
   const i = block.input || {};
   const title: string = i.title || "Plan";
-  const content: string = i.content || "";
+  // A file-backed plan carries `content`; the stateful plan tool carries ordered
+  // `steps` instead. Synthesis keeps the card from rendering as an empty shell —
+  // which is what a progress call (no steps, no content) looked like.
+  const content: string = planBlockContent(i);
   // The write_plan result is "wrote plan to .plans/<file>.md".
   // The result is only a path when it looks like one. Stripping a prefix left the
   // whole tool result as the "path" whenever the wording differed, and opening
