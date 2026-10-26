@@ -293,6 +293,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly reactItems = new Map<string, unknown[]>();
   /** Files the latest turn touched per conversation, for the bulk review buttons. */
   private readonly reactPendingPaths = new Map<string, string[]>();
+  /** Serialises draft writes so a keystroke burst cannot interleave. */
+  private chatWorkspaceWrite: Promise<void> = Promise.resolve();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -810,6 +812,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
+      if (this.reactMode && message?.type === 'updateChatWorkspace') {
+        void this.persistChatWorkspace(message.state);
+        return;
+      }
       if (this.reactMode && message?.type === 'searchConversations') {
         // The history panel searches over the host's real conversations; the
         // webview only holds summaries. Without this the search box did nothing.
@@ -833,7 +839,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const translated = this.reactMode ? adapter.toSleepyMessage(message) : message;
-      // React sends messages with no SleepyCode counterpart (drafts, queue
+      // React sends messages with no SleepyCode counterpart (queue
       // actions, goals). Dropping them keeps the host handler from having to
       // understand a protocol it does not speak.
       if (!translated) return;
@@ -876,6 +882,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
       approvalMode: this.config().approvalMode,
+      // Drafts and open tabs live per workspace; without this they are lost on
+      // every reload.
+      workspaceState: this.readChatWorkspace(),
     }));
   }
 
@@ -965,6 +974,36 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       return { ok: false, text: errorMessage(error) };
     }
+  }
+
+  /**
+   * Drafts and open tabs, keyed per workspace.
+   *
+   * A React-mode capability: the classic webview never persisted drafts, so there
+   * was no existing mechanism to reuse. Keyed by the workspace path so two
+   * windows on different folders do not share a draft.
+   */
+  private chatWorkspaceKey(): string {
+    return `sleepycode.chatWorkspace.${this.workspaceRoot()?.fsPath ?? 'none'}`;
+  }
+
+  private readChatWorkspace(): unknown {
+    return this.context.globalState.get<unknown>(this.chatWorkspaceKey(), undefined);
+  }
+
+  private persistChatWorkspace(update: unknown): Promise<void> {
+    const key = this.chatWorkspaceKey();
+    const current = this.readChatWorkspace() as Record<string, unknown> | undefined;
+    const merged = adapter.mergeWorkspaceState(current as never, update as never);
+    const storable = adapter.toStorableWorkspaceState(merged);
+    if (storable.trimmed) {
+      // Say so rather than silently dropping an attachment the user still sees
+      // in the composer.
+      this.log('warn', 'chatWorkspace.draft.trimmed', 'attachments too large to persist');
+    }
+    const { trimmed: _trimmed, ...state } = storable;
+    this.chatWorkspaceWrite = this.chatWorkspaceWrite.then(() => this.context.globalState.update(key, state));
+    return this.chatWorkspaceWrite;
   }
 
   private settingsPanelHost(): SettingsPanelHost {

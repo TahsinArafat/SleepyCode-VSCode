@@ -502,7 +502,9 @@ test('deleteConversation passes through', () => {
 });
 
 test('messages with no SleepyCode counterpart are dropped', () => {
-  for (const type of ['setGoal', 'setMode', 'persistTurns', 'setPersona', 'getFileIcon', 'updateChatWorkspace']) {
+  // updateChatWorkspace is now persisted by the host, so it is no longer in
+  // this list.
+  for (const type of ['setGoal', 'setMode', 'persistTurns', 'setPersona', 'getFileIcon']) {
     assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
   }
 });
@@ -1003,4 +1005,61 @@ test('mention categories SleepyCode cannot search are dropped, not guessed', () 
   for (const kind of ['docs', 'chats', 'branch', 'terminals', 'code']) {
     assert.equal(adapter.toSleepyMessage({ type: 'searchMentions', kind, query: 'x', requestId: 3 }), null, `${kind} should be dropped`);
   }
+});
+
+// ---------------------------------------------------------------- drafts and tabs
+
+test('updateChatWorkspace is kept for the host to persist', () => {
+  const out = adapter.toSleepyMessage({ type: 'updateChatWorkspace', state: { drafts: {} } });
+  assert.equal(out.type, 'updateChatWorkspace');
+  assert.deepEqual(out.state, { drafts: {} });
+});
+
+test('a draft survives the round trip', () => {
+  const merged = adapter.mergeWorkspaceState(
+    { openTabs: [], drafts: {} },
+    { drafts: { c1: { text: 'half-typed thought', attachments: [] } } },
+  );
+  assert.equal(merged.drafts.c1.text, 'half-typed thought');
+});
+
+test('a partial update leaves the other half alone', () => {
+  const merged = adapter.mergeWorkspaceState(
+    { openTabs: ['a', 'b'], drafts: { a: { text: 'x', attachments: [] } } },
+    { openTabs: ['a'] },
+  );
+  assert.deepEqual(merged.openTabs, ['a']);
+  assert.equal(merged.drafts.a.text, 'x', 'a tabs-only update must not drop drafts');
+});
+
+test('clearing drafts is respected rather than merged', () => {
+  const merged = adapter.mergeWorkspaceState({ openTabs: [], drafts: { a: { text: 'x', attachments: [] } } }, { drafts: {} });
+  assert.deepEqual(merged.drafts, {});
+});
+
+test('oversized image data is not persisted', () => {
+  // Drafts live in globalState, which is not meant to hold megabytes of base64.
+  const big = 'data:image/png;base64,' + 'A'.repeat(400_000);
+  const state = adapter.toStorableWorkspaceState({
+    openTabs: ['c1'],
+    drafts: { c1: { text: 'keep me', attachments: [{ id: '1', name: 'shot.png', mime: 'image/png', data: big, kind: 'image' }] } },
+  });
+  assert.equal(state.drafts.c1.text, 'keep me');
+  // The image is dropped and the user is told, rather than silently losing it.
+  assert.equal(state.drafts.c1.attachments.length, 0);
+  assert.equal(state.trimmed, true);
+});
+
+test('small attachments are kept', () => {
+  const state = adapter.toStorableWorkspaceState({
+    openTabs: [],
+    drafts: { c1: { text: 'x', attachments: [{ id: '1', name: 'a.txt', mime: 'text/plain', data: 'small', kind: 'text' }] } },
+  });
+  assert.equal(state.drafts.c1.attachments.length, 1);
+  assert.equal(state.trimmed, false);
+});
+
+test('junk workspace state is tolerated', () => {
+  assert.deepEqual(adapter.toStorableWorkspaceState(undefined).openTabs, []);
+  assert.deepEqual(adapter.toStorableWorkspaceState({ drafts: 'nope' }).drafts, {});
 });

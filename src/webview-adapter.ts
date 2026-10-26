@@ -181,6 +181,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
         ? { type: 'fileMentionQuery', query: message.query ?? '' }
         : null;
 
+    case 'updateChatWorkspace':
+      // Persisted by the host: drafts and open tabs are the only webview state
+      // that would otherwise be lost on reload.
+      return { type: 'updateChatWorkspace', state: message.state };
+
     case 'searchConversations':
       // Answered by the host, which owns the conversation list; the request id
       // comes back so the webview can drop a stale answer.
@@ -644,6 +649,8 @@ export function buildInitialState(input: {
   turns?: Turn[];
   usedTokens?: number;
   approvalMode?: string;
+  /** Drafts and open tabs restored from the host's per-workspace storage. */
+  workspaceState?: unknown;
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -657,6 +664,7 @@ export function buildInitialState(input: {
     usedTokens: input.usedTokens ?? 0,
     workspaceRoot: input.workspaceRoot,
     approvalPolicy: approvalPolicyForMode(input.approvalMode),
+    ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
   };
 }
 
@@ -934,4 +942,62 @@ export function conversationSearchResults(
   archived = false,
 ): ReactMsg {
   return { type: 'conversationSearchResults', requestId, list: searchConversationSummaries(conversations, query, archived) };
+}
+
+// ---------------------------------------------------------------- drafts and tabs
+
+/** Drafts plus open tabs, as the webview keeps them. */
+interface WorkspaceState {
+  openTabs: string[];
+  drafts: Record<string, { text: string; attachments: { id?: string; name?: string; mime?: string; data?: string; kind?: string }[] }>;
+}
+
+/**
+ * Merge a partial workspace update into the stored state.
+ *
+ * The webview posts drafts and tabs separately, so a tabs-only update must not
+ * wipe drafts. An explicit empty object still clears, which is how "new chat"
+ * discards drafts — that is why presence is checked rather than truthiness.
+ */
+export function mergeWorkspaceState(
+  current: Partial<WorkspaceState> | undefined,
+  update: Partial<WorkspaceState> | undefined,
+): WorkspaceState {
+  const base: WorkspaceState = {
+    openTabs: Array.isArray(current?.openTabs) ? current!.openTabs : [],
+    drafts: current?.drafts && typeof current.drafts === 'object' ? current.drafts : {},
+  };
+  if (Array.isArray(update?.openTabs)) base.openTabs = update.openTabs;
+  if (update?.drafts && typeof update.drafts === 'object') base.drafts = update.drafts;
+  return base;
+}
+
+/** Upper bound on persisted draft bytes; `globalState` is not a blob store. */
+const MAX_STORED_DRAFT_BYTES = 128 * 1024;
+
+/**
+ * Prepare workspace state for storage.
+ *
+ * Attachments are stripped when the payload would be large — an image draft is
+ * megabytes of base64, and writing that to `globalState` on every keystroke would
+ * bloat the extension's state. `trimmed` tells the caller so it can say the
+ * attachment was not kept instead of silently losing it.
+ */
+export function toStorableWorkspaceState(state: Partial<WorkspaceState> | undefined): WorkspaceState & { trimmed: boolean } {
+  const merged = mergeWorkspaceState(undefined, state);
+  const result: WorkspaceState = { openTabs: merged.openTabs, drafts: {} };
+  let trimmed = false;
+  for (const [id, draft] of Object.entries(merged.drafts ?? {})) {
+    if (!draft || typeof draft !== 'object') continue;
+    const text = typeof draft.text === 'string' ? draft.text : '';
+    const attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+    const withAttachments = { text, attachments };
+    if (JSON.stringify(withAttachments).length <= MAX_STORED_DRAFT_BYTES) {
+      result.drafts[id] = withAttachments;
+    } else {
+      result.drafts[id] = { text, attachments: [] };
+      trimmed = true;
+    }
+  }
+  return { ...result, trimmed };
 }
