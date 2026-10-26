@@ -97,3 +97,47 @@ test('guidance exists for every mode, so none runs unprompted', () => {
     assert.ok(mode.modeGuidance(value).length > 0, `${value} has no guidance`);
   }
 });
+
+// ---------------------------------------------------------------- plan mode grant
+
+test('plan mode may save its plan but nothing else', () => {
+  assert.equal(mode.isToolAllowedInMode('plan', 'write_plan'), true);
+  // The grant is narrow: it does not open general file writing.
+  for (const tool of ['write_file', 'replace_text', 'delete_file', 'run_command']) {
+    assert.equal(mode.isToolAllowedInMode('plan', tool), false, `${tool} must stay withheld`);
+  }
+});
+
+test('ask mode still cannot write anything at all', () => {
+  assert.equal(mode.isToolAllowedInMode('ask', 'write_plan'), false);
+  assert.equal(mode.isToolAllowedInMode('ask', 'write_file'), false);
+});
+
+test('the plan grant is never handed to a subagent', () => {
+  // A subagent has no plan to save, and the grant would widen the parent's
+  // permission through delegation.
+  assert.equal(mode.isToolAllowedForSubagent('plan', 'write_plan'), false);
+  assert.equal('write_plan' in mode.applySubagentCeiling({ write_plan: {}, read_file: {} }, 'plan'), false);
+  assert.deepEqual(mode.withheldFromSubagent({ write_plan: {} }, 'plan'), ['write_plan']);
+});
+
+test('a subagent ceiling is still a subset of the parent ceiling', () => {
+  const tools = { read_file: {}, write_plan: {}, write_file: {}, delegate_task: {} };
+  for (const value of ['agent', 'ask', 'plan']) {
+    const parent = mode.applyCeiling(tools, value);
+    const child = mode.applySubagentCeiling(tools, value);
+    for (const name of Object.keys(child)) {
+      assert.ok(name in parent, `${name} leaked in ${value}`);
+    }
+  }
+});
+
+test('ask guidance tells the model not to change any file', () => {
+  assert.match(mode.modeGuidance('ask'), /Do NOT try to change any file/);
+});
+
+test('plan guidance names write_plan and keeps it to the plan itself', () => {
+  const text = mode.modeGuidance('plan');
+  assert.match(text, /write_plan/);
+  assert.match(text, /\.sleepycode\/plans\//);
+});

@@ -1291,6 +1291,9 @@ test('read-only modes withhold every tool that changes something', () => {
     'terminal_start', 'terminal_stop', 'terminal_write',
     'worktree_create', 'worktree_merge', 'worktree_remove', 'worktree_run',
     'write_file',
+    // Withheld in ask (ask writes nothing) but granted to plan, which must be
+    // able to save the plan it produced.
+    'write_plan',
   ];
   assert.deepEqual(mutating, expected.sort());
 });
@@ -1300,6 +1303,14 @@ test('read-only modes keep every observation tool', () => {
   for (const tool of ['read_file', 'list_files', 'search_files', 'get_diagnostics', 'plan', 'web_search', 'repo_search', 'repo_symbol', 'browser_snapshot', 'browser_screenshot', 'terminal_read', 'terminal_list', 'memory_read', 'github_list_issues', 'worktree_list', 'worktree_status', 'skillsmp_search']) {
     assert.ok(readOnly.includes(tool), `${tool} should stay available in plan mode`);
   }
+});
+
+test('plan mode may use write_plan from the real tool set, and ask may not', () => {
+  assert.ok(realTools.includes('write_plan'), 'write_plan should exist');
+  assert.equal(adapter.isToolAllowedInMode('plan', 'write_plan'), true);
+  assert.equal(adapter.isToolAllowedInMode('ask', 'write_plan'), false);
+  // The grant must not open general writing.
+  assert.equal(adapter.isToolAllowedInMode('plan', 'write_file'), false);
 });
 
 test('agent mode withholds nothing from the real tool set', () => {

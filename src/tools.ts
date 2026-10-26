@@ -43,6 +43,12 @@ export interface ToolContext {
    * blocking a run on a question nobody can see.
    */
   ask?: (header: string, questions: AskQuestionInput[], callId?: string) => Promise<Record<string, string[]>>;
+  /**
+   * Save a plan as a Markdown file. Present only where the mode permits it, and
+   * it chooses the path itself — the model supplies a title and body, never a
+   * path, so this cannot become a general write.
+   */
+  writePlan?: (title: string, content: string) => Promise<{ path: string }>;
   memory?: { path: string; read(): Promise<string>; write(content: string, reason?: string): Promise<void> };
   repoIndex?: RepoIndex;
   repoMemory?: SourceCitedMemory;
@@ -87,6 +93,18 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
           const answer = picked.length ? picked.join(', ') : '(skipped)';
           return `Q: ${item.question}\nA: ${answer}`;
         }).join('\n\n');
+      },
+    }),
+    write_plan: tool({
+      description: 'Save the plan you produced as a Markdown file under .sleepycode/plans/. Use this in Plan mode to leave the plan behind for the user; it cannot write project files. The file name comes from the title.',
+      inputSchema: z.object({
+        title: z.string().min(1).max(120).describe('Short plan title; becomes the file name, e.g. "Add auth".'),
+        content: z.string().min(1).describe('The plan itself, in Markdown: goal, files it would touch, ordered steps, and how each step would be verified.'),
+      }),
+      execute: async ({ title, content }: { title: string; content: string }) => {
+        if (!ctx.writePlan) throw new Error('This mode cannot save a plan file.');
+        const { path } = await ctx.writePlan(title, content);
+        return `Wrote the plan to ${path}.`;
       },
     }),
     list_files: tool({

@@ -29,6 +29,7 @@ import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from '
 import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
 import * as modeRules from './agent-mode';
+import * as planFile from './plan-file';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -4127,7 +4128,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ? subagentTools
           : Object.fromEntries(Object.entries(subagentTools).filter(([name]) => !modeRules.isMutatingTool(name)));
         delete roleTools.delegate_task;
-        const ceiling = modeRules.applyCeiling(roleTools, runMode);
+        // Run-only grants are stripped by the subagent ceiling: a subagent has no
+        // plan to save, and the grant must not flow down.
+        const ceiling = modeRules.applySubagentCeiling(roleTools, runMode);
         if (runMode !== 'agent') {
           const dropped = modeRules.withheldByCeiling(roleTools, runMode);
           this.log('info', 'subagent.ceiling', `${role} in ${runMode}: withheld ${dropped.length} (${dropped.join(',')})`);
@@ -4303,6 +4306,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           delegate,
           // Only offered when there is a UI to answer through.
           ask: (header, questions, callId) => this.askUser(conversationId, header, questions, callId, run.controller.signal),
+          // Plan mode's single narrow write. The path is derived from the title
+          // here, so the model never chooses where a file goes.
+          writePlan: runMode === 'plan'
+            ? async (title, content) => {
+              const relative = planFile.planRelativePath(title);
+              const uri = this.resolveWorkspacePath(relative);
+              await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.workspaceRoot()!, planFile.PLAN_DIR));
+              await vscode.workspace.fs.writeFile(uri, Buffer.from(planFile.planDocument(title, content), 'utf8'));
+              this.log('info', 'plan.saved', relative);
+              return { path: relative };
+            }
+            : undefined,
           memory: memoryAccess,
           repoIndex,
           repoMemory,

@@ -67,6 +67,9 @@ const MUTATING_TOOLS = [
   'github_open_pr',
   'github_pr_comment',
   'github_start_from_issue',
+  // Saving a plan writes a file, but plan mode is granted this one narrow tool
+  // (see MODE_GRANTS) because planning has to leave an artefact behind.
+  'write_plan',
 ];
 
 /** Prefixes whose tools mutate, so a newly added tool in the family is covered. */
@@ -96,6 +99,27 @@ const BROWSER_ACTION_TOOLS = [
   'browser_new_tab', 'browser_close_tab', 'browser_switch_tab', 'browser_close', 'browser_wait',
 ];
 
+/**
+ * Tools a specific mode may use *even though* they change state.
+ *
+ * `plan` mode is read-only except that it must be able to save the plan it
+ * produced. That is one narrow, purpose-built tool whose path the tool itself
+ * chooses — not `write_file`, which can write anywhere.
+ */
+const MODE_GRANTS: Record<AgentMode, readonly string[]> = {
+  agent: [],
+  ask: [],
+  plan: ['write_plan'],
+};
+
+/**
+ * Grants that belong to the run alone and are never handed to a subagent.
+ *
+ * A subagent has no plan of its own to save, and letting one write plan files
+ * would widen the parent's permission through delegation.
+ */
+const RUN_ONLY_GRANTS = new Set<string>(['write_plan']);
+
 /** True when a tool changes state anywhere — workspace, remote, or a web page. */
 export function isMutatingTool(tool: string): boolean {
   if (NON_MUTATING_FAMILY_TOOLS.has(tool)) return false;
@@ -112,7 +136,28 @@ export function isMutatingTool(tool: string): boolean {
  */
 export function isToolAllowedInMode(mode: unknown, tool: string): boolean {
   if (mode === 'agent') return true;
+  if (knownMode(mode) && MODE_GRANTS[knownMode(mode)! as AgentMode].includes(tool)) return true;
   return !isMutatingTool(tool);
+}
+
+/**
+ * Whether a tool may be handed to a subagent.
+ *
+ * Equal to `isToolAllowedInMode` minus the run-only grants, so permissions still
+ * only ever flow down.
+ */
+export function isToolAllowedForSubagent(mode: unknown, tool: string): boolean {
+  if (RUN_ONLY_GRANTS.has(tool)) return false;
+  return isToolAllowedInMode(mode, tool);
+}
+
+/** Keep only the tools a subagent may use. */
+export function applySubagentCeiling<T extends Record<string, unknown>>(tools: T, mode: unknown): Partial<T> {
+  const allowed: Partial<T> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    if (isToolAllowedForSubagent(mode, name)) (allowed as Record<string, unknown>)[name] = tool;
+  }
+  return allowed;
 }
 
 /**
@@ -147,6 +192,13 @@ export function withheldByCeiling(tools: Record<string, unknown>, mode: unknown)
   return Object.keys(tools).filter(name => !isToolAllowedInMode(mode, name)).sort();
 }
 
+/** Names a subagent loses that the parent itself may use. */
+export function withheldFromSubagent(tools: Record<string, unknown>, mode: unknown): string[] {
+  return Object.keys(tools)
+    .filter(name => isToolAllowedInMode(mode, name) && !isToolAllowedForSubagent(mode, name))
+    .sort();
+}
+
 // ---------------------------------------------------------------- prompting
 
 /**
@@ -160,15 +212,18 @@ export function modeGuidance(mode: unknown): string {
   if (mode === 'ask') {
     return [
       'Mode: Ask (read-only).',
-      'You can read, search, inspect, ask the user questions, and delegate read-only research. You cannot change the workspace: there is no write, replace, delete, or command tool, and no browser action tool.',
+      'Do NOT try to change any file. There is no write, replace, delete, or command tool, and no browser action tool — you cannot create, edit, move or remove anything, including files you have already read.',
+      'You can read, search, inspect, ask the user questions, and delegate read-only research.',
       'Do not look for a workaround. Delegating does not help: a subagent inherits your limits, so it cannot write either. If the task needs a change, say what you would change and ask the user to switch to Agent mode.',
     ].join(' ');
   }
   if (mode === 'plan') {
     return [
       'Mode: Plan (read-only).',
-      'Investigate and produce a plan. You cannot change the workspace: there is no write, replace, delete, or command tool, and no browser action tool.',
-      'Do not look for a workaround. Delegating does not help: a subagent inherits your limits, so it cannot write either. Return the plan as your answer, with the files and steps it would touch, and ask the user to switch to Agent mode to carry it out.',
+      'Investigate and produce a plan. Do NOT try to change project files: there is no write, replace, delete, or command tool, and no browser action tool.',
+      'Your one way to leave an artefact is write_plan, which saves the plan you produced as a Markdown file under .sleepycode/plans/. Use it for the plan itself, not for project changes.',
+      'Do not look for a workaround. Delegating does not help: a subagent inherits your limits, so it cannot write either.',
+      'Save the finished plan with write_plan, then give the same plan as your answer — goal, the files it would touch, ordered steps, and how each step would be verified. Ask the user to switch to Agent mode to carry it out.',
     ].join(' ');
   }
   return [
