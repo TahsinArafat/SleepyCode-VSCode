@@ -16,6 +16,15 @@ import type { BrowserController } from './browser';
 import { summarizeConsoleErrors, summarizeNetworkErrors, stringifyEvalResult } from './browser';
 import { addPrComment, buildPrBody, commitChanges, createBranchForIssue, createPullRequest, getIssue, getPr, getReviewComments, listIssues, monitorChecks, repoSlug } from './github';
 
+export type AskQuestionInput = {
+  question: string;
+  options?: string[];
+  multiple?: boolean;
+  type?: 'choices' | 'text' | 'textArea' | 'number' | 'date';
+  required?: boolean;
+  placeholder?: string;
+};
+
 export interface ToolContext {
   root: vscode.Uri;
   skillsDir: vscode.Uri;
@@ -28,6 +37,12 @@ export interface ToolContext {
   abortSignal?: AbortSignal;
   terminals?: TerminalManager;
   delegate?: (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string) => Promise<string>;
+  /**
+   * Ask the user a question and wait for the answer. Absent when there is no UI
+   * to ask through, in which case the tool is not offered at all rather than
+   * blocking a run on a question nobody can see.
+   */
+  ask?: (header: string, questions: AskQuestionInput[], callId?: string) => Promise<Record<string, string[]>>;
   memory?: { path: string; read(): Promise<string>; write(content: string, reason?: string): Promise<void> };
   repoIndex?: RepoIndex;
   repoMemory?: SourceCitedMemory;
@@ -47,6 +62,32 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         doneSteps: z.array(z.number().int().min(0).max(20)).optional().describe('0-based indices of steps already completed. Include every step you just finished, or it stays unchecked; previously completed steps are merged in automatically.'),
       }),
       execute: async () => ctx.describePlan(),
+    }),
+    ask_user: tool({
+      description: 'Ask the user a question and wait for the answer. Use this when a genuine ambiguity blocks correct work and guessing would be wrong — not for confirmation of something you can verify yourself. Prefer offering concrete options so the answer is one click. The run pauses until the user answers or the question times out.',
+      inputSchema: z.object({
+        header: z.string().max(80).optional().describe('Short title for the question card, e.g. "Which parser?".'),
+        questions: z.array(z.object({
+          question: z.string().min(1).describe('The question, in the user\'s terms.'),
+          options: z.array(z.string().min(1)).max(20).optional().describe('Concrete choices. Omit for a free-text answer.'),
+          multiple: z.boolean().optional().describe('Allow selecting more than one option.'),
+          type: z.enum(['choices', 'text', 'textArea', 'number', 'date']).optional().describe('Answer shape. Defaults to choices when options are given, otherwise text.'),
+          required: z.boolean().optional().describe('Reject an empty answer.'),
+          placeholder: z.string().optional().describe('Hint shown in an empty text field.'),
+        })).min(1).max(10).describe('Questions to ask, shown one at a time.'),
+      }),
+      execute: async ({ header, questions }: { header?: string; questions: AskQuestionInput[] }, options?: { toolCallId?: string }) => {
+        if (!ctx.ask) throw new Error('This build cannot ask the user a question.');
+        const answers = await ctx.ask(header || 'Question', questions, options?.toolCallId);
+        if (!answers || Object.keys(answers).length === 0) return 'The user did not answer (the question timed out or was dismissed). Continue with your best judgement and say what you assumed.';
+        // Present the answers against their questions, because the model sees
+        // this text and an index-keyed object alone would be ambiguous.
+        return questions.map((item, index) => {
+          const picked = answers[String(index)] ?? [];
+          const answer = picked.length ? picked.join(', ') : '(skipped)';
+          return `Q: ${item.question}\nA: ${answer}`;
+        }).join('\n\n');
+      },
     }),
     list_files: tool({
       description: 'List workspace files matching a glob. Excludes dependencies and Git metadata.',

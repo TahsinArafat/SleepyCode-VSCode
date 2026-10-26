@@ -1305,3 +1305,45 @@ test('read-only modes keep every observation tool', () => {
 test('agent mode withholds nothing from the real tool set', () => {
   assert.deepEqual(realTools.filter((tool) => !adapter.isToolAllowedInMode('agent', tool)), []);
 });
+
+// ---------------------------------------------------------------- ask the user
+
+test('answerQuestion reaches the host', () => {
+  const out = adapter.toSleepyMessage({ type: 'answerQuestion', callId: 'call-1', answers: { '0': ['yes'] } });
+  assert.equal(out.type, 'answerQuestion');
+  assert.equal(out.callId, 'call-1');
+  assert.deepEqual(out.answers, { '0': ['yes'] });
+});
+
+test('the ask tool renders as the React question card', () => {
+  // React only renders QuestionCard for this tool name, so the mapping is what
+  // makes an answered question visible at all.
+  assert.equal(adapter.reactToolName('ask_user'), 'AskQuestion');
+});
+
+test('a question start carries the questions React needs', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', phase: 'start', id: 'call-1', tool: 'ask_user',
+    args: JSON.stringify({ header: 'Clarify', questions: [{ question: 'Which file?', options: ['a.ts', 'b.ts'] }] }),
+  });
+  assert.equal(out.event.type, 'tool-call-started');
+  assert.equal(out.event.name, 'AskQuestion');
+  assert.equal(out.event.input.header, 'Clarify');
+  assert.equal(out.event.input.questions.length, 1);
+  assert.deepEqual(out.event.input.questions[0].options, ['a.ts', 'b.ts']);
+});
+
+test('answered questions are echoed back so the card shows the choice', () => {
+  const out = adapter.questionAnswered('c1', 'call-1', { '0': ['a.ts'] });
+  assert.equal(out.type, 'questionAnswered');
+  assert.equal(out.convId, 'c1');
+  assert.equal(out.callId, 'call-1');
+  assert.deepEqual(out.answers, { '0': ['a.ts'] });
+});
+
+test('asking the user is allowed in read-only modes', () => {
+  // Asking is how the agent avoids guessing; it changes nothing itself.
+  for (const mode of ['agent', 'ask', 'plan']) {
+    assert.equal(adapter.isToolAllowedInMode(mode, 'ask_user'), true, `ask_user must be allowed in ${mode}`);
+  }
+});

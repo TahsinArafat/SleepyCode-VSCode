@@ -117,7 +117,7 @@ export const AGENT_DEFINITIONS: { id: string; name: string; color: string; promp
 ];
 
 /** Tools that stay available regardless of an agent's allow/deny policy so the UI can still report progress. */
-const AGENT_ALWAYS_ALLOWED_TOOLS = new Set(['plan']);
+const AGENT_ALWAYS_ALLOWED_TOOLS = new Set(['plan', 'ask_user']);
 
 /** Tool-name prefixes that may be granted or revoked as a group in an agent's policy. */
 const AGENT_TOOL_WILDCARDS = ['terminal_', 'skillsmp_', 'web_search', 'worktree_', 'repo_', 'browser_', 'github_'];
@@ -325,6 +325,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private checkpointAtByConversation = new Map<string, number>();
   private notifySeq = 0;
   private pendingNotifies = new Map<number, (choice: 'ok' | 'secondary' | 'cancel') => void>();
+  /**
+   * Questions waiting on the user, keyed by tool call id. A run blocks on one of
+   * these, so every entry must be resolved: by an answer, by abort, or by the
+   * timeout in `askUser`.
+   */
+  private pendingQuestions = new Map<string, (answers: Record<string, string[]>) => void>();
   private readonly terminals = new TerminalManager();
   private compactionUndoStacks = new Map<string, SessionCompactionSnapshot<TranscriptItem, ModelMessage>[]>();
   private compactionRedoStacks = new Map<string, SessionCompactionSnapshot<TranscriptItem, ModelMessage>[]>();
@@ -1052,6 +1058,46 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.log('error', 'conversation.export.failed', detail);
       void vscode.window.showErrorMessage(`Could not export the conversation: ${detail}`);
     }
+  }
+
+  /**
+   * Ask the user and wait for the answer.
+   *
+   * Deliberately blocking: the tool's result *is* the answer, so returning early
+   * would make the model guess. Every exit path resolves the promise — an answer,
+   * an aborted run, or the timeout — because a run that never resolves is a hung
+   * extension.
+   */
+  private async askUser(
+    conversationId: string,
+    header: string,
+    questions: { question: string; options?: string[]; multiple?: boolean; type?: string; required?: boolean; placeholder?: string }[],
+    callId: string | undefined,
+    signal?: AbortSignal,
+    timeoutMs = 10 * 60_000,
+  ): Promise<Record<string, string[]>> {
+    const id = callId || `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    this.log('info', 'question.asked', `${id}: ${questions.length} question(s)`);
+    return new Promise<Record<string, string[]>>((resolve) => {
+      let settled = false;
+      const finish = (answers: Record<string, string[]>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        this.pendingQuestions.delete(id);
+        resolve(answers);
+      };
+      const onAbort = () => finish({});
+      const timer = setTimeout(() => {
+        this.log('warn', 'question.timeout', id);
+        finish({});
+      }, timeoutMs);
+      if (signal?.aborted) return finish({});
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pendingQuestions.set(id, finish);
+      this.post({ type: 'question', conversationId, callId: id, header, questions });
+    });
   }
 
   private settingsPanelHost(): SettingsPanelHost {
@@ -2152,6 +2198,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('warn', 'run.stop.missing', `active=${activeId}; runs=${[...this.runs.keys()].join(',')}`);
         for (const run of this.runs.values()) run.controller.abort();
         this.post({ type: 'state', conversationId: activeId, running: false, label: '' });
+      }
+      return;
+    }
+    if (message.type === 'answerQuestion') {
+      const resolve = this.pendingQuestions.get(message.callId);
+      if (resolve) {
+        this.pendingQuestions.delete(message.callId);
+        this.log('info', 'question.answered', message.callId);
+        // Echo it so the question card renders the chosen answers instead of
+        // looking unanswered once the tool settles.
+        this.post({ type: 'questionAnswered', conversationId: this.activeProject()?.activeConversationId, callId: message.callId, answers: message.answers ?? {} });
+        resolve(message.answers ?? {});
       }
       return;
     }
@@ -4156,6 +4214,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           abortSignal: run.controller.signal,
           terminals: this.terminals,
           delegate,
+          // Only offered when there is a UI to answer through.
+          ask: (header, questions, callId) => this.askUser(conversationId, header, questions, callId, run.controller.signal),
           memory: memoryAccess,
           repoIndex,
           repoMemory,
@@ -5342,6 +5402,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private disposePendingNotifies(): void {
     for (const resolve of this.pendingNotifies.values()) resolve('cancel');
     this.pendingNotifies.clear();
+    // A question nobody can answer would otherwise leave the run blocked.
+    for (const resolve of this.pendingQuestions.values()) resolve({});
+    this.pendingQuestions.clear();
   }
 
   private workspaceRoot(): vscode.Uri | undefined {

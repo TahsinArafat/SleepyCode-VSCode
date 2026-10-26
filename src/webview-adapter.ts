@@ -165,6 +165,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'searchFiles':
       return { type: 'fileMentionQuery', query: message.query };
 
+    case 'answerQuestion':
+      return { type: 'answerQuestion', callId: message.callId, answers: message.answers ?? {} };
+
     case 'setMode':
       return { type: 'setMode', mode: message.mode };
 
@@ -342,6 +345,9 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'workPhase':
       return agentEvent(message.conversationId, { type: 'shell-notify', message: message.first ?? '' });
 
+    case 'questionAnswered':
+      return { type: 'questionAnswered', convId: message.conversationId ?? '', callId: message.callId, answers: message.answers ?? {} };
+
     case 'subagent': {
       // SleepyCode posts its own subagent lifecycle; React renders subagents as
       // Task tool cards, so the two are bridged onto that shape. Without this the
@@ -454,6 +460,7 @@ const TOOL_NAMES: Record<string, string> = {
   web_search: 'WebSearch',
   web_fetch: 'WebFetch',
   delegate: 'Task',
+  ask_user: 'AskQuestion',
   use_skill: 'Read',
   search_skills: 'FileSearch',
   install_skill: 'Write',
@@ -1122,6 +1129,11 @@ export function exportFileName(title: string | undefined): string {
     .slice(0, 70)
     .trim();
   return `${base || 'conversation'}.md`;
+}
+
+/** The reply React's question card matches on call id. */
+export function questionAnswered(conversationId: string | undefined, callId: string, answers: Record<string, string[]>): ReactMsg {
+  return { type: 'questionAnswered', convId: conversationId ?? '', callId, answers };
 }
 
 // ---------------------------------------------------------------- modes
