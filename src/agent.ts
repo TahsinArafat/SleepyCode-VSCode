@@ -36,6 +36,7 @@ import * as goalCore from './goal-core';
 import * as modelOptions from './model-options';
 import * as worktreeNaming from './worktree-naming';
 import * as queueCore from './queue-core';
+import * as featurePrefs from './feature-prefs';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -911,6 +912,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Drafts and open tabs live per workspace; without this they are lost on
       // every reload.
       workspaceState: this.readChatWorkspace(),
+      uiPrefs: this.readChatPrefs(),
     }));
     // Queued prompts and goals are host state the webview holds a copy of. They
     // must be re-sent here or a reload shows an empty queue while the host still
@@ -1020,6 +1022,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private readChatWorkspace(): unknown {
     return this.context.globalState.get<unknown>(this.chatWorkspaceKey(), undefined);
+  }
+
+  /** Chat preferences for this workspace, validated against their defaults. */
+  private readChatPrefs(): featurePrefs.ChatPrefs {
+    const stored = this.readChatWorkspace() as { prefs?: unknown } | undefined;
+    return featurePrefs.normalizePrefs(stored?.prefs);
+  }
+
+  /**
+   * Apply a feature payload's chat preferences.
+   *
+   * Only the keys the payload carries are taken, so an MCP edit — which posts
+   * the feature set without the preferences — cannot reset the user's text size
+   * or tab count.
+   */
+  private async writeChatPrefs(patch: Partial<featurePrefs.ChatPrefs>): Promise<void> {
+    const next = featurePrefs.applyPrefs(this.readChatPrefs(), patch);
+    await this.persistChatWorkspace({ prefs: next });
+    this.postConfig();
   }
 
   private persistChatWorkspace(update: unknown): Promise<void> {
@@ -1246,6 +1267,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private settingsPanelHost(): SettingsPanelHost {
     return {
       signIn: () => this.signIn(),
+      writeChatPrefs: (patch) => this.writeChatPrefs(patch),
+      readFeatures: async () => featurePrefs.featuresFromHost({
+        prefs: this.readChatPrefs(),
+        settings: {
+          systemNotifications: vscode.workspace.getConfiguration('sleepycode').get<boolean>('systemNotifications', true),
+          maxSteps: this.config().maxSteps,
+          repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+        },
+      }),
+      setApprovalMode: async (mode) => {
+        // The window's policy is already projected onto SleepyCode's single mode
+        // by `approvalModeFromPolicy`; normalising here keeps a bad value from
+        // being stored as-is.
+        await this.context.globalState.update('sleepycode.approvalMode', normalizeApprovalMode(mode));
+        this.postConfig();
+      },
       readSettings: () => ({
         model: this.config().model,
         maxSteps: this.config().maxSteps,
@@ -1258,6 +1295,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (patch.maxSteps !== undefined) await config.update('maxSteps', patch.maxSteps, vscode.ConfigurationTarget.Global);
         if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
         if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
+        if (patch.systemNotifications !== undefined) await config.update('systemNotifications', patch.systemNotifications, vscode.ConfigurationTarget.Global);
         this.log('info', 'settings.write', JSON.stringify(patch));
         this.postConfig();
       },
@@ -5909,6 +5947,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Lets the composer say a folder is needed before the user types, rather
       // than after a message silently goes nowhere.
       workspaceRoot: this.workspaceRoot()?.fsPath,
+      // The composer's preferences. Nothing produced this before, so every
+      // toggle in Settings that stored one reset on the next reload.
+      uiPrefs: this.readChatPrefs(),
     });
   }
 

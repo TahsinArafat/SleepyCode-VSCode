@@ -831,6 +831,8 @@ export function buildInitialState(input: {
   mode?: string;
   /** Drafts and open tabs restored from the host's per-workspace storage. */
   workspaceState?: unknown;
+  /** Chat preferences, so the first paint uses the stored values. */
+  uiPrefs?: unknown;
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -846,6 +848,7 @@ export function buildInitialState(input: {
     canSend: Boolean(input.workspaceRoot),
     approvalPolicy: approvalPolicyForMode(input.approvalMode),
     ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
+    ...(input.uiPrefs ? { uiPrefs: input.uiPrefs } : {}),
   };
 }
 
@@ -1131,6 +1134,8 @@ export function conversationSearchResults(
 interface WorkspaceState {
   openTabs: string[];
   drafts: Record<string, { text: string; attachments: { id?: string; name?: string; mime?: string; data?: string; kind?: string }[] }>;
+  /** Chat preferences, stored per workspace because that is where they apply. */
+  prefs?: Record<string, unknown>;
 }
 
 /**
@@ -1147,9 +1152,13 @@ export function mergeWorkspaceState(
   const base: WorkspaceState = {
     openTabs: Array.isArray(current?.openTabs) ? current!.openTabs : [],
     drafts: current?.drafts && typeof current.drafts === 'object' ? current.drafts : {},
+    prefs: current?.prefs && typeof current.prefs === 'object' ? current.prefs : {},
   };
   if (Array.isArray(update?.openTabs)) base.openTabs = update.openTabs;
   if (update?.drafts && typeof update.drafts === 'object') base.drafts = update.drafts;
+  // Preferences merge key-by-key: the settings window saves one toggle at a time,
+  // and replacing the record would reset the others.
+  if (update?.prefs && typeof update.prefs === 'object') base.prefs = { ...base.prefs, ...update.prefs };
   return base;
 }
 
@@ -1166,7 +1175,7 @@ const MAX_STORED_DRAFT_BYTES = 128 * 1024;
  */
 export function toStorableWorkspaceState(state: Partial<WorkspaceState> | undefined): WorkspaceState & { trimmed: boolean } {
   const merged = mergeWorkspaceState(undefined, state);
-  const result: WorkspaceState = { openTabs: merged.openTabs, drafts: {} };
+  const result: WorkspaceState = { openTabs: merged.openTabs, drafts: {}, prefs: merged.prefs };
   let trimmed = false;
   for (const [id, draft] of Object.entries(merged.drafts ?? {})) {
     if (!draft || typeof draft !== 'object') continue;

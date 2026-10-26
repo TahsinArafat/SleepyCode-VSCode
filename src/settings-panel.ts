@@ -27,6 +27,8 @@ import {
 } from './settings-adapter';
 
 /** What the settings window can ask the extension to do. */
+import * as featurePrefs from './feature-prefs';
+
 export interface SettingsPanelHost {
   readSettings(): StoredSettings;
   writeSettings(patch: StoredSettings): Promise<void>;
@@ -44,6 +46,12 @@ export interface SettingsPanelHost {
   refreshModels(): Promise<string[]>;
   /** Start the first-party sign-in flow. */
   signIn(): void;
+  /** Store chat preferences for this workspace. */
+  writeChatPrefs(patch: Partial<featurePrefs.ChatPrefs>): Promise<void>;
+  /** The stored feature values, so the window shows reality rather than defaults. */
+  readFeatures(): Promise<Record<string, unknown>>;
+  /** Set SleepyCode's single approval mode. */
+  setApprovalMode(mode: string): Promise<void>;
   /** Report a panel-level event to the extension log. */
   log(level: 'info' | 'warn' | 'error', event: string, detail?: string): void;
   /** Installed skills, for the Rules & Skills section. */
@@ -136,7 +144,13 @@ export class SettingsPanel {
     }
     const extras = { skills: await this.host.skills().catch(() => []), memory: this.host.memory() };
     this.host.log('info', 'settings.features.push', `servers=${connections.length} statuses=${statuses?.length ?? 0} skills=${extras.skills.length}`);
-    this.post(toPanelFeatures(connections, statuses ?? [], extras));
+    const payload = toPanelFeatures(connections, statuses ?? [], extras);
+    // The window REPLACES its whole feature state from this message, so it is the
+    // only safe carrier for the stored chat preferences and configuration. A
+    // separate partial `features` message would blank the MCP list, and omitting
+    // them leaves every toggle showing its default instead of what was saved.
+    const stored = await this.host.readFeatures().catch(() => ({}));
+    this.post({ ...payload, features: { ...payload.features, ...stored } });
   }
 
   /**
@@ -173,14 +187,30 @@ export class SettingsPanel {
       case 'getFeatures':
         await this.pushFeatures();
         return;
-      case 'saveFeatures':
-        if (Array.isArray(message.features?.mcpServers)) {
-          await this.host.writeConnections(message.features.mcpServers as PanelMcpConfig[]);
+      case 'saveFeatures': {
+        // One payload, several stores. `routeFeatureSave` decides which parts are
+        // present; each is applied only if it is, so saving a chat preference can
+        // never rewrite the MCP list and vice versa. Everything here used to be
+        // dropped except `mcpServers`, so every other control appeared to save and
+        // reset on the next open.
+        const routed = featurePrefs.routeFeatureSave(message.features);
+        if (routed.connections) {
+          await this.host.writeConnections(routed.connections as PanelMcpConfig[]);
           // Reflect the change immediately; a failed connection shows on the row
           // instead of only after the user asks to sync.
           this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         }
+        if (Object.keys(routed.prefs).length) await this.host.writeChatPrefs(routed.prefs);
+        if (Object.keys(routed.config).length) await this.host.writeSettings(routed.config);
+        if (routed.approvalMode) await this.host.setApprovalMode(routed.approvalMode);
+        // No echo. A `features` message carries MCP statuses too and the window
+        // replaces its whole state from one, so echoing a preference save would
+        // clear the MCP status rows — and re-syncing every server on each toggle
+        // is far too much work for saving a text size. The window already updated
+        // its own state optimistically; stored truth is read back on next open
+        // (pushFeatures merges it), which is where a clamped value would show.
         return;
+      }
       case 'syncMcp':
         this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         return;

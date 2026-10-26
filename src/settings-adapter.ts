@@ -232,6 +232,12 @@ export interface StoredSettings {
   maxSteps?: number;
   systemPrompt?: string;
   repoIndex?: boolean;
+  /**
+   * The window's "System notifications" toggle. Part of this shape, and written
+   * by the same handler, because a field with no key here is a toggle that saves
+   * nowhere — the defect this shape exists to prevent.
+   */
+  systemNotifications?: boolean;
 }
 
 export interface PanelSettings {
