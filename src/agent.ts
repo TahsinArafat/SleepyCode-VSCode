@@ -5450,6 +5450,19 @@ ${cached}`;
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
       if (adapter.shouldOfferSignIn(typed as any)) this.offerSignInOnce();
+      // Usage and the skill marketplace have no React screen yet. Say which
+      // command ran instead of letting it look broken.
+      const fallback = adapter.reactFallbackFor(typed as any);
+      if (fallback) {
+        void vscode.window.showInformationMessage(`${fallback} is not in the new React UI yet. Run "SleepyCode: Toggle React UI (beta)" to switch back to the classic view.`);
+        return;
+      }
+      // The classic composer owns its own shortcuts; stop is the one the agent
+      // loop also understands, so it keeps working from the palette.
+      if (typed.type === 'shortcut' && (typed as { action?: string }).action === 'stop') {
+        void this.onMessage({ type: 'stop' } as WebMessage);
+        return;
+      }
       // React keeps the change-review list in its own state, so the files a turn
       // touched travel as a separate message rather than inside the transcript.
       if (typed.type === 'conversation') {

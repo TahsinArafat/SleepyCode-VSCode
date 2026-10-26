@@ -128,6 +128,16 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'startReview':
       return { type: 'reviewChanges', conversationId: message.target?.conversationId ?? '', itemId: message.target?.itemId ?? '' };
 
+    case 'steerMessage':
+      // SleepyCode steers by queueing the text onto the running conversation.
+      return { type: 'send', text: message.text, conversationId: message.convId };
+
+    case 'queueAction':
+      if (message.action === 'remove') return { type: 'removeQueued', conversationId: message.convId, id: message.id };
+      if (message.action === 'steer') return { type: 'steerQueued', conversationId: message.convId, id: message.id };
+      // Reordering and editing queued rows have no SleepyCode counterpart.
+      return null;
+
     case 'cancelRun':
       return { type: 'stop' };
 
@@ -674,4 +684,21 @@ export function splitMentions(text: string): { text: string; files: { kind: 'fil
   }
   const stripped = text.replace(MENTION_TAG_RE, ' ').replace(/[ \t]{2,}/g, ' ').trim();
   return { text: stripped, files };
+}
+
+// ---------------------------------------------------------------- fallbacks
+
+const REACT_FALLBACKS: Record<string, string> = {
+  showUsage: 'Usage & Billing',
+  showMarketplace: 'Skill Marketplace',
+};
+
+/**
+ * Screens SleepyCode has but the React base does not. They cannot be rendered,
+ * and silently doing nothing reads as a broken command, so the host names the
+ * surface and points at the classic UI.
+ */
+export function reactFallbackFor(message: SleepyMsg | null | undefined): string | null {
+  if (!message) return null;
+  return REACT_FALLBACKS[message.type] ?? null;
 }

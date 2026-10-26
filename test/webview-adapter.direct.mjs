@@ -656,3 +656,38 @@ test('mentions merge with real attachments', () => {
   });
   assert.equal(out.attachments.length, 2);
 });
+
+// ---------------------------------------------------------------- React fallbacks
+
+test('usage and marketplace have no React screen, so they ask for a fallback', () => {
+  assert.equal(adapter.reactFallbackFor({ type: 'showUsage' }), 'Usage & Billing');
+  assert.equal(adapter.reactFallbackFor({ type: 'showMarketplace' }), 'Skill Marketplace');
+});
+
+test('other messages have no fallback', () => {
+  assert.equal(adapter.reactFallbackFor({ type: 'delta', text: 'x' }), null);
+  assert.equal(adapter.reactFallbackFor({ type: 'conversation', id: 'c' }), null);
+});
+
+// ---------------------------------------------------------------- queue + steering
+
+test('steering a running chat becomes another send', () => {
+  const out = adapter.toSleepyMessage({ type: 'steerMessage', convId: 'c1', text: 'also do X' });
+  assert.equal(out.type, 'send');
+  assert.equal(out.text, 'also do X');
+  assert.equal(out.conversationId, 'c1');
+});
+
+test('queue remove maps to removeQueued', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action: 'remove' }), { type: 'removeQueued', conversationId: 'c1', id: 'q1' });
+});
+
+test('queue steer maps to steerQueued', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action: 'steer' }), { type: 'steerQueued', conversationId: 'c1', id: 'q1' });
+});
+
+test('unsupported queue actions are dropped', () => {
+  for (const action of ['run', 'up', 'down', 'edit']) {
+    assert.equal(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action }), null, `${action} should be dropped`);
+  }
+});
