@@ -165,6 +165,22 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'searchFiles':
       return { type: 'fileMentionQuery', query: message.query };
 
+    case 'logError':
+      // The webview's own failures were invisible; the host log is where a
+      // support report can actually be diagnosed.
+      return { type: 'logError', message: message.message ?? '', info: message.info };
+
+    case 'openBrowserTab':
+      return { type: 'openBrowserTab', url: message.url };
+
+    case 'searchMentions':
+      // Only the files category has a SleepyCode equivalent. Answering docs,
+      // chats, branch or terminal searches with file hits would insert the wrong
+      // mention, so they are dropped instead.
+      return message.kind === 'files'
+        ? { type: 'fileMentionQuery', query: message.query ?? '' }
+        : null;
+
     case 'searchConversations':
       // Answered by the host, which owns the conversation list; the request id
       // comes back so the webview can drop a stale answer.

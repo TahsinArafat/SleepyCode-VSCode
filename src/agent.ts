@@ -1986,6 +1986,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       return;
     }
+    if (message.type === 'logError') {
+      // A webview crash or render error is reported here; without this it was
+      // invisible to anyone diagnosing a report.
+      this.log('error', 'webview.error', [message.message, message.info].filter(Boolean).join(' | '));
+      return;
+    }
+    if (message.type === 'openBrowserTab') {
+      // Reveal the preview tab. It is created on the first capture, so an empty
+      // preview is better than silently doing nothing.
+      this.browserPreview.update(null);
+      return;
+    }
     if (message.type === 'requestExtensionLogs') {
       this.sendExtensionLogs();
       return;

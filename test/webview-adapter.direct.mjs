@@ -974,3 +974,31 @@ test('bulk actions without a conversation target are refused', () => {
   assert.deepEqual(adapter.bulkChangeMessages('acceptAllChanges', undefined, undefined, ['a.ts']), []);
   assert.deepEqual(adapter.bulkChangeMessages('rejectAllChanges', 'c1', undefined, ['a.ts']), []);
 });
+
+// ---------------------------------------------------------------- misc actions
+
+test('logError reaches the host so webview failures are visible', () => {
+  const out = adapter.toSleepyMessage({ type: 'logError', message: 'boom', info: 'stack' });
+  assert.equal(out.type, 'logError');
+  assert.equal(out.message, 'boom');
+});
+
+test('openBrowserTab reaches the host', () => {
+  const out = adapter.toSleepyMessage({ type: 'openBrowserTab', url: 'https://example.test' });
+  assert.equal(out.type, 'openBrowserTab');
+  assert.equal(out.url, 'https://example.test');
+});
+
+test('mention search reuses the file query for file-like categories', () => {
+  const out = adapter.toSleepyMessage({ type: 'searchMentions', kind: 'files', query: 'app', requestId: 2 });
+  assert.equal(out.type, 'fileMentionQuery');
+  assert.equal(out.query, 'app');
+});
+
+test('mention categories SleepyCode cannot search are dropped, not guessed', () => {
+  // docs/chats/branch/terminals have no SleepyCode equivalent; answering them
+  // with file hits would put the wrong thing in the composer.
+  for (const kind of ['docs', 'chats', 'branch', 'terminals', 'code']) {
+    assert.equal(adapter.toSleepyMessage({ type: 'searchMentions', kind, query: 'x', requestId: 3 }), null, `${kind} should be dropped`);
+  }
+});
