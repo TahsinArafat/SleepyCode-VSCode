@@ -16,6 +16,7 @@ import { Icon, IconName } from "../../shared/icons";
 import { basename, renderMarkdown } from "../../shared/markdown";
 import { vscode } from "../../shared/vscode";
 import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
+import { planPathFromResult } from "../../../src/webview-adapter";
 
 function post(msg: OutMessage) {
   vscode.postMessage(msg);
@@ -355,7 +356,10 @@ function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (pat
   const title: string = i.title || "Plan";
   const content: string = i.content || "";
   // The write_plan result is "wrote plan to .plans/<file>.md".
-  const planPath = (block.result || "").replace(/^wrote plan to\s+/, "").trim() || undefined;
+  // The result is only a path when it looks like one. Stripping a prefix left the
+  // whole tool result as the "path" whenever the wording differed, and opening
+  // that produced ENAMETOOLONG with a JSON blob as the filename.
+  const planPath = planPathFromResult(block.result);
   const [open, toggleOpen] = useLiveDisclosure(block.status === "running");
   const done = block.status === "completed";
 
@@ -394,9 +398,11 @@ function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (pat
               <Icon name="file" /> {basename(planPath)}
             </button>
           )}
-          <button className="plan-implement" onClick={() => onImplement && onImplement(planPath || "")}>
-            <Icon name="agent" /> Implement plan
-          </button>
+          {planPath && (
+            <button className="plan-implement" onClick={() => onImplement && onImplement(planPath)}>
+              <Icon name="agent" /> Implement plan
+            </button>
+          )}
         </div>
       )}
     </div>

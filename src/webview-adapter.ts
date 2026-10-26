@@ -1160,6 +1160,45 @@ export function noWorkspaceMessage(): string {
   return 'SleepyCode needs a folder or workspace to work in. Use File → Open Folder, then send your message again.';
 }
 
+// ---------------------------------------------------------------- plan files
+
+/**
+ * Plan-tool names in every spelling that reaches the webview.
+ *
+ * `plan` is SleepyCode's stateful plan card, `write_plan` saves a plan file, and
+ * `WritePlan` is what `reactToolName` maps the first to. The React plan card
+ * answers to all of them.
+ */
+export function isPlanToolName(name: string | undefined): boolean {
+  return name === 'plan' || name === 'write_plan' || name === 'WritePlan';
+}
+
+/**
+ * The file path a plan tool reported, or `undefined` when the result is not one.
+ *
+ * This exists because the naive extraction (strip a `wrote plan to ` prefix) left
+ * the *whole tool result* as the path whenever the wording differed, and passing
+ * that to `openFile` produced `ENAMETOOLONG` with a JSON blob as the filename.
+ * A result is only a path if it has a single line, ends in `.md`, contains a
+ * separator, and stays inside the workspace.
+ */
+export function planPathFromResult(result: string | undefined): string | undefined {
+  const raw = (result ?? '').trim();
+  if (!raw || raw.includes('\n') || raw.startsWith('{') || raw.startsWith('[')) return undefined;
+  // Tolerate a prose prefix from either wording, then trailing punctuation.
+  const candidate = raw
+    .replace(/^.*?wrote (?:the )?plan to\s+/i, '')
+    .replace(/[.,;:]+$/, '')
+    .trim();
+  if (!candidate.endsWith('.md')) return undefined;
+  if (!candidate.includes('/') && !candidate.includes('\\')) return undefined;
+  if (/\s/.test(candidate)) return undefined;
+  // Stay inside the workspace: an absolute path or a traversal is not a plan file.
+  if (candidate.startsWith('/') || candidate.startsWith('~') || /^[a-z]:/i.test(candidate)) return undefined;
+  if (candidate.split(/[\\/]/).includes('..')) return undefined;
+  return candidate;
+}
+
 // ---------------------------------------------------------------- modes
 
 // The mode rules live in `agent-mode.ts` so the host, the webview and the

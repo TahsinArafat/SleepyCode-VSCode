@@ -9,7 +9,18 @@
 
 import type { AssistantBlock, AssistantTurn } from "./types";
 
-const isNotice = (block: AssistantBlock) => block.kind === "verification" || block.kind === "error" && !block.retrying || block.kind === "max-steps";
+import { isPlanToolName } from "../../src/webview-adapter";
+
+/**
+ * Blocks kept out of the folded work history.
+ *
+ * A plan is an artefact the user has to read and act on, not a step in the work:
+ * burying its card under "Worked for 12s" hid the plan and its Implement button.
+ */
+const isNotice = (block: AssistantBlock) => block.kind === "verification"
+  || (block.kind === "error" && !block.retrying)
+  || block.kind === "max-steps"
+  || (block.kind === "tool" && isPlanToolName(block.name));
 
 /** Keep the final reply and actionable notices outside folded work history. */
 export function splitWork(turn: AssistantTurn, running: boolean): { activity: AssistantBlock[]; conclusion: AssistantBlock[] } {

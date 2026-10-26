@@ -17,7 +17,10 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    // The webview imports shared modules from src/ by their real .ts paths, the
+    // same way the host config allows; esbuild resolves them either way.
+    "allowImportingTsExtensions": true,
     "types": []
   },
-  "include": ["webview-ui", "src/shared"]
+  "include": ["webview-ui", "src/shared", "src/webview-adapter.ts", "src/agent-mode.ts", "src/settings-adapter.ts", "src/plan-file.ts"]
 }

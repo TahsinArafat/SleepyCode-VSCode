@@ -1437,3 +1437,55 @@ test('the approval control is hidden wherever approval cannot apply', () => {
   }
   assert.equal(adapter.approvalAppliesInMode('agent'), true);
 });
+
+// ---------------------------------------------------------------- plan files
+
+test('a plan path is extracted from a plain path result', () => {
+  assert.equal(adapter.planPathFromResult('.sleepycode/plans/add-auth.md'), '.sleepycode/plans/add-auth.md');
+});
+
+test('a plan path survives a prose prefix', () => {
+  assert.equal(adapter.planPathFromResult('wrote plan to .plans/x.md'), '.plans/x.md');
+  assert.equal(adapter.planPathFromResult('Wrote the plan to .sleepycode/plans/x.md.'), '.sleepycode/plans/x.md');
+});
+
+test('a serialized tool result is never mistaken for a path', () => {
+  // This is the ENAMETOOLONG crash: the whole JSON blob was passed to openFile.
+  const blob = JSON.stringify({
+    type: 'tool-result', toolCallId: 'call-1', toolName: 'write_plan',
+    input: { title: 'Something Fishy', content: '# long markdown…' },
+    output: 'Wrote the plan to .sleepycode/plans/x.md', dynamic: false,
+  });
+  assert.equal(adapter.planPathFromResult(blob), undefined);
+});
+
+test('anything that is not a relative markdown path is rejected', () => {
+  for (const value of ['', '   ', 'nothing', 'read the file first', '/abs/path.md', 'a/b.txt', 'a b/c.md']) {
+    assert.equal(adapter.planPathFromResult(value), undefined, `${value} should be rejected`);
+  }
+});
+
+test('a path that tries to escape is rejected', () => {
+  assert.equal(adapter.planPathFromResult('../../etc/passwd.md'), undefined);
+  assert.equal(adapter.planPathFromResult('.sleepycode/../../x.md'), undefined);
+});
+
+test('a multi-line result is not a path', () => {
+  assert.equal(adapter.planPathFromResult('.sleepycode/plans/x.md\nand more'), undefined);
+});
+
+test('missing results are handled', () => {
+  assert.equal(adapter.planPathFromResult(undefined), undefined);
+  assert.equal(adapter.planPathFromResult(''), undefined);
+});
+
+test('every plan tool name is recognised, from the host and from the mapping', () => {
+  // SleepyCode has `plan` (stateful card) and `write_plan` (plan file); the
+  // React card answers to the mapped name.
+  for (const name of ['plan', 'write_plan', 'WritePlan']) {
+    assert.equal(adapter.isPlanToolName(name), true, `${name} should be a plan tool`);
+  }
+  for (const name of ['read_file', 'Read', 'write_file', '']) {
+    assert.equal(adapter.isPlanToolName(name), false, `${name} is not a plan tool`);
+  }
+});
