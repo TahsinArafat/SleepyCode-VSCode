@@ -284,6 +284,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private signInOffered = false;
   /** Newest assistant item per conversation, used to route React change review. */
   private readonly reactChangeTarget = new Map<string, string>();
+  /** Newest running tool call per conversation, so approvals land on its card. */
+  private readonly reactLastToolCall = new Map<string, string>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -801,6 +803,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
+      if (this.reactMode && message?.type === 'setApprovalPreset') {
+        void this.applyApprovalPreset(message.preset);
+        return;
+      }
       const translated = this.reactMode ? adapter.toSleepyMessage(message) : message;
       // React sends messages with no SleepyCode counterpart (drafts, queue
       // actions, goals). Dropping them keeps the host handler from having to
@@ -906,6 +912,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return true;
     }
     return false;
+  }
+
+  /**
+   * The React composer picks an approval preset; SleepyCode stores an approval
+   * mode. Persisting it here keeps the choice across reloads and conversations.
+   */
+  private async applyApprovalPreset(preset: unknown): Promise<void> {
+    const mode = adapter.approvalModeForPreset(preset);
+    if (!mode) return;
+    await this.context.globalState.update('sleepycode.approvalMode', mode);
+    this.postConfig();
   }
 
   /** Start the SleepyAI browser sign-in, used by the command and the React nudge. */
@@ -5440,6 +5457,16 @@ ${cached}`;
         }
       }
       const streaming = Boolean(streamId && this.reactStreaming.has(streamId));
+      // Remember the running tool call so a consent prompt can be pinned to the
+      // tool card it belongs to instead of floating at the bottom of the chat.
+      if (typed.type === 'tool' && (typed as { phase?: string }).phase === 'start' && streamId) {
+        const callId = (typed as { id?: string }).id;
+        if (callId) this.reactLastToolCall.set(streamId, callId);
+      }
+      if ((typed.type === 'notify' || typed.type === 'permission') && typed.conversationId) {
+        const callId = this.reactLastToolCall.get(typed.conversationId);
+        if (callId) (typed as { toolCallId?: string }).toolCallId = callId;
+      }
       const t = adapter.toReactMessageWhileStreaming(typed as any, streaming);
       if (!t) return; // drop untranslatable internal messages in React mode
       outgoing = t;

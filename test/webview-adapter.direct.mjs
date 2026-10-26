@@ -691,3 +691,35 @@ test('unsupported queue actions are dropped', () => {
     assert.equal(adapter.toSleepyMessage({ type: 'queueAction', convId: 'c1', id: 'q1', action }), null, `${action} should be dropped`);
   }
 });
+
+// ---------------------------------------------------------------- approval placement
+
+test('approvals attach to their tool card when a call id is known', () => {
+  const out = adapter.toReactMessage({
+    type: 'notify', id: 3, title: 'Run tests?', detail: 'npm test', toolCallId: 'call-7',
+    approval: { id: 3, conversationId: 'c1', kind: 'command' },
+  });
+  assert.equal(out.request.callId, 'call-7');
+});
+
+test('approvals without a tool call still reach the webview', () => {
+  const out = adapter.toReactMessage({
+    type: 'notify', id: 3, title: 'Delete it?', detail: '',
+    approval: { id: 3, conversationId: 'c1', kind: 'edit' },
+  });
+  assert.equal(out.type, 'approvalRequest');
+  assert.equal(out.request.callId, undefined);
+});
+
+// ---------------------------------------------------------------- approval preset
+
+test('React approval presets map onto SleepyCode modes', () => {
+  assert.equal(adapter.approvalModeForPreset('ask'), 'ask');
+  assert.equal(adapter.approvalModeForPreset('review'), 'edits');
+  assert.equal(adapter.approvalModeForPreset('allow'), 'autonomous');
+});
+
+test('an unknown preset leaves the mode unchanged', () => {
+  assert.equal(adapter.approvalModeForPreset('mystery'), undefined);
+  assert.equal(adapter.approvalModeForPreset(undefined), undefined);
+});

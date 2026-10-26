@@ -317,6 +317,9 @@ function approvalRequest(message: SleepyMsg): ReactMsg {
     request: {
       requestId: String(message.id),
       convId: approval.conversationId ?? '',
+      // With a tool call id the prompt renders on that tool's card; without one
+      // it falls back to the bottom stack, so it is always reachable.
+      callId: message.toolCallId,
       toolName: isEdit ? 'edit' : 'command',
       actionType: isEdit ? 'edits' : 'shell',
       subject: message.title ?? '',
@@ -701,4 +704,19 @@ const REACT_FALLBACKS: Record<string, string> = {
 export function reactFallbackFor(message: SleepyMsg | null | undefined): string | null {
   if (!message) return null;
   return REACT_FALLBACKS[message.type] ?? null;
+}
+
+// ---------------------------------------------------------------- approval preset
+
+const APPROVAL_PRESETS: Record<string, string> = {
+  ask: 'ask',
+  // "Review" still applies edits automatically but asks before commands, which
+  // is exactly SleepyCode's "edits" mode.
+  review: 'edits',
+  allow: 'autonomous',
+};
+
+/** Map the React composer's approval preset onto a SleepyCode approval mode. */
+export function approvalModeForPreset(preset: unknown): string | undefined {
+  return typeof preset === 'string' ? APPROVAL_PRESETS[preset] : undefined;
 }
