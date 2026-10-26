@@ -21,6 +21,8 @@ export type McpConnection = {
   errors: string[];
   /** Tool count per server name, so a "test connection" can report it. */
   toolCounts: Record<string, number>;
+  /** Exposed tool names per server, listed in the settings row. */
+  toolNames: Record<string, string[]>;
   /**
    * Per-server outcome, including servers that failed. `auth_required` means the
    * server wants a token and the settings window should offer Sign in; a plain
@@ -284,6 +286,7 @@ export async function connectServerDefinitions(
   const instructions: string[] = [];
   const errors: string[] = [];
   const toolCounts: Record<string, number> = {};
+  const toolNames: Record<string, string[]> = {};
   const authStates: Record<string, McpServerState> = {};
 
   for (const [serverName, server] of Object.entries(definitions)) {
@@ -301,6 +304,7 @@ export async function connectServerDefinitions(
       connections.set(serverName, connection);
       if (connection.tools.length === 0 && connection.lastError) throw new Error(connection.lastError);
       toolCounts[serverName] = connection.tools.length;
+      toolNames[serverName] = connection.tools.map((tool) => tool.name);
       authStates[serverName] = 'ok';
       // Server-provided guidance goes into the system prompt, so it is scoped by
       // server name in the same way the tools are.
@@ -335,6 +339,7 @@ export async function connectServerDefinitions(
     instructions,
     errors,
     toolCounts,
+    toolNames,
     authStates,
     listResources: async (serverName: string) => {
       const connection = connections.get(serverName);
@@ -418,6 +423,7 @@ export function emptyMcpConnection(errors: string[] = []): McpConnection {
     instructions: [],
     errors,
     toolCounts: {},
+    toolNames: {},
     authStates: {},
     listResources: async () => [],
     readResource: async () => '',

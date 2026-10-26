@@ -351,6 +351,8 @@ export type McpConnectionStatus = {
   state: 'ok' | 'auth_required' | 'error' | 'disabled';
   error?: string;
   toolCount?: number;
+  /** Tool names the server exposes, listed in the settings row. */
+  tools?: string[];
 };
 
 export type ContextAttachment = {

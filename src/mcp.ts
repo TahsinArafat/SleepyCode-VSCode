@@ -160,7 +160,14 @@ export async function connectToMcpConnections(
   const failures = new Set(statuses.map((status) => status.name));
   for (const name of Object.keys(definitions)) {
     if (failures.has(name)) continue;
-    statuses.push({ name, state: 'ok', toolCount: connection.toolCounts[name] ?? 0 });
+    statuses.push({
+      name,
+      state: connection.authStates[name] === 'auth_required' ? 'auth_required' : 'ok',
+      toolCount: connection.toolCounts[name] ?? 0,
+      // Names, not just the count: the settings row lists them, and without
+      // them a connected server renders "No tools exposed" beside "6 tools".
+      tools: connection.toolNames[name] ?? [],
+    });
   }
   for (const connectionData of connections.filter((c) => !c.enabled)) statuses.push({ name: connectionData.name, state: 'disabled' });
   return { connection, statuses };

@@ -3683,6 +3683,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             instructions: [...baseConnection.instructions, ...extra.connection.instructions],
             errors: [...baseConnection.errors, ...extra.connection.errors],
             toolCounts: { ...baseConnection.toolCounts, ...extra.connection.toolCounts },
+            toolNames: { ...baseConnection.toolNames, ...extra.connection.toolNames },
             authStates: { ...baseConnection.authStates, ...extra.connection.authStates },
             // Resources are looked up by server name, so the merged view asks
             // each side and takes whichever knows the server.

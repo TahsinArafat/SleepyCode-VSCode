@@ -98,7 +98,15 @@ export function McpPanel({
               {st?.error ? (
                 <div className="fc-error">{st.error}</div>
               ) : tools.length === 0 ? (
-                <div className="row-desc">{st?.connected ? "No tools exposed." : "Not connected — enable and Reconnect."}</div>
+                <div className="row-desc">{
+                  !st?.connected
+                    ? "Not connected — enable and Reconnect."
+                    : st.toolCount > 0
+                      // Connected with a count but no names: say what is true
+                      // rather than claiming the server exposes nothing.
+                      ? `${st.toolCount} tool${st.toolCount === 1 ? "" : "s"} available.`
+                      : "Connected, but this server exposes no tools."
+                }</div>
               ) : (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {tools.map((t) => (

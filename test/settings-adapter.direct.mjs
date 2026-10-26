@@ -260,3 +260,26 @@ test('a disabled server stays disabled in the payload', () => {
   const payload = adapter.toPanelFeatures([adapter.toMcpPanelConfig(stored)], []);
   assert.equal(payload.features.mcpServers[0].enabled, false);
 });
+
+// ---------------------------------------------------------------- tool names in status
+
+test('tool names reach the panel status', () => {
+  const row = adapter.toMcpPanelStatus({ name: 'a', state: 'ok', toolCount: 2, tools: ['search', 'open'] });
+  assert.deepEqual(row.tools, ['search', 'open']);
+  assert.equal(row.toolCount, 2);
+});
+
+test('a connected server with no names still reports its count', () => {
+  const row = adapter.toMcpPanelStatus({ name: 'a', state: 'ok', toolCount: 6 });
+  assert.equal(row.toolCount, 6);
+  assert.equal(row.tools, undefined);
+});
+
+test('completion keeps tool names when the sync supplied them', () => {
+  const rows = adapter.completeMcpStatuses(
+    [{ name: 'archiveorg', enabled: true }],
+    [{ name: 'archiveorg', state: 'ok', toolCount: 6, tools: ['search_inside', 'search_items'] }],
+  );
+  assert.deepEqual(rows[0].tools, ['search_inside', 'search_items']);
+  assert.equal(rows[0].connected, true);
+});

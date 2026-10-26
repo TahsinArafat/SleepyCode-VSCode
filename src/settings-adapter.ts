@@ -50,6 +50,8 @@ export interface StoredMcpStatus {
   state: 'ok' | 'auth_required' | 'error' | 'disabled';
   error?: string;
   toolCount?: number;
+  /** Tool names the server exposes, listed in the settings row. */
+  tools?: string[];
 }
 
 export interface PanelMcpStatus {
@@ -133,6 +135,7 @@ export function toMcpPanelStatus(status: StoredMcpStatus): PanelMcpStatus {
     toolCount: status.toolCount ?? 0,
     authState: 'none',
   };
+  if (status.tools?.length) row.tools = status.tools;
   if (status.state === 'error' && status.error) row.error = status.error;
   if (status.state === 'disabled') row.error = 'Disabled';
   return row;

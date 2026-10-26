@@ -503,3 +503,35 @@ test('a pasted command line actually starts the server', async () => {
     await connection.close();
   }
 });
+
+// ---------------------------------------------------------------- tool names
+
+test('discovered tool names are exposed per server', async () => {
+  const connection = await connectMcpServers(
+    JSON.stringify({ echo: { command: process.execPath, args: [serverPath] } }),
+    here,
+    async () => {},
+  );
+  try {
+    // The settings row lists tool names as chips; without them a connected
+    // server renders "No tools exposed" next to a correct "6 tools" badge.
+    assert.ok(connection.toolNames.echo, 'expected tool names for the echo server');
+    assert.equal(connection.toolNames.echo.length, 1);
+    assert.ok(connection.toolNames.echo[0].endsWith('echo'));
+  } finally {
+    await connection.close();
+  }
+});
+
+test('tool names and counts agree', async () => {
+  const connection = await connectMcpServers(
+    JSON.stringify({ echo: { command: process.execPath, args: [serverPath] } }),
+    here,
+    async () => {},
+  );
+  try {
+    assert.equal(connection.toolNames.echo.length, connection.toolCounts.echo);
+  } finally {
+    await connection.close();
+  }
+});
