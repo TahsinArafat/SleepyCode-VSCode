@@ -365,7 +365,10 @@ function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (pat
   // that produced ENAMETOOLONG with a JSON blob as the filename.
   const planPath = planPathFromResult(block.result);
   const [open, toggleOpen] = useLiveDisclosure(block.status === "running");
-  const done = block.status === "completed";
+  // The stateful plan tool is never "completed" as a tool call — it is re-called
+  // for progress — so its done-ness comes from the plan state itself. Without
+  // this the card never offered Implement.
+  const done = block.status === "completed" || i.done === true;
 
   return (
     <div className="plan-card">
@@ -402,11 +405,11 @@ function PlanCard({ block, onImplement }: { block: ToolBlock; onImplement?: (pat
               <Icon name="file" /> {basename(planPath)}
             </button>
           )}
-          {planPath && (
-            <button className="plan-implement" onClick={() => onImplement && onImplement(planPath)}>
-              <Icon name="agent" /> Implement plan
-            </button>
-          )}
+          {/* Implement works for a plan that has no file yet: the composer sends
+              "implement the plan you just wrote". */}
+          <button className="plan-implement" onClick={() => onImplement && onImplement(planPath || "")}>
+            <Icon name="agent" /> Implement plan
+          </button>
         </div>
       )}
     </div>

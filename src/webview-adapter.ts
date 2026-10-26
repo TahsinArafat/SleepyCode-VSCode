@@ -380,6 +380,29 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       });
     }
 
+    case 'plan': {
+      // The host's authoritative plan state. It was dropped, so the only plan
+      // card came from history — and a progress-only work item has no steps,
+      // which rendered as "(empty plan)".
+      //
+      // One stable callId per conversation, because the reducer merges input for
+      // a repeated callId: progress updates therefore update the card instead of
+      // stacking a new one. Fields the host omitted stay omitted so the merge
+      // keeps the earlier value.
+      const input: Record<string, unknown> = {};
+      if (typeof message.title === 'string' && message.title.trim()) input.title = message.title.trim();
+      if (Array.isArray(message.steps) && message.steps.length) input.steps = message.steps;
+      if (Array.isArray(message.doneSteps)) input.doneSteps = message.doneSteps;
+      if (Number.isInteger(message.activeStep)) input.activeStep = message.activeStep;
+      input.done = message.done === true;
+      return agentEvent(message.conversationId, {
+        type: 'tool-call-started',
+        callId: `plan:${message.conversationId ?? ''}`,
+        name: 'WritePlan',
+        input,
+      });
+    }
+
     case 'compactProgress':
       return agentEvent(message.conversationId, {
         type: 'compaction',
@@ -681,7 +704,10 @@ function planBlock(work: any, index: number): Block {
     kind: 'tool',
     callId: `plan-${index}`,
     name: 'WritePlan',
-    input: { title: work?.title || 'Plan', content },
+    // Carry steps and done-ness as well as the synthesised content, so the card
+    // has everything the live path has: a work item with no steps is the one
+    // that rendered as "(empty plan)".
+    input: { title: work?.title || 'Plan', content, steps, doneSteps, done: finished },
     status: work?.interrupted ? 'error' : finished ? 'completed' : 'running',
     result: work?.text,
   };

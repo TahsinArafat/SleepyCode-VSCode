@@ -1489,3 +1489,41 @@ test('every plan tool name is recognised, from the host and from the mapping', (
     assert.equal(adapter.isPlanToolName(name), false, `${name} is not a plan tool`);
   }
 });
+
+// ---------------------------------------------------------------- authoritative plan state
+
+test('the host plan message drives the plan card', () => {
+  // SleepyCode posts authoritative plan state as `type: 'plan'`, and it was
+  // dropped entirely — so the live card could only come from history, where a
+  // progress-only work item has no steps and rendered as "(empty plan)".
+  const out = adapter.toReactMessage({
+    type: 'plan', conversationId: 'c1', title: 'Something Fishy',
+    steps: ['Goal', 'Rules', 'CLI'], activeStep: 1, doneSteps: [0], done: false,
+  });
+  assert.equal(out.event.type, 'tool-call-started');
+  assert.equal(out.event.name, 'WritePlan');
+  assert.equal(out.event.input.title, 'Something Fishy');
+  assert.deepEqual(out.event.input.steps, ['Goal', 'Rules', 'CLI']);
+  assert.deepEqual(out.event.input.doneSteps, [0]);
+  assert.equal(out.event.input.done, false);
+});
+
+test('repeated plan posts address the same card, so they update instead of stacking', () => {
+  const first = adapter.toReactMessage({ type: 'plan', conversationId: 'c1', steps: ['a'], activeStep: 0 });
+  const second = adapter.toReactMessage({ type: 'plan', conversationId: 'c1', activeStep: 1, doneSteps: [0] });
+  assert.equal(first.event.callId, second.event.callId);
+  assert.equal(first.event.callId, 'plan:c1');
+});
+
+test('a completed plan is marked done so the Implement button can appear', () => {
+  const out = adapter.toReactMessage({ type: 'plan', conversationId: 'c1', steps: ['a'], done: true });
+  assert.equal(out.event.input.done, true);
+});
+
+test('a plan post without steps does not blank the card', () => {
+  // The input is merged by the reducer, so an omitted field must stay omitted
+  // rather than being sent as an empty array.
+  const out = adapter.toReactMessage({ type: 'plan', conversationId: 'c1', activeStep: 2 });
+  assert.equal(out.event.input.steps, undefined);
+  assert.equal(out.event.input.title, undefined);
+});
