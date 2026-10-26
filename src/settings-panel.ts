@@ -86,7 +86,11 @@ export class SettingsPanel {
   private async pushAll(): Promise<void> {
     this.post({ type: 'loadSettings', settings: toPanelSettings(this.host.readSettings()) });
     this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });
+    // Paint the stored servers immediately (so the list is never blank), then
+    // sync. Without the sync every row rendered as bare "idle" until the user
+    // happened to press Sync, which reads as "nothing was checked".
     await this.pushFeatures();
+    await this.pushFeatures(await this.safeSync());
     const models = await this.host.refreshModels().catch(() => []);
     this.post({ type: 'modelsFetched', models });
   }
