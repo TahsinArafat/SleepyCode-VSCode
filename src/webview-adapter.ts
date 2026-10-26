@@ -14,6 +14,8 @@
  * without an extension host (see `test/webview-adapter.direct.mjs`).
  */
 
+import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
+
 export type SleepyMsg = { type: string; [key: string]: any };
 export type ReactMsg = { type: string; [key: string]: any };
 
@@ -34,7 +36,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'ready' };
 
     case 'sendMessage': {
-      const out: SleepyMsg = { type: 'send', text: message.text };
+      // OpenCursor carries context as inline <attached /> tags in the message
+      // text. SleepyCode takes it as file attachments and sends the text alone,
+      // so the tags are lifted out here.
+      const mentions = splitMentions(message.text ?? '');
+      const out: SleepyMsg = { type: 'send', text: mentions.text };
       if (message.convId) out.conversationId = message.convId;
       if (message.model) out.model = message.model;
       // The webview keeps its optimistic turn in a placeholder session until the
@@ -42,7 +48,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       if (message.requestId) out.requestId = message.requestId;
       // Attachments stay in the React shape here; the host owns the filesystem
       // and materialises images into temp files it can actually read.
-      if (Array.isArray(message.attachments) && message.attachments.length) out.attachments = message.attachments;
+      const attachments = [
+        ...(Array.isArray(message.attachments) ? message.attachments : []),
+        ...mentions.files,
+      ];
+      if (attachments.length) out.attachments = attachments;
       return out;
     }
 
@@ -647,4 +657,21 @@ export function reactAttachmentsOf(attachments: unknown): { images: { name: stri
     if (typeof a.path === 'string' && a.path) files.push({ path: a.path });
   }
   return { images, files };
+}
+
+// ---------------------------------------------------------------- mentions
+
+/**
+ * Pull OpenCursor's inline context tags out of a message. The tags remain the
+ * source of truth for the model in OpenCursor; here they become file
+ * attachments, which is how SleepyCode supplies the same context.
+ */
+export function splitMentions(text: string): { text: string; files: { kind: 'file'; path: string }[] } {
+  const files: { kind: 'file'; path: string }[] = [];
+  if (!text || !text.includes('<attached')) return { text, files };
+  for (const mention of parseMentionTokens(text)) {
+    if (mention.path) files.push({ kind: 'file', path: mention.path });
+  }
+  const stripped = text.replace(MENTION_TAG_RE, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+  return { text: stripped, files };
 }

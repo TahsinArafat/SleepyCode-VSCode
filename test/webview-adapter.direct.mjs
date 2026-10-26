@@ -620,3 +620,39 @@ test('non-image and malformed attachments are not treated as images', () => {
 test('reactAttachmentsOf tolerates a missing list', () => {
   assert.deepEqual(adapter.reactAttachmentsOf(undefined), { images: [], files: [] });
 });
+
+// ---------------------------------------------------------------- mentions
+
+test('attached-file tags become SleepyCode file context', () => {
+  const out = adapter.toSleepyMessage({
+    type: 'sendMessage',
+    text: 'explain <attached type="file" title="app.ts" content="src/app.ts" /> please',
+  });
+  const files = (out.attachments || []).filter(a => a.kind === 'file');
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, 'src/app.ts');
+});
+
+test('mention tags are stripped from the text sent to the model', () => {
+  const out = adapter.toSleepyMessage({
+    type: 'sendMessage',
+    text: 'explain <attached type="file" title="app.ts" content="src/app.ts" /> please',
+  });
+  // Tag removal collapses the gap it leaves behind.
+  assert.equal(out.text, 'explain please');
+  assert.ok(!out.text.includes('<attached'));
+});
+
+test('plain messages are left exactly as typed', () => {
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', text: '  keep my spacing  ' });
+  assert.equal(out.text, '  keep my spacing  ');
+});
+
+test('mentions merge with real attachments', () => {
+  const out = adapter.toSleepyMessage({
+    type: 'sendMessage',
+    text: 'see <attached type="file" title="a" content="a.ts" />',
+    attachments: [{ id: '1', name: 'shot.png', mime: 'image/png', data: 'data:image/png;base64,AAA', kind: 'image' }],
+  });
+  assert.equal(out.attachments.length, 2);
+});
