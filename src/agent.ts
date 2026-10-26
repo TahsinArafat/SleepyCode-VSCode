@@ -32,7 +32,7 @@ import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
-import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, mcpHost, mcpOAuthLogin, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
+import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, loginShellEnv, mcpHost, mcpOAuthLogin, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
 import { McpOAuthProvider } from './mcp-oauth';
 import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, refreshSleepyToken, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
 import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
@@ -919,6 +919,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       syncConnections: async () => {
         const connections = await loadMcpConnections(this.context);
         this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
+        // Spawned servers inherit this PATH. Recording it makes "command not
+        // found" diagnosable without asking the user to reproduce it.
+        const resolvedPath = await loginShellEnv();
+        this.log('info', 'mcp.sync.path', (resolvedPath.PATH ?? '').split(':').slice(0, 8).join(':'));
         let statuses: McpConnectionStatus[] = [];
         try {
           const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);

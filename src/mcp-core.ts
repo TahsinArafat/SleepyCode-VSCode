@@ -176,6 +176,58 @@ export function parseMcpServers(raw: string): Record<string, McpServer> {
  * Lives here (not `mcp.ts`) so the strip-types test runner can exercise a real
  * connection without a `vscode` shim.
  */
+/**
+ * Split a command line into argv, honouring quotes and backslash escapes.
+ *
+ * The settings window has separate Command and Arguments fields, but the
+ * documented invocation for most servers is a single line
+ * (`npx -y mcp-archiveorg`), so that is what users paste into Command. Passing
+ * it to `spawn` unchanged looks for a binary literally named
+ * "npx -y mcp-archiveorg" and fails with "command not found".
+ *
+ * Intentionally small: this is not a shell. No globbing, no variables, no
+ * operators — just whitespace splitting with quotes and escapes, which is all a
+ * command line in a settings field needs.
+ */
+export function splitCommandLine(value: string | undefined): string[] {
+  const input = (value ?? '').trim();
+  if (!input) return [];
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  let started = false;
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i]!;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (char === '\\' && i + 1 < input.length) {
+      current += input[++i];
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started || current) {
+        parts.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (started || current) parts.push(current);
+  return parts;
+}
+
 /** Turn one configured server definition into an `McpServerConfig` for the client. */
 function toClientConfig(name: string, server: McpServer & { headers?: Record<string, string>; oauth?: { clientId?: string; scopes?: string[] } }): {
   config: { name: string; transport: 'stdio' | 'sse' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string>; oauth?: { clientId?: string; scopes?: string[] }; enabled: boolean };
@@ -194,8 +246,20 @@ function toClientConfig(name: string, server: McpServer & { headers?: Record<str
     };
   }
   const stdio = server as StdioServer;
+  // A command field holding a whole invocation is split, but only when no
+  // arguments were supplied separately — otherwise the user's explicit args are
+  // authoritative and the command is expected to be a bare executable.
+  const supplied = stdio.args ?? [];
+  const split = supplied.length ? [stdio.command ?? '', ...supplied] : splitCommandLine(stdio.command);
   return {
-    config: { name, transport: 'stdio', command: stdio.command, args: stdio.args, env: stdio.env, enabled: true },
+    config: {
+      name,
+      transport: 'stdio',
+      command: split[0] ?? stdio.command ?? '',
+      args: split.slice(1),
+      env: stdio.env,
+      enabled: true,
+    },
     cwd: stdio.cwd,
   };
 }

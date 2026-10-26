@@ -172,8 +172,9 @@ function McpModal({ server, isNew, onClose, onSave }: { server: McpServerConfig;
           </label>
           {draft.transport === "stdio" ? <><label className="fc-field">
             <span>Command</span>
-            <input value={draft.command ?? ""} onChange={(e) => set({ command: e.target.value })} placeholder="npx" />
+            <input value={draft.command ?? ""} onChange={(e) => set({ command: e.target.value })} placeholder="npx -y mcp-archiveorg" />
           </label>
+          <p className="panel-hint">You can paste the whole command line in Command (for example <code>npx -y mcp-archiveorg</code>); it is split for you. Use Arguments when you need exact control.</p>
           <label className="fc-field">
             <span>Arguments (JSON array)</span>
             <input

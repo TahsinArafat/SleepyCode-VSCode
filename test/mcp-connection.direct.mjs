@@ -458,3 +458,48 @@ test('a host-supplied PATH is used to resolve the command', async () => {
     process.env.PATH = savedPath;
   }
 });
+
+// ---------------------------------------------------------------- command lines
+
+const coreModule = await import('../src/mcp-core.ts');
+
+test('splitCommandLine is exported', () => {
+  assert.equal(typeof coreModule.splitCommandLine, 'function');
+});
+
+test('a full command line in the command field is split into command + args', () => {
+  // Users paste the documented invocation (`npx -y mcp-archiveorg`) into the
+  // Command field; spawn would otherwise look for a binary literally named that.
+  assert.deepEqual(coreModule.splitCommandLine('npx -y mcp-archiveorg'), ['npx', '-y', 'mcp-archiveorg']);
+});
+
+test('quoted arguments survive the split', () => {
+  assert.deepEqual(coreModule.splitCommandLine('npx -y "some package"'), ['npx', '-y', 'some package']);
+  assert.deepEqual(coreModule.splitCommandLine("npx -y 'some package'"), ['npx', '-y', 'some package']);
+});
+
+test('a bare command is left alone', () => {
+  assert.deepEqual(coreModule.splitCommandLine('npx'), ['npx']);
+  assert.deepEqual(coreModule.splitCommandLine('  npx  '), ['npx']);
+  assert.deepEqual(coreModule.splitCommandLine(''), []);
+});
+
+test('escaped spaces stay inside one argument', () => {
+  assert.deepEqual(coreModule.splitCommandLine('node my\\ script.js'), ['node', 'my script.js']);
+});
+
+test('a pasted command line actually starts the server', async () => {
+  const connection = await coreModule.connectMcpServers(
+    // Quoted because this repo's path contains a space; the splitter honours
+    // quotes, and a documented invocation for a normal package needs none.
+    JSON.stringify({ echo: { command: `${process.execPath} "${serverPath}"`, args: [] } }),
+    here,
+    async () => {},
+  );
+  try {
+    assert.deepEqual(connection.errors, [], `errors: ${connection.errors.join(' | ')}`);
+    assert.equal(Object.keys(connection.tools).length, 1);
+  } finally {
+    await connection.close();
+  }
+});
