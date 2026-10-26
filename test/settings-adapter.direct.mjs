@@ -219,3 +219,37 @@ test('an empty or malformed URL is rejected with a readable reason', () => {
   assert.match(adapter.validatePanelMcpUrl(''), /URL/);
   assert.match(adapter.validatePanelMcpUrl('not a url'), /URL/);
 });
+
+// ---------------------------------------------------------------- payload round trip
+
+test('the features payload keeps every field through the real double map', () => {
+  // readConnections() maps stored → panel, then toPanelFeatures maps again.
+  // A field lost on the second pass would be invisible in the window.
+  const stored = {
+    name: 'Shamela', description: '', transport: 'http',
+    auth: { type: 'none' }, enabled: true, order: 0, url: 'https://shamela.test/mcp',
+  };
+  const panelConfig = adapter.toMcpPanelConfig(stored);
+  const payload = adapter.toPanelFeatures([panelConfig], []);
+  assert.equal(payload.mcpServers.length, 1);
+  assert.equal(payload.mcpServers[0].name, 'Shamela');
+  assert.equal(payload.mcpServers[0].url, 'https://shamela.test/mcp');
+  assert.equal(payload.mcpServers[0].transport, 'http');
+  assert.equal(payload.mcpServers[0].enabled, true);
+});
+
+test('a stdio payload keeps its command through the double map', () => {
+  const stored = {
+    name: 'local', description: '', transport: 'stdio',
+    auth: { type: 'none' }, enabled: true, order: 0, command: 'npx', args: ['-y', 's'],
+  };
+  const payload = adapter.toPanelFeatures([adapter.toMcpPanelConfig(stored)], []);
+  assert.equal(payload.mcpServers[0].command, 'npx');
+  assert.deepEqual(payload.mcpServers[0].args, ['-y', 's']);
+});
+
+test('a disabled server stays disabled in the payload', () => {
+  const stored = { name: 'off', description: '', transport: 'http', auth: { type: 'none' }, enabled: false, order: 0, url: 'https://x.test/mcp' };
+  const payload = adapter.toPanelFeatures([adapter.toMcpPanelConfig(stored)], []);
+  assert.equal(payload.mcpServers[0].enabled, false);
+});

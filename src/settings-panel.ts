@@ -41,6 +41,8 @@ export interface SettingsPanelHost {
   usage(): unknown;
   /** Refresh the provider catalog and return the model ids for the picker. */
   refreshModels(): Promise<string[]>;
+  /** Report a panel-level event to the extension log. */
+  log(level: 'info' | 'warn' | 'error', event: string, detail?: string): void;
 }
 
 export class SettingsPanel {
@@ -68,18 +70,28 @@ export class SettingsPanel {
     );
     const instance = new SettingsPanel(panel, host);
     SettingsPanel.current = instance;
-    panel.webview.html = renderReactWebviewHtml(panel.webview, context.extensionUri, 'settings', 'SleepyCode Settings');
+    // The message handler MUST be registered before the HTML is set. The app
+    // posts `getSettings`/`getFeatures`/`getUsage` the moment it mounts, and a
+    // handler registered afterwards misses those first messages — which left the
+    // window rendering defaults with an empty MCP list, while later messages
+    // (adding a server) still worked and so looked fine.
     panel.webview.onDidReceiveMessage((message) => void instance.onMessage(message));
     panel.onDidDispose(() => {
       instance.disposed = true;
       if (SettingsPanel.current === instance) SettingsPanel.current = undefined;
     });
+    panel.webview.html = renderReactWebviewHtml(panel.webview, context.extensionUri, 'settings', 'SleepyCode Settings');
     return instance;
   }
 
   private post(message: unknown): void {
     if (this.disposed) return;
-    void this.panel.webview.postMessage(message);
+    // `postMessage` rejects when the webview is gone; ignoring it loses the
+    // message silently, which looks identical to the panel choosing not to
+    // render it.
+    Promise.resolve(this.panel.webview.postMessage(message)).catch((error) => {
+      this.host.log('warn', 'settings.post.failed', `${(message as { type?: string })?.type}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   /** Everything the window asks for on load, and after any change. */
@@ -96,12 +108,25 @@ export class SettingsPanel {
   }
 
   private async pushFeatures(statuses?: PanelMcpStatus[]): Promise<void> {
-    const connections = await this.host.readConnections().catch(() => []);
+    // A swallowed read failure here empties the list in the window, which is
+    // indistinguishable from "you have no servers" — so it is reported, not
+    // hidden.
+    let connections: PanelMcpConfig[] = [];
+    try {
+      connections = await this.host.readConnections();
+    } catch (error) {
+      this.host.log('error', 'settings.readConnections.failed', error instanceof Error ? error.message : String(error));
+    }
+    this.host.log('info', 'settings.features.push', `servers=${connections.length} statuses=${statuses?.length ?? 0}`);
     this.post({ type: 'features', ...toPanelFeatures(connections, statuses ?? []) });
   }
 
   private async onMessage(message: { type?: string; [key: string]: any }): Promise<void> {
-    if (!isPanelMessage(message)) return;
+    if (!isPanelMessage(message)) {
+      if (message?.type) this.host.log('info', 'settings.msg.ignored', String(message.type));
+      return;
+    }
+    this.host.log('info', 'settings.msg', String(message.type));
     switch (message.type) {
       case 'getSettings':
         this.post({ type: 'loadSettings', settings: toPanelSettings(this.host.readSettings()) });

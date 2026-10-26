@@ -943,6 +943,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.context.secrets.delete(`sleepycode.mcpOAuth.tokens.${name}`);
         this.mcpCache = undefined;
       },
+      log: (level, event, detail) => this.log(level, `panel.${event}`, detail),
       usage: () => aggregateUsage(loadUsage(this.context)),
       refreshModels: async () => {
         await this.refreshModels();
