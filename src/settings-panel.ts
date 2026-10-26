@@ -75,7 +75,7 @@ export class SettingsPanel {
     // handler registered afterwards misses those first messages — which left the
     // window rendering defaults with an empty MCP list, while later messages
     // (adding a server) still worked and so looked fine.
-    panel.webview.onDidReceiveMessage((message) => void instance.onMessage(message));
+    panel.webview.onDidReceiveMessage((message) => { void instance.onMessage(message); });
     panel.onDidDispose(() => {
       instance.disposed = true;
       if (SettingsPanel.current === instance) SettingsPanel.current = undefined;
@@ -118,10 +118,27 @@ export class SettingsPanel {
       this.host.log('error', 'settings.readConnections.failed', error instanceof Error ? error.message : String(error));
     }
     this.host.log('info', 'settings.features.push', `servers=${connections.length} statuses=${statuses?.length ?? 0}`);
-    this.post({ type: 'features', ...toPanelFeatures(connections, statuses ?? []) });
+    this.post(toPanelFeatures(connections, statuses ?? []));
   }
 
-  private async onMessage(message: { type?: string; [key: string]: any }): Promise<void> {
+  /**
+   * Panel messages are handled one at a time.
+   *
+   * The window posts `saveFeatures` and then `syncMcp` a tick later (the edit
+   * flow does `setTimeout(onSync, 0)`). Handled concurrently, the sync read the
+   * store before the save had written it — the log showed `mcp.sync.start: 0
+   * saved: none` immediately before `mcp.connections.write: 1` — so the window
+   * was handed an empty list and the server appeared to vanish.
+   */
+  private chain: Promise<unknown> = Promise.resolve();
+
+  private onMessage(message: { type?: string; [key: string]: any }): Promise<void> {
+    const next = this.chain.then(() => this.handleMessage(message), () => this.handleMessage(message));
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async handleMessage(message: { type?: string; [key: string]: any }): Promise<void> {
     if (!isPanelMessage(message)) {
       if (message?.type) this.host.log('info', 'settings.msg.ignored', String(message.type));
       return;
@@ -143,19 +160,19 @@ export class SettingsPanel {
           await this.host.writeConnections(message.features.mcpServers as PanelMcpConfig[]);
           // Reflect the change immediately; a failed connection shows on the row
           // instead of only after the user asks to sync.
-          this.post({ type: 'features', ...toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()) });
+          this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         }
         return;
       case 'syncMcp':
-        this.post({ type: 'features', ...toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()) });
+        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         return;
       case 'mcpLogin':
         await this.host.mcpLogin(String(message.name ?? '')).catch((error) => this.reportMcpError(error));
-        this.post({ type: 'features', ...toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()) });
+        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         return;
       case 'mcpLogout':
         await this.host.mcpLogout(String(message.name ?? '')).catch((error) => this.reportMcpError(error));
-        this.post({ type: 'features', ...toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()) });
+        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
         return;
       case 'getUsage':
         this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });

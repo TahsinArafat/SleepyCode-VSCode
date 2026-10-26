@@ -81,15 +81,22 @@ test('statuses carry the connected flag, tool count and auth state', () => {
   assert.equal(failed.error, 'boom');
 });
 
-test('the features payload carries only the fields the MCP page reads', () => {
-  const features = adapter.toPanelFeatures(
+test('the features payload nests the config under `features`, as the window reads it', () => {
+  // The window does `setFeaturesState({ ...EMPTY_FEATURES, ...msg.features })`.
+  // Sending `mcpServers` at the top level left msg.features undefined, so the
+  // list fell back to EMPTY_FEATURES and no server ever rendered — even though
+  // the host was sending one.
+  const payload = adapter.toPanelFeatures(
     [{ name: 'docs', url: 'https://x.test/mcp', transport: 'http', enabled: true }],
     [{ name: 'docs', state: 'ok', toolCount: 2 }],
   );
-  assert.equal(features.mcpServers.length, 1);
-  assert.equal(features.mcpServers[0].name, 'docs');
-  assert.equal(features.mcpStatus.length, 1);
-  assert.equal(features.mcpStatus[0].connected, true);
+  assert.ok(payload.features, 'config must be nested under `features`');
+  assert.equal(payload.features.mcpServers.length, 1);
+  assert.equal(payload.features.mcpServers[0].name, 'docs');
+  assert.equal(payload.mcpStatus.length, 1);
+  assert.equal(payload.mcpStatus[0].connected, true);
+  // mcpStatus stays at the top level: the window reads msg.mcpStatus directly.
+  assert.equal(payload.type, 'features');
 });
 
 test('settings map onto the panel shape instead of showing blank fields', () => {
@@ -231,11 +238,11 @@ test('the features payload keeps every field through the real double map', () =>
   };
   const panelConfig = adapter.toMcpPanelConfig(stored);
   const payload = adapter.toPanelFeatures([panelConfig], []);
-  assert.equal(payload.mcpServers.length, 1);
-  assert.equal(payload.mcpServers[0].name, 'Shamela');
-  assert.equal(payload.mcpServers[0].url, 'https://shamela.test/mcp');
-  assert.equal(payload.mcpServers[0].transport, 'http');
-  assert.equal(payload.mcpServers[0].enabled, true);
+  assert.equal(payload.features.mcpServers.length, 1);
+  assert.equal(payload.features.mcpServers[0].name, 'Shamela');
+  assert.equal(payload.features.mcpServers[0].url, 'https://shamela.test/mcp');
+  assert.equal(payload.features.mcpServers[0].transport, 'http');
+  assert.equal(payload.features.mcpServers[0].enabled, true);
 });
 
 test('a stdio payload keeps its command through the double map', () => {
@@ -244,12 +251,12 @@ test('a stdio payload keeps its command through the double map', () => {
     auth: { type: 'none' }, enabled: true, order: 0, command: 'npx', args: ['-y', 's'],
   };
   const payload = adapter.toPanelFeatures([adapter.toMcpPanelConfig(stored)], []);
-  assert.equal(payload.mcpServers[0].command, 'npx');
-  assert.deepEqual(payload.mcpServers[0].args, ['-y', 's']);
+  assert.equal(payload.features.mcpServers[0].command, 'npx');
+  assert.deepEqual(payload.features.mcpServers[0].args, ['-y', 's']);
 });
 
 test('a disabled server stays disabled in the payload', () => {
   const stored = { name: 'off', description: '', transport: 'http', auth: { type: 'none' }, enabled: false, order: 0, url: 'https://x.test/mcp' };
   const payload = adapter.toPanelFeatures([adapter.toMcpPanelConfig(stored)], []);
-  assert.equal(payload.mcpServers[0].enabled, false);
+  assert.equal(payload.features.mcpServers[0].enabled, false);
 });

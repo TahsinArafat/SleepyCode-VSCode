@@ -147,11 +147,20 @@ export function toPanelFeatures(
   connections: readonly StoredMcpConnection[],
   statuses: readonly (StoredMcpStatus | PanelMcpStatus)[] = [],
 ): {
-  mcpServers: PanelMcpConfig[];
+  type: 'features';
+  /**
+   * The window does `setFeaturesState({ ...EMPTY_FEATURES, ...msg.features })`,
+   * so the config MUST be nested here. Sending `mcpServers` at the top level
+   * leaves `msg.features` undefined, the state falls back to `EMPTY_FEATURES`,
+   * and no server ever renders even though the host sent one.
+   */
+  features: { mcpServers: PanelMcpConfig[] };
+  /** Read from `msg.mcpStatus` directly, so this one stays at the top level. */
   mcpStatus: PanelMcpStatus[];
 } {
   return {
-    mcpServers: (connections ?? []).map(toMcpPanelConfig),
+    type: 'features',
+    features: { mcpServers: (connections ?? []).map(toMcpPanelConfig) },
     // Accepts either shape: stored statuses are translated, already-panel
     // statuses (from `completeMcpStatuses`) pass straight through.
     mcpStatus: (statuses ?? []).map((status) => ('connected' in status ? status : toMcpPanelStatus(status))),
