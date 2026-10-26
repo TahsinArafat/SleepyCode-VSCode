@@ -240,7 +240,9 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
         activePersonaId: '',
         hasProviders: true,
         uiPrefs: message.uiPrefs,
-        approvalPolicy: message.approvalPolicy,
+        // The picker reads the policy shape, so the current approval mode is
+        // projected onto it rather than sending an undefined policy.
+        approvalPolicy: message.approvalPolicy ?? approvalPolicyForMode(message.approvalMode),
         approvalMode: message.approvalMode,
       };
 
@@ -573,6 +575,7 @@ export function buildInitialState(input: {
   selectedModel?: string;
   turns?: Turn[];
   usedTokens?: number;
+  approvalMode?: string;
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -585,6 +588,7 @@ export function buildInitialState(input: {
     hasProviders: true,
     usedTokens: input.usedTokens ?? 0,
     workspaceRoot: input.workspaceRoot,
+    approvalPolicy: approvalPolicyForMode(input.approvalMode),
   };
 }
 
@@ -762,4 +766,24 @@ export function continueTarget(conversationId: string | undefined, items: readon
   if (!conversationId) return null;
   const itemId = latestAssistantItemId(items);
   return itemId ? { conversationId, itemId } : null;
+}
+
+// ---------------------------------------------------------------- approval policy
+
+const ACTION_TYPES = ['shell', 'edits', 'delete', 'mcp', 'web', 'outside'] as const;
+
+/**
+ * Project SleepyCode's approval mode onto the action-type policy the React
+ * picker renders. SleepyCode gates by *kind* (edits vs commands), so every
+ * action type takes the same mode and nothing is ever a "custom" rule set.
+ *
+ *   ask        -> ask      (prompt for everything)
+ *   edits      -> review   (SleepyCode applies edits, still asks for commands)
+ *   autonomous -> allow    (no prompts)
+ */
+export function approvalPolicyForMode(mode: unknown): Record<string, { mode: string; allowlist: string[]; denylist: string[] }> {
+  const mapped = mode === 'autonomous' ? 'allow' : mode === 'edits' ? 'review' : 'ask';
+  const policy: Record<string, { mode: string; allowlist: string[]; denylist: string[] }> = {};
+  for (const action of ACTION_TYPES) policy[action] = { mode: mapped, allowlist: [], denylist: [] };
+  return policy;
 }

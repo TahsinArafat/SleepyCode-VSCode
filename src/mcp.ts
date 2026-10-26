@@ -1,80 +1,18 @@
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { createHash, randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
-import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';
-import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { McpConnectionData, McpConnectionStatus, McpOAuthConfig, McpOAuthTokens } from './types';
 
 import {
+  connectServerDefinitions,
   expandEnvironment,
   isMcpAuthRequired,
-  mcpToolName,
-  parseMcpServers,
-  restrictedEnv,
-  uniqueToolName,
+  type McpConnection,
+  type McpServer,
 } from './mcp-core';
 
-export { expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
-export type { HttpServer, McpServer, StdioServer } from './mcp-core';
-
-export type McpConnection = {
-  tools: Record<string, any>;
-  instructions: string[];
-  errors: string[];
-  close(): Promise<void>;
-};
-
-export async function connectMcpServers(
-  raw: string,
-  workspaceRoot: string,
-  approve: (title: string, detail: string) => Promise<void>,
-): Promise<McpConnection> {
-  const definitions = parseMcpServers(raw);
-  const clients: MCPClient[] = [];
-  const tools: Record<string, any> = {};
-  const usedNames = new Set<string>();
-  const instructions: string[] = [];
-  const errors: string[] = [];
-  for (const [serverName, server] of Object.entries(definitions)) {
-    try {
-      const client = 'url' in server
-        ? await createMCPClient({ transport: { type: server.transport ?? 'http', url: server.url, headers: expandEnvironment(server.headers) } })
-        : await createMCPClient({
-          transport: new Experimental_StdioMCPTransport({
-            command: server.command,
-            args: server.args,
-            env: server.env ? { ...restrictedEnv(server), ...expandEnvironment(server.env) } : restrictedEnv(server),
-            cwd: server.cwd ? path.resolve(workspaceRoot, server.cwd) : workspaceRoot,
-          }),
-        });
-      clients.push(client);
-      if (client.instructions?.trim()) instructions.push(`${serverName}: ${client.instructions.trim()}`);
-      const serverTools = await client.tools();
-      for (const [toolName, definition] of Object.entries(serverTools)) {
-        const exposedName = uniqueToolName(mcpToolName(serverName, toolName), usedNames);
-        const original = definition as any;
-        tools[exposedName] = {
-          ...original,
-          description: `[MCP: ${serverName}] ${original.description ?? toolName}`,
-          execute: async (input: unknown, options: unknown) => {
-            await approve(`Use ${serverName}: ${toolName}?`, JSON.stringify(input ?? {}, null, 2));
-            if (typeof original.execute !== 'function') throw new Error(`MCP tool '${toolName}' is not executable.`);
-            return original.execute(input, options);
-          },
-        };
-      }
-    } catch (error) {
-      errors.push(`${serverName}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return {
-    tools,
-    instructions,
-    errors,
-    close: async () => { await Promise.allSettled(clients.map(client => client.close())); },
-  };
-}
+export { connectMcpServers, expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
+export type { HttpServer, McpConnection, McpServer, StdioServer } from './mcp-core';
 
 const MCP_CONNECTIONS_KEY = 'sleepycode.mcpConnections';
 
@@ -120,55 +58,42 @@ export async function connectToMcpConnections(
   approve: (title: string, detail: string) => Promise<void>,
 ): Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }> {
   const enabled = connections.filter((c) => c.enabled);
-  const clients: MCPClient[] = [];
-  const tools: Record<string, any> = {};
-  const usedNames = new Set<string>();
-  const instructions: string[] = [];
-  const errors: string[] = [];
+  // Resolve credentials here (they live in SecretStorage) and hand finished
+  // definitions to the shared connection routine, so saved connections and the
+  // legacy `mcpServers` JSON use exactly one transport path.
+  const definitions: Record<string, McpServer> = {};
   const statuses: McpConnectionStatus[] = [];
   for (const connection of enabled) {
     try {
       const authHeaders = connection.auth?.type === 'oauth2'
         ? { Authorization: `Bearer ${await oauthAccessToken(connection, context)}` }
         : mcpAuthHeaders(connection);
-      const headers = { ...expandEnvironment(connection.auth?.customHeaders), ...authHeaders };
-      const client = await createMCPClient({ transport: { type: connection.transport ?? 'http', url: connection.url, headers } });
-      clients.push(client);
-      if (client.instructions?.trim()) instructions.push(`${connection.name}: ${client.instructions.trim()}`);
-      const serverTools = await client.tools();
-      let toolCount = 0;
-      for (const [toolName, definition] of Object.entries(serverTools)) {
-        const exposedName = uniqueToolName(mcpToolName(connection.name, toolName), usedNames);
-        const original = definition as any;
-        tools[exposedName] = {
-          ...original,
-          description: `[MCP: ${connection.name}] ${original.description ?? toolName}`,
-          execute: async (input: unknown, options: unknown) => {
-            await approve(`Use ${connection.name}: ${toolName}?`, JSON.stringify(input ?? {}, null, 2));
-            if (typeof original.execute !== 'function') throw new Error(`MCP tool '${toolName}' is not executable.`);
-            return original.execute(input, options);
-          },
-        };
-        toolCount++;
-      }
-      statuses.push({ name: connection.name, state: 'ok', toolCount });
+      definitions[connection.name] = {
+        url: connection.url,
+        transport: connection.transport ?? 'http',
+        headers: { ...expandEnvironment(connection.auth?.customHeaders), ...authHeaders },
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${connection.name}: ${message}`);
-      const authRequired = isMcpAuthRequired(message);
-      statuses.push({ name: connection.name, state: authRequired ? 'auth_required' : 'error', error: message });
+      statuses.push({ name: connection.name, state: isMcpAuthRequired(message) ? 'auth_required' : 'error', error: message });
     }
   }
-  for (const connection of connections.filter((c) => !c.enabled)) statuses.push({ name: connection.name, state: 'disabled' });
-  return {
-    connection: {
-      tools,
-      instructions,
-      errors,
-      close: async () => { await Promise.allSettled(clients.map(client => client.close())); },
-    },
-    statuses,
-  };
+
+  const connection = await connectServerDefinitions(definitions, '', approve);
+
+  for (const [name, error] of connection.errors.map((entry) => {
+    const index = entry.indexOf(': ');
+    return [index < 0 ? entry : entry.slice(0, index), index < 0 ? '' : entry.slice(index + 2)] as const;
+  })) {
+    statuses.push({ name, state: isMcpAuthRequired(error) ? 'auth_required' : 'error', error });
+  }
+  const failures = new Set(statuses.map((status) => status.name));
+  for (const name of Object.keys(definitions)) {
+    if (failures.has(name)) continue;
+    statuses.push({ name, state: 'ok', toolCount: connection.toolCounts[name] ?? 0 });
+  }
+  for (const connectionData of connections.filter((c) => !c.enabled)) statuses.push({ name: connectionData.name, state: 'disabled' });
+  return { connection, statuses };
 }
 
 const OAUTH_CALLBACK_PATH = '/mcp/oauth/callback';

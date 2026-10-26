@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
+import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';
+import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 
 /**
  * Pure MCP configuration and naming helpers.
@@ -9,6 +12,16 @@ import { createHash } from 'node:crypto';
 export type HttpServer = { url: string; transport?: 'http' | 'sse'; headers?: Record<string, string> };
 export type StdioServer = { command: string; args?: string[]; env?: Record<string, string>; cwd?: string };
 export type McpServer = HttpServer | StdioServer;
+
+export type McpConnection = {
+  tools: Record<string, any>;
+  instructions: string[];
+  errors: string[];
+  /** Tool count per server name, so a "test connection" can report it. */
+  toolCounts: Record<string, number>;
+  close(): Promise<void>;
+};
+
 
 /** Most OpenAI-compatible providers reject tool names longer than this. */
 export const MAX_TOOL_NAME_LENGTH = 64;
@@ -141,4 +154,104 @@ export function parseMcpServers(raw: string): Record<string, McpServer> {
     }
   }
   return result;
+}
+
+/**
+ * Connect to every configured MCP server and expose its tools to the agent.
+ * Lives here (not `mcp.ts`) so the strip-types test runner can exercise a real
+ * connection without a `vscode` shim.
+ */
+/**
+ * Connect one MCP server and merge its tools into the accumulating result.
+ *
+ * This is the single connection routine: both the legacy `mcpServers` JSON and
+ * the saved-connections UI route through it, so a transport fix lands in both
+ * places instead of only one.
+ */
+async function connectOne(
+  serverName: string,
+  server: McpServer & { headers?: Record<string, string> },
+  workspaceRoot: string,
+  approve: (title: string, detail: string) => Promise<void>,
+  into: { clients: MCPClient[]; tools: Record<string, any>; usedNames: Set<string>; instructions: string[]; toolCounts: Record<string, number> },
+): Promise<void> {
+  const client = 'url' in server && server.url
+    ? await createMCPClient({ transport: { type: server.transport ?? 'http', url: server.url, headers: server.headers } })
+    : await createMCPClient({
+      transport: new Experimental_StdioMCPTransport({
+        command: (server as StdioServer).command,
+        args: (server as StdioServer).args,
+        // Only the environment the command actually references (plus PATH and
+        // friends) is forwarded, so a server cannot read unrelated secrets.
+        env: (server as StdioServer).env
+          ? { ...restrictedEnv(server as StdioServer), ...(server as StdioServer).env }
+          : restrictedEnv(server as StdioServer),
+        cwd: (server as StdioServer).cwd ? path.resolve(workspaceRoot, (server as StdioServer).cwd!) : workspaceRoot,
+      }),
+    });
+  into.clients.push(client);
+  if (client.instructions?.trim()) into.instructions.push(`${serverName}: ${client.instructions.trim()}`);
+  const serverTools = await client.tools();
+  into.toolCounts[serverName] = Object.keys(serverTools).length;
+  for (const [toolName, definition] of Object.entries(serverTools)) {
+    const exposedName = uniqueToolName(mcpToolName(serverName, toolName), into.usedNames);
+    const original = definition as any;
+    into.tools[exposedName] = {
+      ...original,
+      description: `[MCP: ${serverName}] ${original.description ?? toolName}`,
+      execute: async (input: unknown, options: unknown) => {
+        await approve(`Use ${serverName}: ${toolName}?`, JSON.stringify(input ?? {}, null, 2));
+        if (typeof original.execute !== 'function') throw new Error(`MCP tool '${toolName}' is not executable.`);
+        return original.execute(input, options);
+      },
+    };
+  }
+}
+
+/**
+ * Connect to every configured MCP server and expose its tools to the agent.
+ * Lives here (not `mcp.ts`) so the strip-types test runner can exercise a real
+ * connection without a `vscode` shim.
+ */
+export async function connectMcpServers(
+  raw: string,
+  workspaceRoot: string,
+  approve: (title: string, detail: string) => Promise<void>,
+): Promise<McpConnection> {
+  const definitions = parseMcpServers(raw);
+  const resolved: Record<string, McpServer> = {};
+  for (const [name, server] of Object.entries(definitions)) {
+    resolved[name] = 'url' in server
+      ? { ...server, headers: expandEnvironment(server.headers) }
+      : { ...server, env: expandEnvironment(server.env) };
+  }
+  return connectServerDefinitions(resolved, workspaceRoot, approve);
+}
+
+/**
+ * Connect a prepared set of server definitions. Callers that own credential
+ * lookup (OAuth, API keys) resolve their headers first and hand the finished
+ * definitions here.
+ */
+export async function connectServerDefinitions(
+  definitions: Record<string, McpServer & { headers?: Record<string, string> }>,
+  workspaceRoot: string,
+  approve: (title: string, detail: string) => Promise<void>,
+): Promise<McpConnection> {
+  const into = { clients: [] as MCPClient[], tools: {} as Record<string, any>, usedNames: new Set<string>(), instructions: [] as string[], toolCounts: {} as Record<string, number> };
+  const errors: string[] = [];
+  for (const [serverName, server] of Object.entries(definitions)) {
+    try {
+      await connectOne(serverName, server, workspaceRoot, approve, into);
+    } catch (error) {
+      errors.push(`${serverName}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    tools: into.tools,
+    instructions: into.instructions,
+    errors,
+    toolCounts: into.toolCounts,
+    close: async () => { await Promise.allSettled(into.clients.map(client => client.close())); },
+  };
 }

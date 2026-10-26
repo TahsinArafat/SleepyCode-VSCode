@@ -858,6 +858,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       workspaceRoot: this.workspaceRoot()?.fsPath,
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
+      approvalMode: this.config().approvalMode,
     }));
   }
 
@@ -3529,23 +3530,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
         const baseConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
           ? await Promise.race([
-            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], close: async () => { } })),
-            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], close: async () => { } }), 10_000)),
+            connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail)).catch(error => ({ tools: {}, instructions: [], errors: [`MCP configuration: ${errorMessage(error)}`], toolCounts: {}, close: async () => { } })),
+            new Promise<McpConnection>(resolve => setTimeout(() => resolve({ tools: {}, instructions: [], errors: ['MCP servers did not finish connecting within 10s.'], toolCounts: {}, close: async () => { } }), 10_000)),
           ])
-          : { tools: {}, instructions: [], errors: [], close: async () => { } };
+          : { tools: {}, instructions: [], errors: [], toolCounts: {}, close: async () => { } };
         this.log('info', 'run.mcp.legacy.done');
         this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
         if (savedConnections.some((c) => c.enabled)) {
           this.log('info', 'run.mcp.saved.start');
           const extra = await Promise.race([
             connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
-            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], close: async () => { } }, statuses: [] }), 10_000)),
+            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: { tools: {}, instructions: [], errors: ['Saved MCP timed out'], toolCounts: {}, close: async () => { } }, statuses: [] }), 10_000)),
           ]);
           this.log('info', 'run.mcp.saved.done');
           mcpConnection = {
             tools: { ...baseConnection.tools, ...extra.connection.tools },
             instructions: [...baseConnection.instructions, ...extra.connection.instructions],
             errors: [...baseConnection.errors, ...extra.connection.errors],
+            toolCounts: { ...baseConnection.toolCounts, ...extra.connection.toolCounts },
             close: async () => {
               await Promise.allSettled([baseConnection.close(), extra.connection.close()]);
             },

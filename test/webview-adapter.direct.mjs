@@ -779,3 +779,37 @@ test('continue is unavailable without a conversation or assistant turn', () => {
   assert.equal(adapter.continueTarget('c1', [{ id: 'u', role: 'user' }]), null);
   assert.equal(adapter.continueTarget('c1', undefined), null);
 });
+
+// ---------------------------------------------------------------- approval policy
+
+test('SleepyCode approval modes become a real React policy', () => {
+  const ask = adapter.approvalPolicyForMode('ask');
+  assert.equal(ask.shell.mode, 'ask');
+  assert.equal(ask.edits.mode, 'ask');
+  assert.deepEqual(ask.shell.allowlist, []);
+
+  const edits = adapter.approvalPolicyForMode('edits');
+  assert.equal(edits.edits.mode, 'review');
+  assert.equal(edits.shell.mode, 'review');
+
+  const autonomous = adapter.approvalPolicyForMode('autonomous');
+  assert.equal(autonomous.shell.mode, 'allow');
+  assert.equal(autonomous.edits.mode, 'allow');
+});
+
+test('every action type is present so the picker never reads undefined', () => {
+  const policy = adapter.approvalPolicyForMode('ask');
+  for (const action of ['shell', 'edits', 'delete', 'mcp', 'web', 'outside']) {
+    assert.ok(policy[action], `${action} missing`);
+  }
+});
+
+test('an unknown mode falls back to the safe ask policy', () => {
+  assert.equal(adapter.approvalPolicyForMode('mystery').shell.mode, 'ask');
+  assert.equal(adapter.approvalPolicyForMode(undefined).shell.mode, 'ask');
+});
+
+test('configState carries the policy so the picker shows the current preset', () => {
+  const out = adapter.toReactMessage({ type: 'config', approvalMode: 'autonomous' });
+  assert.equal(out.approvalPolicy.shell.mode, 'allow');
+});
