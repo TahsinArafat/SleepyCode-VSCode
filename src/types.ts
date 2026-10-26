@@ -38,6 +38,8 @@ export type WebMessage =
   | { type: 'setGoal'; conversationId?: string; objective: string; tokenBudget?: number }
   | { type: 'setGoalStatus'; conversationId: string; status: string }
   | { type: 'persistTurns'; conversationId?: string; turns: unknown[] }
+  | { type: 'saveModelOptions'; modelId: string; options: unknown[] }
+  | { type: 'resetModelOptions'; modelId: string }
   | { type: 'setMode'; mode: 'agent' | 'ask' | 'plan' }
   | { type: 'answerQuestion'; callId: string; answers: Record<string, string[]> }
   | { type: 'questionAnswered'; conversationId?: string; callId: string; answers: Record<string, string[]> }

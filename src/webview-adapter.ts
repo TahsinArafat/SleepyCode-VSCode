@@ -15,6 +15,7 @@
  */
 
 import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
+import * as modelOptions from './model-options.ts';
 
 export type SleepyMsg = { type: string; [key: string]: any };
 export type ReactMsg = { type: string; [key: string]: any };
@@ -181,6 +182,12 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
 
     case 'exportConversation':
       return { type: 'exportConversation', conversationId: message.convId };
+
+    case 'saveModelOptions':
+      return { type: 'saveModelOptions', modelId: message.modelId, options: message.options };
+
+    case 'resetModelOptions':
+      return { type: 'resetModelOptions', modelId: message.modelId };
 
     case 'persistTurns':
       // Sent while the webview is being torn down, so the host can keep the turns
@@ -580,7 +587,12 @@ function modelsFetched(message: SleepyMsg): ReactMsg {
         kind: group?.providerId ?? 'unknown',
         providerName: group?.providerName,
         providerId: group?.providerId,
-        options: [],
+        // The composer reads `max_context` from here for its context ring and for
+        // the model-options editor; sending [] left both with nothing.
+        options: modelOptions.optionsFor(
+          { contextWindow: typeof model === 'string' ? undefined : model?.contextWindow, maxOutputLimit: typeof model === 'string' ? undefined : model?.maxOutputLimit },
+          message.overrides?.[id],
+        ),
       });
     }
   }
@@ -1307,4 +1319,5 @@ export {
   withheldByCeiling,
   type AgentMode,
 } from './agent-mode.ts';
+
 

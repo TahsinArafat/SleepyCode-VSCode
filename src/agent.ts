@@ -33,6 +33,7 @@ import * as planFile from './plan-file';
 import * as fileIcons from './file-icons';
 import * as paste from './paste-core';
 import * as goalCore from './goal-core';
+import * as modelOptions from './model-options';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -1190,6 +1191,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'goal', conversationId: conversation.id, goal: conversation.goal });
   }
 
+  /** Per-model option overrides, normalised from storage. */
+  private storedModelOptions(): modelOptions.OverrideStore {
+    return modelOptions.normalizeOverrides(this.context.globalState.get<unknown>('sleepycode.modelOptions'));
+  }
+
   private settingsPanelHost(): SettingsPanelHost {
     return {
       readSettings: () => ({
@@ -2331,6 +2337,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'exportConversation') {
       await this.exportConversation(message.conversationId);
+      return;
+    }
+    if (message.type === 'saveModelOptions') {
+      const values: Record<string, unknown> = {};
+      for (const option of Array.isArray(message.options) ? message.options : []) {
+        const entry = option as { key?: unknown; value?: unknown };
+        if (typeof entry?.key === 'string') values[entry.key] = Number(entry.value);
+      }
+      const next = modelOptions.setModel(this.storedModelOptions(), String(message.modelId ?? ''), values);
+      await this.context.globalState.update('sleepycode.modelOptions', next);
+      this.log('info', 'model.options.saved', `${message.modelId}: ${JSON.stringify(next[String(message.modelId ?? '')] ?? {})}`);
+      await this.refreshModels();
+      return;
+    }
+    if (message.type === 'resetModelOptions') {
+      const next = modelOptions.resetModel(this.storedModelOptions(), String(message.modelId ?? ''));
+      await this.context.globalState.update('sleepycode.modelOptions', next);
+      this.log('info', 'model.options.reset', String(message.modelId ?? ''));
+      await this.refreshModels();
       return;
     }
     if (message.type === 'persistTurns') {
@@ -5875,6 +5900,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const activeModelValid = Boolean(active.model) && Boolean(activeSelectionGroup?.models.some(model => modelMatches(model, active.model)));
     this.post({
       type: 'models',
+      overrides: this.storedModelOptions(),
       groups,
       selected: activeModelValid ? active.model : selected,
       defaultProvider: activeModelValid ? active.provider : selectedProviderId,
@@ -6003,7 +6029,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (window.window) resolved.contextWindow = window.window;
     const maxOutputLimit = entry?.maxOutputLimit ?? price?.maxOutputLimit;
     if (maxOutputLimit && maxOutputLimit > 0) resolved.maxOutputLimit = maxOutputLimit;
-    return resolved;
+    // A user override changes how this request is budgeted, which is the only
+    // reason to offer the option at all.
+    return modelOptions.applyOverrides(resolved, this.storedModelOptions()[modelId]);
   }
 
   // Auto-compaction threshold logic lives in compaction-core.ts (shouldAutoCompact)
