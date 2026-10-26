@@ -32,6 +32,7 @@ import * as modeRules from './agent-mode';
 import * as planFile from './plan-file';
 import * as fileIcons from './file-icons';
 import * as paste from './paste-core';
+import * as goalCore from './goal-core';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -1183,6 +1184,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Publish one conversation's goal in the shape the webview reads. */
+  private postGoal(conversation: Conversation): void {
+    if (!conversation.goal) return;
+    this.post({ type: 'goal', conversationId: conversation.id, goal: conversation.goal });
+  }
+
   private settingsPanelHost(): SettingsPanelHost {
     return {
       readSettings: () => ({
@@ -2324,6 +2331,54 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'exportConversation') {
       await this.exportConversation(message.conversationId);
+      return;
+    }
+    if (message.type === 'persistTurns') {
+      // The webview sends this as it is torn down. Adopt it ONLY when the host has
+      // nothing for that conversation: the host owns authoritative state, and
+      // replacing it with the webview's lossy projection would lose tool results
+      // and model history. Its real value is recovering a chat that would
+      // otherwise open blank.
+      const conversation = message.conversationId
+        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        : undefined;
+      const turns = Array.isArray(message.turns) ? message.turns : [];
+      if (conversation && !conversation.items.length && turns.length) {
+        conversation.items = adapter.turnsToItems(turns);
+        this.log('info', 'conversation.recovered', `${conversation.id}: ${conversation.items.length} turn(s) from the webview`);
+        await this.persistProjects();
+        this.syncConversations();
+      } else if (conversation && conversation.items.length) {
+        this.log('info', 'persistTurns.ignored', `${conversation.id}: host already has ${conversation.items.length} item(s)`);
+      }
+      return;
+    }
+    if (message.type === 'setGoal') {
+      const conversation = message.conversationId
+        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        : this.activeConversation();
+      const created = goalCore.createGoal(message.objective, message.tokenBudget);
+      if (conversation && created) {
+        conversation.goal = created;
+        await this.persistProjects();
+        this.log('info', 'conversation.goal', `${conversation.id}: ${created.objective}${created.tokenBudget ? ` (budget ${created.tokenBudget})` : ''}`);
+        this.postGoal(conversation);
+      }
+      return;
+    }
+    if (message.type === 'setGoalStatus') {
+      const conversation = this.activeProject()?.conversations.find(item => item.id === message.conversationId);
+      if (conversation?.goal) {
+        const current = conversation.goal;
+        const before = current.status;
+        const next = goalCore.withStatus(current, message.status);
+        conversation.goal = next;
+        if (next.status !== before) {
+          await this.persistProjects();
+          this.log('info', 'conversation.goal.status', `${conversation.id}: ${before} -> ${next.status}`);
+          this.postGoal(conversation);
+        }
+      }
       return;
     }
     if (message.type === 'resolvePastedCode') {
@@ -4126,6 +4181,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       const instructions = [
         modeRules.modeGuidance(runMode),
+        goalCore.goalGuidance(conversation.goal),
         await this.systemPrompt(root, selection.agentId),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
         `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
@@ -4681,6 +4737,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               const durationMs = Date.now() - streamStartTime;
               const tokensPerSecond = durationMs > 0 ? Math.round((uout / durationMs) * 1000) : 0;
               recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
+              // Count the step against the conversation's goal, so a bounded goal
+              // actually limits the run instead of being decorative.
+              if (conversation.goal) {
+                const before = conversation.goal.status;
+                conversation.goal = goalCore.addTokens(conversation.goal, uin + uout);
+                if (conversation.goal.status !== before) {
+                  this.log('warn', 'conversation.goal.budgetExhausted', `${conversation.id}: ${conversation.goal.tokensUsed}/${conversation.goal.tokenBudget ?? '-'}`);
+                  this.postGoal(conversation);
+                }
+              }
             }
             if (finishReason === 'error') throw new Error('The model stopped because the provider reported a generation error.');
             if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');

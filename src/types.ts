@@ -35,6 +35,9 @@ export type WebMessage =
   | { type: 'cancelSubagent'; callId: string; reason?: 'timeout' | 'user' }
   | { type: 'getFileIcon'; filename: string }
   | { type: 'resolvePastedCode'; text: string; requestId: number }
+  | { type: 'setGoal'; conversationId?: string; objective: string; tokenBudget?: number }
+  | { type: 'setGoalStatus'; conversationId: string; status: string }
+  | { type: 'persistTurns'; conversationId?: string; turns: unknown[] }
   | { type: 'setMode'; mode: 'agent' | 'ask' | 'plan' }
   | { type: 'answerQuestion'; callId: string; answers: Record<string, string[]> }
   | { type: 'questionAnswered'; conversationId?: string; callId: string; answers: Record<string, string[]> }
@@ -270,6 +273,8 @@ export type Conversation = {
    * Absent means `agent`, matching the composer's default.
    */
   mode?: 'agent' | 'ask' | 'plan';
+  /** The conversation's goal: objective, optional token budget, and status. */
+  goal?: import('./goal-core').ConversationGoal;
 };
 
 /** User-defined agent that extends the built-in roster with its own model, tool policy, and skills. */

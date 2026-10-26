@@ -182,6 +182,18 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'exportConversation':
       return { type: 'exportConversation', conversationId: message.convId };
 
+    case 'persistTurns':
+      // Sent while the webview is being torn down, so the host can keep the turns
+      // it is showing. Accepted; the host adopts them only into an empty
+      // conversation so it can never clobber authoritative state.
+      return { type: 'persistTurns', conversationId: message.convId, turns: message.turns };
+
+    case 'setGoal':
+      return { type: 'setGoal', conversationId: message.convId, objective: message.objective, tokenBudget: message.tokenBudget };
+
+    case 'setGoalStatus':
+      return { type: 'setGoalStatus', conversationId: message.convId, status: message.status };
+
     case 'resolvePastedCode':
       // The composer holds the paste until the host answers; an unanswered
       // request dropped the paste entirely.
@@ -425,6 +437,11 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
 
     case 'queuedPrompt':
       return queuedPrompts(message);
+
+    case 'goal':
+      // The webview reads goals from `workflowState.goals`, not from a message of
+      // their own, so a goal change is delivered as the shape it consumes.
+      return { type: 'workflowState', queues: {}, goals: { [message.conversationId ?? '']: message.goal } };
 
     case 'contextNotice':
       // React has no persistent notice block, but dropping this would hide a
@@ -1088,6 +1105,44 @@ export function toStorableWorkspaceState(state: Partial<WorkspaceState> | undefi
     }
   }
   return { ...result, trimmed };
+}
+
+/**
+ * Convert React turns back into transcript items.
+ *
+ * Only used to recover a conversation the host has no record of: the projection
+ * is lossy (tool payloads and model history are gone), so it must never replace
+ * real state.
+ */
+export function turnsToItems(turns: readonly any[] | undefined): any[] {
+  const now = Date.now();
+  const items: any[] = [];
+  for (const turn of turns ?? []) {
+    if (!turn || typeof turn !== 'object') continue;
+    // A turn with neither role nor content is junk from a partial persist.
+    if (turn.role !== 'user' && turn.role !== 'assistant') continue;
+    if (turn.role === 'user') {
+      const item: any = { id: `recovered-${items.length}-${now}`, role: 'user', text: typeof turn.text === 'string' ? turn.text : '', timestamp: now };
+      if (turn.attachments?.length) item.attachments = turn.attachments;
+      if (turn.model) item.model = turn.model;
+      items.push(item);
+      continue;
+    }
+    const blocks: any[] = Array.isArray(turn.blocks) ? turn.blocks : [];
+    const text = blocks.filter((block) => block?.kind === 'text').map((block) => block.text).join('');
+    const work = blocks
+      .filter((block) => block?.kind === 'tool')
+      .map((block) => ({ kind: 'task' as const, text: block.result ?? '', tool: block.name, done: block.status !== 'running' }));
+    const item: any = { id: `recovered-${items.length}-${now}`, role: 'assistant', text, timestamp: now };
+    if (work.length) item.work = work;
+    const error = blocks.find((block) => block?.kind === 'error');
+    if (error) {
+      item.kind = 'error';
+      item.errorInfo = { message: error.message };
+    }
+    items.push(item);
+  }
+  return items;
 }
 
 // ---------------------------------------------------------------- export

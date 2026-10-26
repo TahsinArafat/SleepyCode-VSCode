@@ -51,8 +51,10 @@ test('panel requests pass through', () => {
 });
 
 test('react-only messages are dropped', () => {
-  assert.equal(adapter.toSleepyMessage({ type: 'persistTurns', convId: 'c1', turns: [] }), null);
+  // persistTurns is mapped now (the host adopts it defensively); unknown types
+  // are still dropped.
   assert.equal(adapter.toSleepyMessage({ type: 'unknownThing' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'setPersona', personaId: 'x' }), null);
 });
 
 // ---------------------------------------------------------------- Sleepy -> React
@@ -504,8 +506,8 @@ test('deleteConversation passes through', () => {
 test('messages with no SleepyCode counterpart are dropped', () => {
   // Both were closed since this test was written: updateChatWorkspace is
   // persisted and setMode is applied as a tool policy.
-  // getFileIcon is now handled by the host, so it is no longer dropped.
-  for (const type of ['setGoal', 'persistTurns', 'setPersona']) {
+  // Only setPersona and OpenCursor-internal types remain unmapped.
+  for (const type of ['setPersona']) {
     assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
   }
 });
@@ -1527,4 +1529,36 @@ test('a plan post without steps does not blank the card', () => {
   const out = adapter.toReactMessage({ type: 'plan', conversationId: 'c1', activeStep: 2 });
   assert.equal(out.event.input.steps, undefined);
   assert.equal(out.event.input.title, undefined);
+});
+
+// ---------------------------------------------------------------- persistTurns
+
+test('persistTurns reaches the host', () => {
+  const out = adapter.toSleepyMessage({ type: 'persistTurns', convId: 'c1', turns: [{ role: 'user', text: 'hi' }] });
+  assert.equal(out.type, 'persistTurns');
+  assert.equal(out.conversationId, 'c1');
+  assert.equal(out.turns.length, 1);
+});
+
+test('recovered turns become transcript items', () => {
+  const items = adapter.turnsToItems([
+    { role: 'user', text: 'hi' },
+    { role: 'assistant', blocks: [{ kind: 'text', text: 'hello' }, { kind: 'tool', name: 'Read', status: 'completed', result: 'file' }] },
+  ]);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].role, 'user');
+  assert.equal(items[0].text, 'hi');
+  assert.equal(items[1].text, 'hello');
+  assert.equal(items[1].work[0].tool, 'Read');
+});
+
+test('recovery keeps an error turn as an error', () => {
+  const items = adapter.turnsToItems([{ role: 'assistant', blocks: [{ kind: 'error', message: 'boom' }] }]);
+  assert.equal(items[0].kind, 'error');
+  assert.equal(items[0].errorInfo.message, 'boom');
+});
+
+test('recovery tolerates junk', () => {
+  assert.deepEqual(adapter.turnsToItems(undefined), []);
+  assert.deepEqual(adapter.turnsToItems([null, {}]), []);
 });
