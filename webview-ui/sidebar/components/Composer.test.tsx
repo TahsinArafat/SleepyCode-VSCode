@@ -284,6 +284,17 @@ it("only exposes Speed for models whose supplied options include it", () => {
   expect(props.onSaveModelOptions).not.toHaveBeenCalled();
 });
 
+it("hides the approval control in read-only modes, where no gate applies", () => {
+  // Approval governs edits and commands; ask and plan cannot perform them, so
+  // showing the control implied a gate the host never consults.
+  act(() => root.render(<Composer {...props} mode="ask" />));
+  expect(container.querySelector('.composer-approval-trigger')).toBeNull();
+  act(() => root.render(<Composer {...props} mode="plan" />));
+  expect(container.querySelector('.composer-approval-trigger')).toBeNull();
+  act(() => root.render(<Composer {...props} mode="agent" />));
+  expect(container.querySelector('.composer-approval-trigger')).not.toBeNull();
+});
+
 it("keeps the model picker available in edit composers without approval controls", () => {
   act(() => root.render(<Composer {...props} editing initialText="Edit this" />));
   expect(container.querySelector('.composer-approval-trigger')).toBeNull();

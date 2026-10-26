@@ -24,6 +24,7 @@ import { CodeLanguagePicker } from "./CodeLanguagePicker";
 import { getCodeLanguage } from "../../shared/codeLanguages";
 import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PersonaInfo, TeamInfo } from "../types";
 import { filterModes } from "../../shared/featureFlags";
+import { approvalAppliesInMode } from "../../../src/webview-adapter";
 
 /** Top-level @ menu categories. */
 const MENTION_CATEGORIES: { id: MentionCategory; label: string; icon: IconName; leaf?: boolean }[] = [
@@ -1722,7 +1723,10 @@ export function Composer({
             input.accept = imagesOnly ? "image/*" : "image/*,text/*,.md,.json,.ts,.tsx,.js,.jsx,.py,.css,.html,.yaml,.yml,.toml,.csv,.log";
             input.click();
           }} />
-          {!editing && <ApprovalPicker policy={approvalPolicy} />}
+          {/* Approval governs edits and commands, which only agent mode can
+              perform. Showing the control in a read-only mode implied a gate
+              that was never consulted. */}
+          {!editing && approvalAppliesInMode(mode) && <ApprovalPicker policy={approvalPolicy} />}
           </div>
           <div className="right">
             {!editing && (() => {

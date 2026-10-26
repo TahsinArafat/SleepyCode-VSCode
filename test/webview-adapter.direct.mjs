@@ -1380,3 +1380,49 @@ test('the no-workspace explanation is actionable', () => {
   // It must tell the user what to do, not just that something failed.
   assert.match(text, /open/i);
 });
+
+// ---------------------------------------------------------------- mode on send
+
+test('the mode the composer shows is carried with the message', () => {
+  // React sends `mode` on every sendMessage. Dropping it meant the run used the
+  // stored per-conversation mode, which could still be `agent` — so Ask mode
+  // wrote files.
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', convId: 'c1', text: 'hi', mode: 'ask' });
+  assert.equal(out.mode, 'ask');
+});
+
+test('an invalid mode is not forwarded', () => {
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', mode: 'bogus' });
+  assert.equal(out.mode, undefined);
+});
+
+test('the run mode prefers the composer, then the conversation, then the last choice', () => {
+  // Order matters: the composer is what the user is looking at right now.
+  assert.equal(adapter.resolveRunMode({ messageMode: 'ask', conversationMode: 'agent', lastMode: 'plan' }), 'ask');
+  assert.equal(adapter.resolveRunMode({ conversationMode: 'plan', lastMode: 'ask' }), 'plan');
+  assert.equal(adapter.resolveRunMode({ lastMode: 'ask' }), 'ask');
+});
+
+test('with nothing recorded the mode is agent', () => {
+  assert.equal(adapter.resolveRunMode({}), 'agent');
+  assert.equal(adapter.resolveRunMode(undefined), 'agent');
+});
+
+test('a bogus stored mode does not grant agent silently', () => {
+  // An unrecognised value must fall through to the next source, not to `agent`,
+  // because `agent` is the one mode that can write.
+  assert.equal(adapter.resolveRunMode({ messageMode: 'nope', conversationMode: 'nope', lastMode: 'plan' }), 'plan');
+  assert.equal(adapter.resolveRunMode({ messageMode: 'nope', conversationMode: 'nope' }), 'agent');
+});
+
+// ---------------------------------------------------------------- approval visibility
+
+test('the approval control is hidden wherever approval cannot apply', () => {
+  // Display and enforcement must be the same rule: the composer showed an
+  // approval picker in ask/plan while the host ignored it, which is exactly the
+  // contradiction that made Ask mode look broken.
+  for (const mode of ['ask', 'plan']) {
+    assert.equal(adapter.approvalAppliesInMode(mode), false, `${mode} must hide it`);
+  }
+  assert.equal(adapter.approvalAppliesInMode('agent'), true);
+});

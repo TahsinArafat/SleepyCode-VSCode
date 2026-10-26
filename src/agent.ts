@@ -2252,6 +2252,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const mode = message.mode === 'ask' || message.mode === 'plan' ? message.mode : 'agent';
       if (!conversation) return;
       conversation.mode = mode;
+      // Remembered globally so a new conversation inherits the user's choice
+      // instead of silently reverting to `agent`, which can write.
+      await this.context.globalState.update('sleepycode.lastMode', mode);
       this.log('info', 'conversation.mode', `${conversation.id} -> ${mode}`);
       await this.persistProjects();
       // The composer reflects the mode, and a read-only mode changes which tools
@@ -3423,6 +3426,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           created: !message.conversationId,
         });
       }
+      // The mode the composer was showing applies to this turn. Stamp it on the
+      // conversation so the run, and any later turn in this chat, agree.
+      if (message.mode) {
+        const target = project.conversations.find(conversation => conversation.id === conversationId);
+        if (target && target.mode !== message.mode) {
+          target.mode = message.mode;
+          await this.context.globalState.update('sleepycode.lastMode', message.mode);
+          await this.persistProjects();
+        }
+      }
       const root = this.workspaceRoot();
       const mention = this.parseAgentMention(message.text);
       const sendText = mention.text.trim() || message.text.trim();
@@ -4282,7 +4295,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Read-only modes withhold the tools that would need approval, which is how
       // `ask` and `plan` are enforced: approval is a property of agent mode, so a
       // mode that cannot act never reaches the gate.
-      const mode = selection.mode ?? 'agent';
+      const mode = adapter.resolveRunMode({
+        conversationMode: selection.mode,
+        lastMode: this.context.globalState.get<string>('sleepycode.lastMode'),
+      });
+      this.log('info', 'run.mode', `${mode} (conversation=${selection.mode ?? 'unset'})`);
       const runTools = mode === 'agent'
         ? agentTools
         : Object.fromEntries(Object.entries(agentTools).filter(([name]) => adapter.isToolAllowedInMode(mode, name)));
@@ -5563,7 +5580,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       provider: conversation.provider ?? base.activeProvider,
       agentId: conversation.agentId ?? base.agentId,
       reasoningEffort: conversation.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-      mode: conversation.mode ?? 'agent',
+      mode: conversation.mode,
     };
   }
 

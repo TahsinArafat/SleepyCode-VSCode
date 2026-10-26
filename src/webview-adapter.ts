@@ -43,6 +43,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       const out: SleepyMsg = { type: 'send', text: mentions.text };
       if (message.convId) out.conversationId = message.convId;
       if (message.model) out.model = message.model;
+      // The composer's mode is what the user is looking at right now, so it
+      // travels with the message. Relying on the stored per-conversation mode
+      // meant a fresh conversation silently ran as `agent` and wrote files while
+      // the UI said Ask.
+      if (message.mode === 'agent' || message.mode === 'ask' || message.mode === 'plan') out.mode = message.mode;
       // The webview keeps its optimistic turn in a placeholder session until the
       // host says which conversation it actually landed in.
       if (message.requestId) out.requestId = message.requestId;
@@ -1138,6 +1143,30 @@ export function exportFileName(title: string | undefined): string {
     .slice(0, 70)
     .trim();
   return `${base || 'conversation'}.md`;
+}
+
+/** A composer mode, or `undefined` when the value is not one we recognise. */
+function knownMode(value: unknown): 'agent' | 'ask' | 'plan' | undefined {
+  return value === 'agent' || value === 'ask' || value === 'plan' ? value : undefined;
+}
+
+/**
+ * Decide which mode a run uses.
+ *
+ * Order: the mode carried by this message, then the conversation's stored mode,
+ * then the last mode the user chose. `agent` is only the final fallback, because
+ * `agent` is the one mode that can write — falling back to it early silently
+ * grants write access while the UI still says Ask.
+ */
+export function resolveRunMode(input: {
+  messageMode?: unknown;
+  conversationMode?: unknown;
+  lastMode?: unknown;
+} | undefined): 'agent' | 'ask' | 'plan' {
+  return knownMode(input?.messageMode)
+    ?? knownMode(input?.conversationMode)
+    ?? knownMode(input?.lastMode)
+    ?? 'agent';
 }
 
 /** The reply React's question card matches on call id. */

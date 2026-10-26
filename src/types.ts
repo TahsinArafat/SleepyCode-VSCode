@@ -5,7 +5,7 @@ import type { ReasoningEffort } from './reasoning-effort';
 
 export type WebMessage =
   | { type: 'ready' }
-  | { type: 'send'; text: string; conversationId?: string; context?: ComposerContext; agentId?: string }
+  | { type: 'send'; text: string; conversationId?: string; context?: ComposerContext; agentId?: string; mode?: 'agent' | 'ask' | 'plan' }
   | { type: 'stop' }
   | { type: 'newConversation' }
   | { type: 'openConversation'; id: string }
