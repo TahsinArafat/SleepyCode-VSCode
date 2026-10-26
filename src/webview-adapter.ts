@@ -165,6 +165,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'searchFiles':
       return { type: 'fileMentionQuery', query: message.query };
 
+    case 'searchConversations':
+      // Answered by the host, which owns the conversation list; the request id
+      // comes back so the webview can drop a stale answer.
+      return { type: 'searchConversations', query: message.query ?? '', archived: message.archived === true, requestId: message.requestId };
+
     case 'selectConversation':
       return { type: 'openConversation', id: message.id };
 
@@ -834,4 +839,60 @@ export function approvalPolicyForMode(mode: unknown): Record<string, { mode: str
   const policy: Record<string, { mode: string; allowlist: string[]; denylist: string[] }> = {};
   for (const action of ACTION_TYPES) policy[action] = { mode: mapped, allowlist: [], denylist: [] };
   return policy;
+}
+
+// ---------------------------------------------------------------- conversation search
+
+/**
+ * Search the conversation list the way the history panel expects.
+ *
+ * The webview has only summaries, so this runs on the host's real conversations
+ * and returns summaries with a matching excerpt, which is what the panel shows
+ * under each hit.
+ */
+export function searchConversationSummaries(
+  conversations: readonly any[] | undefined,
+  query: string,
+  archived = false,
+): { id: string; title: string; updatedAt: number; archivedAt?: number; excerpt?: string }[] {
+  const needle = (query ?? '').trim().toLowerCase();
+  const matches = (conversation: any): { hit: boolean; excerpt?: string } => {
+    if (!needle) return { hit: true };
+    const title = typeof conversation?.title === 'string' ? conversation.title : '';
+    if (title.toLowerCase().includes(needle)) return { hit: true };
+    for (const item of conversation?.items ?? []) {
+      const text = typeof item?.text === 'string' ? item.text : '';
+      const index = text.toLowerCase().indexOf(needle);
+      if (index < 0) continue;
+      // Show a little context around the hit rather than the whole message.
+      const start = Math.max(0, index - 40);
+      return { hit: true, excerpt: text.slice(start, start + 160).replace(/\s+/g, ' ').trim() };
+    }
+    return { hit: false };
+  };
+
+  return (conversations ?? [])
+    .filter((conversation) => Boolean(conversation) && (conversation.archived === true) === archived)
+    .map((conversation) => ({ conversation, match: matches(conversation) }))
+    .filter((entry) => entry.match.hit)
+    .map(({ conversation, match }) => {
+      const summary: { id: string; title: string; updatedAt: number; archivedAt?: number; excerpt?: string } = {
+        id: String(conversation.id ?? ''),
+        title: conversation.title || 'New conversation',
+        updatedAt: conversation.updatedAt ?? 0,
+      };
+      if (conversation.archived) summary.archivedAt = conversation.updatedAt ?? 0;
+      if (match.excerpt) summary.excerpt = match.excerpt;
+      return summary;
+    });
+}
+
+/** The reply the webview's history panel matches on request id. */
+export function conversationSearchResults(
+  requestId: number,
+  conversations: readonly any[] | undefined,
+  query: string,
+  archived = false,
+): ReactMsg {
+  return { type: 'conversationSearchResults', requestId, list: searchConversationSummaries(conversations, query, archived) };
 }

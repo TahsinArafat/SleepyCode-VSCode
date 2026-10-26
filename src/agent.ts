@@ -808,6 +808,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
+      if (this.reactMode && message?.type === 'searchConversations') {
+        // The history panel searches over the host's real conversations; the
+        // webview only holds summaries. Without this the search box did nothing.
+        const project = this.activeProject();
+        this.post(adapter.conversationSearchResults(
+          Number(message.requestId ?? 0),
+          project?.conversations,
+          String(message.query ?? ''),
+          message.archived === true,
+        ));
+        return;
+      }
       if (this.reactMode && message?.type === 'continueRun') {
         const conversationId = this.activeProject()?.activeConversationId;
         const target = adapter.continueTarget(conversationId, conversationId ? this.reactItems.get(conversationId) : undefined);

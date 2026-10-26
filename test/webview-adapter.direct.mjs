@@ -893,3 +893,57 @@ test('reasoningEnd needs no mapping: thinking closes on the next delta', () => {
   // so a dedicated event would be redundant.
   assert.equal(adapter.toReactMessage({ type: 'reasoningEnd' }), null);
 });
+
+// ---------------------------------------------------------------- conversation search
+
+test('searchConversations reaches the host', () => {
+  const out = adapter.toSleepyMessage({ type: 'searchConversations', query: 'auth', archived: false, requestId: 4 });
+  assert.equal(out.type, 'searchConversations');
+  assert.equal(out.query, 'auth');
+  assert.equal(out.requestId, 4);
+});
+
+test('conversation search matches the title', () => {
+  const list = adapter.searchConversationSummaries(
+    [{ id: 'c1', title: 'Fix the auth flow', items: [] }],
+    'auth',
+  );
+  assert.equal(list.length, 1);
+  assert.equal(list[0].id, 'c1');
+});
+
+test('conversation search matches message text and returns an excerpt', () => {
+  const list = adapter.searchConversationSummaries(
+    [{ id: 'c1', title: 'Unrelated', items: [{ role: 'user', text: 'the parser drops trailing commas' }] }],
+    'trailing',
+  );
+  assert.equal(list.length, 1);
+  assert.match(list[0].excerpt, /trailing commas/);
+});
+
+test('conversation search is case-insensitive and empty queries match everything', () => {
+  const items = [{ id: 'c1', title: 'Alpha', items: [] }, { id: 'c2', title: 'Beta', items: [] }];
+  assert.equal(adapter.searchConversationSummaries(items, 'ALPHA').length, 1);
+  assert.equal(adapter.searchConversationSummaries(items, '   ').length, 2);
+});
+
+test('conversation search respects the archived filter', () => {
+  const items = [
+    { id: 'c1', title: 'Live', items: [] },
+    { id: 'c2', title: 'Old', archived: true, items: [] },
+  ];
+  assert.deepEqual(adapter.searchConversationSummaries(items, '', false).map(c => c.id), ['c1']);
+  assert.deepEqual(adapter.searchConversationSummaries(items, '', true).map(c => c.id), ['c2']);
+});
+
+test('conversation search results carry the request id back', () => {
+  const out = adapter.conversationSearchResults(9, [{ id: 'c1', title: 'Alpha', items: [] }], 'alpha');
+  assert.equal(out.type, 'conversationSearchResults');
+  assert.equal(out.requestId, 9);
+  assert.equal(out.list.length, 1);
+});
+
+test('conversation search tolerates missing text', () => {
+  const list = adapter.searchConversationSummaries([{ id: 'c1' }, { id: 'c2', items: [{}] }], 'x');
+  assert.deepEqual(list, []);
+});
