@@ -1347,3 +1347,36 @@ test('asking the user is allowed in read-only modes', () => {
     assert.equal(adapter.isToolAllowedInMode(mode, 'ask_user'), true, `ask_user must be allowed in ${mode}`);
   }
 });
+
+// ---------------------------------------------------------------- no workspace
+
+test('an error keeps the conversation it belongs to', () => {
+  // Posting an error with no conversation id files it under the placeholder
+  // session, which is not the active one — so it renders nowhere. That is why a
+  // send with no folder open produced no run, no stream and no message.
+  const out = adapter.toReactMessage({ type: 'error', conversationId: 'c1', text: 'Open a folder first.' });
+  assert.equal(out.convId, 'c1');
+  assert.equal(out.event.type, 'error');
+});
+
+test('configState says whether a workspace is open', () => {
+  const open = adapter.toReactMessage({ type: 'config', workspaceRoot: '/repo', canSend: true });
+  assert.equal(open.workspaceRoot, '/repo');
+  assert.equal(open.canSend, true);
+
+  const none = adapter.toReactMessage({ type: 'config' });
+  assert.equal(none.canSend, false);
+  assert.equal(none.workspaceRoot, undefined);
+});
+
+test('initialState says whether a workspace is open', () => {
+  assert.equal(adapter.buildInitialState({ workspaceRoot: '/repo' }).canSend, true);
+  assert.equal(adapter.buildInitialState({}).canSend, false);
+});
+
+test('the no-workspace explanation is actionable', () => {
+  const text = adapter.noWorkspaceMessage();
+  assert.match(text, /folder|workspace/i);
+  // It must tell the user what to do, not just that something failed.
+  assert.match(text, /open/i);
+});

@@ -3391,7 +3391,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const previousActive = this.activeProjectId;
       const project = this.ensureProjectForRoot();
       if (!project) {
-        this.post({ type: 'error', text: 'Open a folder or workspace first.' });
+        // No folder: there is no project, no conversation and no run, so nothing
+        // streamed and nothing was said. Explain it in the chat.
+        this.log('warn', 'message.send.noWorkspace', 'no folder open');
+        this.post({ type: 'error', conversationId: message.conversationId, text: adapter.noWorkspaceMessage() });
+        void vscode.window.showInformationMessage('SleepyCode needs a folder open to work. Use File → Open Folder, then send again.');
         return;
       }
       if (previousActive !== project.id) this.syncConversations();
@@ -3607,12 +3611,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.log('info', 'run.enter', `conversation=${conversationId}; chars=${userText.length}`);
     const root = this.workspaceRoot();
     if (!root) {
-      this.post({ type: 'error', text: 'Open a folder or workspace first.' });
+      this.post({ type: 'error', text: adapter.noWorkspaceMessage() });
       return;
     }
     const project = this.ensureProjectForRoot();
     if (!project) {
-      this.post({ type: 'error', text: 'Open a folder or workspace first.' });
+      this.post({ type: 'error', text: adapter.noWorkspaceMessage() });
       return;
     }
     const promptContext = resume ? '' : preparedPromptContext ?? await this.composerContextBlock(root, composerContext);
@@ -5591,6 +5595,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       approvalMode: this.config().approvalMode,
       agentId: selection.agentId,
       reasoningEffort: selection.reasoningEffort,
+      // Lets the composer say a folder is needed before the user types, rather
+      // than after a message silently goes nowhere.
+      workspaceRoot: this.workspaceRoot()?.fsPath,
     });
   }
 

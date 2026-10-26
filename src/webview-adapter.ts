@@ -245,7 +245,12 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     }
 
     case 'error':
-      return agentEvent(message.conversationId, { type: 'error', message: message.text ?? message.message ?? 'Unknown error' });
+      // Without a conversation the event would be filed under the placeholder
+      // session, which is not the active one, so it rendered nowhere. React's
+      // top-level `error` message falls back to the active session instead.
+      return message.conversationId
+        ? agentEvent(message.conversationId, { type: 'error', message: message.text ?? message.message ?? 'Unknown error' })
+        : { type: 'error', message: message.text ?? message.message ?? 'Unknown error' };
 
     case 'generationError':
       return agentEvent(message.conversationId, { type: 'error', message: message.text ?? message.message ?? 'Generation failed' });
@@ -282,6 +287,9 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
         // projected onto it rather than sending an undefined policy.
         approvalPolicy: message.approvalPolicy ?? approvalPolicyForMode(message.approvalMode),
         approvalMode: message.approvalMode,
+        // A send cannot work without a folder; say so before the user types.
+        workspaceRoot: message.workspaceRoot,
+        canSend: Boolean(message.workspaceRoot ?? message.canSend),
       };
 
     case 'modelSelected':
@@ -700,6 +708,7 @@ export function buildInitialState(input: {
     hasProviders: true,
     usedTokens: input.usedTokens ?? 0,
     workspaceRoot: input.workspaceRoot,
+    canSend: Boolean(input.workspaceRoot),
     approvalPolicy: approvalPolicyForMode(input.approvalMode),
     ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
   };
@@ -1134,6 +1143,16 @@ export function exportFileName(title: string | undefined): string {
 /** The reply React's question card matches on call id. */
 export function questionAnswered(conversationId: string | undefined, callId: string, answers: Record<string, string[]>): ReactMsg {
   return { type: 'questionAnswered', convId: conversationId ?? '', callId, answers };
+}
+
+/**
+ * Why a send did nothing when no folder is open.
+ *
+ * Says what to do, because "nothing happens" is the least actionable failure a
+ * chat can produce.
+ */
+export function noWorkspaceMessage(): string {
+  return 'SleepyCode needs a folder or workspace to work in. Use File → Open Folder, then send your message again.';
 }
 
 // ---------------------------------------------------------------- modes
