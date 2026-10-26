@@ -226,8 +226,19 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'conversation':
       return conversationPayload(message);
 
+    case 'config':
     case 'configState':
-      return { type: 'configState', personas: [], activePersonaId: '', hasProviders: true, uiPrefs: message.uiPrefs, approvalPolicy: message.approvalPolicy };
+      // React has no personas or teams; SleepyCode's approval mode travels
+      // alongside so the composer's picker can reflect it.
+      return {
+        type: 'configState',
+        personas: [],
+        activePersonaId: '',
+        hasProviders: true,
+        uiPrefs: message.uiPrefs,
+        approvalPolicy: message.approvalPolicy,
+        approvalMode: message.approvalMode,
+      };
 
     case 'modelSelected':
       return { type: 'modelSelected', model: message.model ?? '' };

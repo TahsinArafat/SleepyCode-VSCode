@@ -1236,6 +1236,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showSettings(initialSetup = false): Promise<void> {
+    // The React settings webview is OpenCursor's, backed by SleepyCode data it
+    // cannot edit yet. VS Code's own settings page is the honest surface until
+    // the panel is ported.
+    if (this.reactMode && !initialSetup) {
+      void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:TahsinArafat.sleepycode-agent');
+      return;
+    }
     const config = this.config();
     const providers = this.getProviders();
     const sleepyAccount = getSleepyAccount();

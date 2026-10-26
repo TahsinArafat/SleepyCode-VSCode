@@ -723,3 +723,17 @@ test('an unknown preset leaves the mode unchanged', () => {
   assert.equal(adapter.approvalModeForPreset('mystery'), undefined);
   assert.equal(adapter.approvalModeForPreset(undefined), undefined);
 });
+
+// ---------------------------------------------------------------- config
+
+test('the config message becomes configState for React', () => {
+  const out = adapter.toReactMessage({ type: 'config', model: 'm1', provider: 'sleepyai', approvalMode: 'edits' });
+  assert.equal(out.type, 'configState');
+  assert.equal(out.hasProviders, true);
+  assert.deepEqual(out.personas, []);
+});
+
+test('approval mode is reflected in the config payload', () => {
+  const out = adapter.toReactMessage({ type: 'config', approvalMode: 'autonomous' });
+  assert.equal(out.approvalMode, 'autonomous');
+});
