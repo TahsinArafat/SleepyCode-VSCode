@@ -191,16 +191,20 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'reasoningDelta':
       return agentEvent(message.conversationId, { type: 'thinking-delta', text: message.text });
 
-    case 'tool':
+    case 'tool': {
+      const name = reactToolName(message.tool ?? message.name);
+      const input = parseToolArgs(message.input ?? message.args);
       return message.phase === 'start'
-        ? agentEvent(message.conversationId, { type: 'tool-call-started', callId: message.id, name: reactToolName(message.tool ?? message.name), input: undefined })
+        ? agentEvent(message.conversationId, { type: 'tool-call-started', callId: message.id, name, input })
         : agentEvent(message.conversationId, {
             type: 'tool-call-completed',
             callId: message.id,
-            name: reactToolName(message.tool ?? message.name),
+            name,
             status: message.failed ? 'error' : 'completed',
-            result: message.text ?? '',
+            result: message.result ?? message.text ?? '',
+            input,
           });
+    }
 
     case 'error':
       return agentEvent(message.conversationId, { type: 'error', message: message.text ?? message.message ?? 'Unknown error' });
@@ -730,4 +734,20 @@ const APPROVAL_PRESETS: Record<string, string> = {
 /** Map the React composer's approval preset onto a SleepyCode approval mode. */
 export function approvalModeForPreset(preset: unknown): string | undefined {
   return typeof preset === 'string' ? APPROVAL_PRESETS[preset] : undefined;
+}
+
+/**
+ * Tool arguments arrive either as an object or as the raw JSON string the model
+ * streamed. React's cards read fields like `path` and `command`, so a partial
+ * or malformed payload degrades to an empty object instead of throwing.
+ */
+export function parseToolArgs(args: unknown): Record<string, any> {
+  if (args && typeof args === 'object') return args as Record<string, any>;
+  if (typeof args !== 'string' || !args.trim()) return {};
+  try {
+    const parsed = JSON.parse(args);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
 }

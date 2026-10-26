@@ -737,3 +737,29 @@ test('approval mode is reflected in the config payload', () => {
   const out = adapter.toReactMessage({ type: 'config', approvalMode: 'autonomous' });
   assert.equal(out.approvalMode, 'autonomous');
 });
+
+// ---------------------------------------------------------------- tool payloads
+
+test('a tool args string is parsed into the React tool input', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', phase: 'start', id: 't1', tool: 'write_file',
+    name: 'Writing files…', args: '{"path":"src/a.ts","content":"x"}',
+  });
+  assert.equal(out.event.input.path, 'src/a.ts');
+});
+
+test('tool results are carried onto the completed card', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', phase: 'end', id: 't1', tool: 'run_command',
+    args: '{"command":"npm test"}', result: 'ok', failed: false,
+  });
+  assert.equal(out.event.status, 'completed');
+  assert.equal(out.event.result, 'ok');
+  assert.equal(out.event.input.command, 'npm test');
+});
+
+test('a malformed args string does not break the event', () => {
+  const out = adapter.toReactMessage({ type: 'tool', conversationId: 'c1', phase: 'start', id: 't1', tool: 'read_file', args: '{not json' });
+  assert.equal(out.event.type, 'tool-call-started');
+  assert.deepEqual(out.event.input, {});
+});
