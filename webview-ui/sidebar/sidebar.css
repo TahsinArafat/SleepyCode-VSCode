@@ -4293,3 +4293,47 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .worktree-banner span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worktree-banner button { padding: 2px 5px; font-size: 11px; }
 @media (max-width: 360px) { .goal-banner { align-items: flex-start; flex-direction: column; } .goal-actions { justify-content: flex-start; } }
+
+/* Transient notices. The host posts `toast` for MCP authorization results and
+   hook warnings; without a renderer those had no visible surface at all. */
+.toast-stack {
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	z-index: 60;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-width: min(360px, calc(100vw - 24px));
+	pointer-events: none;
+}
+.toast {
+	pointer-events: auto;
+	cursor: pointer;
+	padding: 9px 11px;
+	border-radius: var(--control-radius, 8px);
+	border: 1px solid var(--line-strong, var(--vscode-panel-border, #444));
+	background: var(--vscode-menu-background, var(--bg, #1f1f1f));
+	color: var(--fg);
+	box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+	font-size: var(--fs-sm, 12px);
+	animation: toast-in .16s ease-out;
+}
+.toast-attention {
+	border-color: var(--warn-line, var(--vscode-editorWarning-foreground, #d7ba7d));
+}
+.toast-title {
+	font-weight: 600;
+}
+.toast-body {
+	margin-top: 3px;
+	color: var(--fg-dim, var(--vscode-descriptionForeground, #a0a0a0));
+	word-break: break-word;
+}
+@keyframes toast-in {
+	from { opacity: 0; transform: translateY(6px); }
+	to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.toast { animation: none; }
+}

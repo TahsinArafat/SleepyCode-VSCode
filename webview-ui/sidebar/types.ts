@@ -127,7 +127,8 @@ export type InMessage =
   | { type: "questionAnswered"; convId: string; callId: string; answers: Record<string, string[]> }
   | { type: "approvalRequest"; convId: string; request: ApprovalRequestInfo }
   | { type: "approvalResolved"; convId: string; requestId: string; approved: boolean }
-  | { type: "fileIcon"; filename: string; icon?: FileIconInfo };
+  | { type: "fileIcon"; filename: string; icon?: FileIconInfo }
+  | { type: "toast"; id: number; title: string; message: string; kind: "info" | "attention" };
 
 /** Icon resolved from the IDE's active file-icon theme (data-URI assets). */
 export type FileIconInfo =

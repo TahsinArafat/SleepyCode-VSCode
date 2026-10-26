@@ -504,7 +504,8 @@ test('deleteConversation passes through', () => {
 test('messages with no SleepyCode counterpart are dropped', () => {
   // Both were closed since this test was written: updateChatWorkspace is
   // persisted and setMode is applied as a tool policy.
-  for (const type of ['setGoal', 'persistTurns', 'setPersona', 'getFileIcon']) {
+  // getFileIcon is now handled by the host, so it is no longer dropped.
+  for (const type of ['setGoal', 'persistTurns', 'setPersona']) {
     assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
   }
 });

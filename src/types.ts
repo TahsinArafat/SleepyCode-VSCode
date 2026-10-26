@@ -33,6 +33,8 @@ export type WebMessage =
   | { type: 'openBrowserTab'; url?: string }
   | { type: 'exportConversation'; conversationId?: string }
   | { type: 'cancelSubagent'; callId: string; reason?: 'timeout' | 'user' }
+  | { type: 'getFileIcon'; filename: string }
+  | { type: 'resolvePastedCode'; text: string; requestId: number }
   | { type: 'setMode'; mode: 'agent' | 'ask' | 'plan' }
   | { type: 'answerQuestion'; callId: string; answers: Record<string, string[]> }
   | { type: 'questionAnswered'; conversationId?: string; callId: string; answers: Record<string, string[]> }

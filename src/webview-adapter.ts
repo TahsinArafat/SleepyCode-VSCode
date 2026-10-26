@@ -182,6 +182,17 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'exportConversation':
       return { type: 'exportConversation', conversationId: message.convId };
 
+    case 'resolvePastedCode':
+      // The composer holds the paste until the host answers; an unanswered
+      // request dropped the paste entirely.
+      return { type: 'resolvePastedCode', text: message.text ?? '', requestId: message.requestId };
+
+    case 'getFileIcon':
+      // The host resolves the name against the user's icon theme and answers with
+      // a `fileIcon` message; there was no handler, so every edit card fell back
+      // to a generic icon.
+      return { type: 'getFileIcon', filename: message.filename };
+
     case 'logError':
       // The webview's own failures were invisible; the host log is where a
       // support report can actually be diagnosed.

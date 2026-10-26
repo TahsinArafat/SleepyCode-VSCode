@@ -10,6 +10,8 @@ artifacts/
 !.env.example
 .omo/
 .sleepycode/
+# Generated plan files are artefacts of a run, not project source.
+.sleepycode/plans/
 
 .ui-shots/
 .witdiff/

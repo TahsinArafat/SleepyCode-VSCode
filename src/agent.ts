@@ -30,6 +30,8 @@ import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
 import * as modeRules from './agent-mode';
 import * as planFile from './plan-file';
+import * as fileIcons from './file-icons';
+import * as paste from './paste-core';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -1134,6 +1136,51 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.pendingQuestions.set(id, finish);
       this.post({ type: 'question', conversationId, callId: id, header, questions });
     });
+  }
+
+  /**
+   * Find where pasted code came from.
+   *
+   * Searches a distinctive line across workspace files and accepts only a unique
+   * hit: a wrong `@code` mention is worse than a plain paste, because the model
+   * would be pointed at the wrong file. Bounded so a paste cannot scan a huge
+   * repository for long.
+   */
+  private async locatePastedCode(text: string): Promise<paste.CodeMention | undefined> {
+    const needle = paste.pastedCodeSearchLine(text);
+    if (!needle) return undefined;
+    const root = this.workspaceRoot();
+    if (!root) return undefined;
+    try {
+      const files = await vscode.workspace.findFiles('**/*', '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**}', 2_000);
+      let found: { path: string; line: number } | undefined;
+      for (const uri of files) {
+        let content: string;
+        try {
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.size > MAX_FILE_BYTES) continue;
+          content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+        } catch {
+          continue;
+        }
+        const index = content.indexOf(needle);
+        if (index < 0) continue;
+        if (found) {
+          // Ambiguous: two files contain the paste, so neither is "the" source.
+          this.log('info', 'paste.ambiguous', needle.slice(0, 60));
+          return undefined;
+        }
+        found = {
+          path: path.relative(root.fsPath, uri.fsPath).replace(/\\/g, '/'),
+          line: content.slice(0, index).split('\n').length,
+        };
+      }
+      if (found) this.log('info', 'paste.located', `${found.path}:${found.line}`);
+      return paste.toCodeMention(found);
+    } catch (error) {
+      this.log('warn', 'paste.locate.failed', errorMessage(error));
+      return undefined;
+    }
   }
 
   private settingsPanelHost(): SettingsPanelHost {
@@ -2277,6 +2324,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'exportConversation') {
       await this.exportConversation(message.conversationId);
+      return;
+    }
+    if (message.type === 'resolvePastedCode') {
+      const mention = await this.locatePastedCode(message.text);
+      this.post({ type: 'pasteResolved', requestId: message.requestId, ...(mention ? { mention } : {}) });
+      return;
+    }
+    if (message.type === 'getFileIcon') {
+      this.post({ type: 'fileIcon', filename: String(message.filename ?? '').toLowerCase(), icon: fileIcons.resolveFileIcon(message.filename ?? '') });
       return;
     }
     if (message.type === 'logError') {

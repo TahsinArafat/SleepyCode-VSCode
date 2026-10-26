@@ -21,6 +21,7 @@ import { History } from "./components/History";
 import { MessageActions } from "./components/MessageActions";
 import { WorkingSection } from "./components/WorkingSection";
 import { collapsePlanBlocks, splitWork, hasLiveWork } from "./workPresentation";
+import { ToastStack, type ToastItem } from "./components/Toast";
 import { QueuedMessageRow } from "./components/QueuedMessageRow";
 import { ThinkingStatus } from "../shared/ThinkingStatus";
 import { StaggerReveal, TextSwap } from "../shared/TextTransitions";
@@ -751,6 +752,9 @@ export function App() {
   const [openTabs, setOpenTabs] = React.useState<string[]>([]); // IDs of tabs visible in tab bar
   const workspaceReady = React.useRef(false);
   const [goals, setGoals] = React.useState<Record<string, ConversationGoal>>({});
+  // The base had no toast renderer, so every `toast` the host posted was dropped.
+  const [toasts, setToasts] = React.useState<ToastItem[]>([]);
+  const dismissToast = React.useCallback((id: number) => setToasts((list) => list.filter((toast) => toast.id !== id)), []);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1226,6 +1230,9 @@ export function App() {
           setDraftTick();
           break;
         }
+        case "toast":
+          setToasts((list) => [...list.filter((toast) => toast.id !== msg.id), { id: msg.id, title: msg.title, message: msg.message, kind: msg.kind }]);
+          break;
         case "modelSelected":
           setSelectedModel(msg.model || ""); // auto hidden for now
           break;
@@ -2029,6 +2036,7 @@ export function App() {
           </div>
         </div>
       )}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
