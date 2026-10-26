@@ -28,6 +28,7 @@ import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interru
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
+import * as modeRules from './agent-mode';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -3850,6 +3851,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const conversationAgent = this.agentConfig(conversation.agentId ?? this.config().agentId);
     const selection = this.selectionFor(conversation);
+    // Resolved once, here, and used for the prompt, the run's tools and every
+    // subagent's tools. Resolving it twice is how the UI and the run disagree.
+    const runMode = modeRules.resolveRunMode({
+      conversationMode: conversation.mode,
+      lastMode: this.context.globalState.get<string>('sleepycode.lastMode'),
+    });
+    this.log('info', 'run.mode', `${runMode} (conversation=${conversation.mode ?? 'unset'})`);
     if (!conversation.model && conversationAgent?.model && !resume) {
       selection.model = conversationAgent.model;
       this.post({ type: 'modelRoute', conversationId, requested: conversationAgent.model, model: conversationAgent.model, reason: `${conversationAgent.name} agent model` });
@@ -4054,6 +4062,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.mcpNoticeSignatures.delete(conversationId);
       }
       const instructions = [
+        modeRules.modeGuidance(runMode),
         await this.systemPrompt(root, selection.agentId),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
         `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
@@ -4111,11 +4120,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           terminals: this.terminals,
           memory: memoryAccess,
         });
-        if (role !== 'worker') {
-          for (const name of ['write_file', 'replace_text', 'delete_file', 'run_command', 'terminal_start', 'terminal_write', 'terminal_stop', 'memory_update', 'skillsmp_install_skill']) delete subagentTools[name];
+        // A subagent may not exceed its parent. Permissions flow down only: a
+        // worker in a read-only run gets no write tools, which is the difference
+        // between "the model was told not to" and "the tool is not there".
+        const roleTools = role === 'worker'
+          ? subagentTools
+          : Object.fromEntries(Object.entries(subagentTools).filter(([name]) => !modeRules.isMutatingTool(name)));
+        delete roleTools.delegate_task;
+        const ceiling = modeRules.applyCeiling(roleTools, runMode);
+        if (runMode !== 'agent') {
+          const dropped = modeRules.withheldByCeiling(roleTools, runMode);
+          this.log('info', 'subagent.ceiling', `${role} in ${runMode}: withheld ${dropped.length} (${dropped.join(',')})`);
         }
-        delete subagentTools.delegate_task;
-        filterAgentTools(subagentTools, conversationAgent?.tools);
+        const subagentToolSetBase = filterAgentTools(ceiling as Record<string, any>, conversationAgent?.tools);
         const roleInstruction = role === 'explorer'
           ? 'Research the repository read-only. Return findings with precise workspace-relative file paths and line references.'
           : role === 'reviewer'
@@ -4124,6 +4141,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const label = `Subagent (${role}): ${cleanTask.slice(0, 96)}${cleanTask.length > 96 ? '…' : ''}`;
         this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'start' });
         const subagentInstructions = [
+          modeRules.subagentGuidance(runMode),
           await this.systemPrompt(root, selection.agentId),
           `You are a ${role} subagent. ${roleInstruction}`,
           'You have an isolated context window. The parent conversation is not available unless context is explicitly included below.',
@@ -4156,7 +4174,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
           }
         }
-        const subagentToolSet = { ...subagentTools, ...(role === 'worker' ? (mcpConnection?.tools ?? {}) : {}) };
+        // MCP tools are gated too: an MCP server can write files.
+        const mcpForRole = role === 'worker' ? modeRules.applyCeiling((mcpConnection?.tools ?? {}) as Record<string, unknown>, runMode) : {};
+        const subagentToolSet = { ...subagentToolSetBase, ...mcpForRole } as Record<string, any>;
         const subagentSystem = subagentInstructions;
         const maxSubagentSteps = maxSteps === 0 ? 12 : Math.max(2, Math.min(12, maxSteps));
         const subagentMessages: ModelMessage[] = [{ role: 'user', content: `${cleanTask}${context?.trim() ? `\n\nContext from the parent agent:\n${context.trim()}` : ''}` }];
@@ -4294,18 +4314,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
       // Read-only modes withhold the tools that would need approval, which is how
       // `ask` and `plan` are enforced: approval is a property of agent mode, so a
-      // mode that cannot act never reaches the gate.
-      const mode = adapter.resolveRunMode({
-        conversationMode: selection.mode,
-        lastMode: this.context.globalState.get<string>('sleepycode.lastMode'),
-      });
-      this.log('info', 'run.mode', `${mode} (conversation=${selection.mode ?? 'unset'})`);
-      const runTools = mode === 'agent'
-        ? agentTools
-        : Object.fromEntries(Object.entries(agentTools).filter(([name]) => adapter.isToolAllowedInMode(mode, name)));
-      if (mode !== 'agent') {
-        const withheld = Object.keys(agentTools).length - Object.keys(runTools).length;
-        this.log('info', 'run.mode.readonly', `${mode}: withheld ${withheld} tool(s)`);
+      // mode that cannot act never reaches the gate. The same ceiling is applied
+      // to subagents above, so delegating cannot widen it.
+      const runTools = modeRules.applyCeiling(agentTools, runMode) as typeof agentTools;
+      if (runMode !== 'agent') {
+        this.log('info', 'run.mode.readonly', `${runMode}: withheld ${modeRules.withheldByCeiling(agentTools, runMode).join(',')}`);
       }
 
       // Reasoning effort rides along as provider options so it reaches the

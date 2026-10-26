@@ -46,7 +46,9 @@ test('subagent events have explicit lifecycle and child-parent routing', () => {
 });
 
 test('subagents cannot recurse and failures propagate to the parent agent', () => {
-  assert.match(agent, /delete subagentTools\.delegate_task/);
+  // The tool set variable is now role-filtered before the ceiling is applied;
+  // the guarantee is unchanged: a subagent is never offered delegation.
+  assert.match(agent, /delete roleTools\.delegate_task/);
   assert.match(tools, /Subagents cannot recursively delegate/);
   // A genuine failure still propagates with the same wording; a user-cancelled
   // subagent is reported as cancelled rather than as a defect.
