@@ -54,7 +54,13 @@ export class ErrorBoundary extends React.Component<
           <div className="eb-title"><Icon name="close" size={16} /> Something went wrong</div>
           <pre className="eb-msg">{String(this.state.error?.message || this.state.error)}</pre>
           <div className="eb-actions">
-            <button className="eb-btn" onClick={() => this.setState({ error: null })}>Recover</button>
+            {/* Clearing the error only helps a transient failure. A code error
+                such as a missing import throws again immediately, which made
+                this button look dead — so it now says what it does and a real
+                reload is offered alongside it. */}
+            <button className="eb-btn" onClick={() => this.setState({ error: null })} title="Try rendering again. A code error will reappear.">Recover</button>
+            <button className="eb-btn" onClick={() => window.location.reload()} title="Reload the panel; use this when Recover keeps failing.">Reload</button>
+            <button className="eb-btn ghost" onClick={() => { void navigator.clipboard?.writeText(`${this.state.error?.message ?? ""}\n\n${this.state.error?.stack ?? ""}`); }}>Copy error</button>
             <button className="eb-btn ghost" onClick={() => post({ type: "openLog" })}>View log</button>
           </div>
         </div>

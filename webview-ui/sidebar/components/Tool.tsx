@@ -17,6 +17,7 @@ import { basename, renderMarkdown } from "../../shared/markdown";
 import { vscode } from "../../shared/vscode";
 import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
 import { planPathFromResult } from "../../../src/webview-adapter";
+import { planBlockContent } from "../workPresentation";
 
 function post(msg: OutMessage) {
   vscode.postMessage(msg);

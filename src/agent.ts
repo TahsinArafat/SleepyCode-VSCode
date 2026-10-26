@@ -2292,6 +2292,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'requestExtensionLogs') {
+      if (this.reactMode) {
+        // The React base has no log view, so posting the entries would vanish.
+        // Reveal the Output channel, which is where they are already written.
+        this.showLogs();
+        return;
+      }
       this.sendExtensionLogs();
       return;
     }
