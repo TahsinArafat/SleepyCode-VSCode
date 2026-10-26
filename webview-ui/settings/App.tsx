@@ -723,7 +723,7 @@ export function App() {
           <img className="brand-badge" src={document.getElementById("root")?.dataset.icon} alt="" />
           <span>
             <span className="brand-name">Settings</span>
-            <span className="brand-sub">OpenCursor</span>
+            <span className="brand-sub">SleepyCode</span>
           </span>
         </div>
         <input
@@ -817,7 +817,7 @@ export function App() {
 
               <div className="section-label">Privacy</div>
               <p className="panel-hint">
-                OpenCursor is fully local and open source. There is no OpenCursor backend - your code,
+                SleepyCode is fully local and open source. There is no SleepyCode backend - your code,
                 keys and conversations stay on your machine and are only ever sent to the AI providers
                 you configure yourself.
               </p>
@@ -828,7 +828,7 @@ export function App() {
                 <Row title="Secure Key Storage" desc="API keys and OAuth tokens are kept in the OS secret store (VS Code SecretStorage), never in plain-text settings or synced files.">
                   <span className="badge-tag always">Encrypted</span>
                 </Row>
-                <Row title="No Telemetry" desc="OpenCursor collects no analytics, usage metrics or crash reports. The only outbound requests are the AI calls you trigger to your configured providers.">
+                <Row title="No Telemetry" desc="SleepyCode collects no analytics, usage metrics or crash reports. The only outbound requests are the AI calls you trigger to your configured providers.">
                   <span className="badge-tag always">None</span>
                 </Row>
                 <Row title="You Choose the Destination" desc="Every request goes to the exact provider you set up — a hosted API, your own OpenAI/Anthropic-compatible endpoint, or a fully offline model via llama.cpp / Ollama.">
@@ -1026,25 +1026,37 @@ export function App() {
               <div style={{ display: "flex", alignItems: "center", gap: 14, margin: "6px 0 18px" }}>
                 <img src={document.getElementById("root")?.dataset.icon} alt="" style={{ width: 48, height: 48, borderRadius: 10 }} />
                 <div>
-                  <div style={{ fontSize: 16, fontWeight: 600 }}>OpenCursor</div>
+                  <div style={{ fontSize: 16, fontWeight: 600 }}>SleepyCode</div>
                   <div className="row-desc" style={{ margin: 0 }}>AI coding agent chat inside VS Code — local, open source.</div>
                 </div>
               </div>
               <Group>
-                <Row title="Author" desc="Created and maintained by Pawan Osman.">
-                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/PawanOsman" })}>GitHub ↗</button>
+                <Row title="Author" desc="Created and maintained by Tahsin Arafat.">
+                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/TahsinArafat" })}>GitHub ↗</button>
                 </Row>
                 <Row title="Repository" desc="Source code, issues and contributions.">
-                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/PawanOsman/OpenCursor" })}>Open ↗</button>
+                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/TahsinArafat/SleepyCode-VSCode" })}>Open ↗</button>
                 </Row>
                 <Row title="Report an Issue" desc="Found a bug or have a feature request?">
-                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/PawanOsman/OpenCursor/issues" })}>Issues ↗</button>
+                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/TahsinArafat/SleepyCode-VSCode/issues" })}>Issues ↗</button>
                 </Row>
                 <Row title="License" desc="Free and open source under the MIT License.">
                   <span className="badge-tag glob">MIT</span>
                 </Row>
               </Group>
-              <p className="panel-hint">Copyright © 2026 Pawan Osman. Licensed under the MIT License.</p>
+              {/*
+                The React chat UI is based on OpenCursor by Pawan Osman, used
+                under the MIT License. Crediting it is a licence obligation, so
+                this row stays even though it is no longer our product name —
+                which is why the branding guard allows the name on an
+                attribution line only.
+              */}
+              <Group>
+                <Row title="Based on" desc="This chat UI is based on OpenCursor by Pawan Osman, used under the MIT License.">
+                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openExternal", url: "https://github.com/PawanOsman/OpenCursor" })}>Upstream ↗</button>
+                </Row>
+              </Group>
+              <p className="panel-hint">Copyright © 2026 Pawan Osman for the original work, licensed under the MIT License.</p>
             </>
           )}
 

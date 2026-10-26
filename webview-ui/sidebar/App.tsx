@@ -1766,9 +1766,9 @@ export function App() {
           <SubagentChat block={subBlock} approvals={approvalsByCall} />
         ) : !hasProviders ? (
           <div className="setup-screen">
-            <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="OpenCursor" />
+            <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="SleepyCode" />
             <StaggerReveal>
-              <h1 className="setup-title t-stagger-line">Build with OpenCursor</h1>
+              <h1 className="setup-title t-stagger-line">Build with SleepyCode</h1>
               <div className="setup-desc t-stagger-line t-stagger-line--2">Connect your account, add an API key, or run a local model to start building.</div>
             </StaggerReveal>
             <button className="setup-btn" onClick={() => post({ type: "openSettings", section: "providers" })}>
@@ -1777,7 +1777,7 @@ export function App() {
           </div>
         ) : turns.length === 0 ? (
           <div className="chat-empty">
-            <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="OpenCursor" />
+            <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="SleepyCode" />
             <StaggerReveal>
               <h1 className="empty-title t-stagger-line">Let’s build something</h1>
               <div className="empty-hint t-stagger-line t-stagger-line--2">Turn an idea into code.</div>

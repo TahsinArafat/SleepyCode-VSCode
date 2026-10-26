@@ -1520,9 +1520,9 @@ export function Composer({
           className={"editor" + (showPlaceholder && attachments.length === 0 ? " empty" : "")}
           contentEditable
           role="textbox"
-          aria-label={editing ? "Edit message" : "Message OpenCursor"}
+          aria-label={editing ? "Edit message" : "Message SleepyCode"}
           aria-multiline="true"
-          data-placeholder={isFirst ? "Ask OpenCursor anything, @ to add context" : "Add a follow-up"}
+          data-placeholder={isFirst ? "Ask SleepyCode anything, @ to add context" : "Add a follow-up"}
           suppressContentEditableWarning
           onDragOver={(e) => e.preventDefault()}
           onClick={(e) => {

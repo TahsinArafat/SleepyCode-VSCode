@@ -105,7 +105,7 @@ export function OllamaPanel({
         <label className="fc-field" style={{ flex: 1 }}><span>Daemon endpoint</span><input value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder="http://localhost:11434" /></label>
         <button className="btn-ghost" onClick={() => { setOperationError(""); vscode.postMessage({ type: "ollamaSetEndpoint", endpoint }); }}>Connect</button>
       </div>
-      <p className="panel-hint">Models and loaded memory are reported by this daemon. Host hardware below describes the machine running OpenCursor.</p>
+      <p className="panel-hint">Models and loaded memory are reported by this daemon. Host hardware below describes the machine running SleepyCode.</p>
       <HardwareSummary hardware={hardware} />
       {operationError && <div className="fc-error" role="alert">{operationError}</div>}
       <div className="sub-tabs" style={{ marginTop: 20 }}>

@@ -345,7 +345,7 @@ function OAuthLoginProgress({ status, starting, onCancel }: { status: OAuthStatu
               </div>
             </>
           )}
-          {deviceLogin ? <p className="panel-hint" style={{ margin: 0 }}>Enter the code in your browser. OpenCursor will finish connecting when you approve the sign-in.</p> : <>
+          {deviceLogin ? <p className="panel-hint" style={{ margin: 0 }}>Enter the code in your browser. SleepyCode will finish connecting when you approve the sign-in.</p> : <>
           <p className="panel-hint" style={{ margin: 0 }}>{importLogin ? "Paste your provider access token to connect this account. It will be saved in VS Code's secure storage." : "After signing in, if the browser cannot return to VS Code, paste the full callback URL from its address bar below."}</p>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <input

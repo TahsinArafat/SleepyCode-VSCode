@@ -123,7 +123,7 @@ export function ApprovalPicker({ policy, disabled = false }: { policy?: Approval
       data-state={exiting ? "closing" : "open"} data-side={position.bottom !== undefined && position.bottom !== "auto" ? "top" : "bottom"}
       inert={exiting || undefined} aria-hidden={exiting || undefined}
       style={{ ...position, pointerEvents: exiting ? "none" : undefined }} onKeyDown={onMenuKey}>
-      <div className="approval-menu-heading"><span>How should OpenCursor actions be approved?</span><button type="button" className="approval-menu-learn" onClick={openSettings}>Learn more</button></div>
+      <div className="approval-menu-heading"><span>How should SleepyCode actions be approved?</span><button type="button" className="approval-menu-learn" onClick={openSettings}>Learn more</button></div>
       <div role="menu" aria-label="Approval permissions">
         {OPTIONS.map((option, index) => <button key={option.id} ref={(node) => { itemRefs.current[index] = node; }} type="button"
           role="menuitemradio" aria-checked={preset === option.id} tabIndex={preset === option.id ? 0 : -1}
