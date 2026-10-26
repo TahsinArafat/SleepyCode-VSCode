@@ -218,3 +218,74 @@ test('the approval gate runs before a tool executes', async () => {
     await connection.close();
   }
 });
+
+// ---------------------------------------------------------------- persistence
+
+// The settings window saves through this path and then re-reads it to render.
+// If save and load disagree, a server the user just added disappears.
+function memoryStore(initial = {}) {
+  const data = { ...initial };
+  return {
+    get: (key, fallback) => (key in data ? data[key] : fallback),
+    update: async (key, value) => { data[key] = value; },
+    raw: data,
+  };
+}
+
+test('a saved remote connection survives a load round trip', async () => {
+  const store = memoryStore();
+  await connectMcpServers; // ensure module loaded
+  const core = await import('../src/mcp-core.ts');
+  await core.saveMcpConnectionTo(store, {
+    name: 'docs', description: '', transport: 'http', url: 'https://example.test/mcp',
+    auth: { type: 'none' }, enabled: true, order: 0,
+  });
+  const loaded = await core.loadMcpConnectionsFrom(store);
+  assert.equal(loaded.length, 1, `expected the saved server back, got ${JSON.stringify(loaded)}`);
+  assert.equal(loaded[0].name, 'docs');
+  assert.equal(loaded[0].url, 'https://example.test/mcp');
+  assert.equal(loaded[0].enabled, true);
+});
+
+test('a saved stdio connection survives a load round trip', async () => {
+  const core = await import('../src/mcp-core.ts');
+  const store = memoryStore();
+  await core.saveMcpConnectionTo(store, {
+    name: 'local', description: '', transport: 'stdio', command: 'npx', args: ['-y', 's'],
+    auth: { type: 'none' }, enabled: true, order: 0,
+  });
+  const loaded = await core.loadMcpConnectionsFrom(store);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0].command, 'npx');
+  assert.deepEqual(loaded[0].args, ['-y', 's']);
+});
+
+test('saving a second server keeps the first', async () => {
+  const core = await import('../src/mcp-core.ts');
+  const store = memoryStore();
+  await core.saveMcpConnectionTo(store, { name: 'a', description: '', transport: 'http', url: 'https://a.test/mcp', auth: { type: 'none' }, enabled: true, order: 0 });
+  await core.saveMcpConnectionTo(store, { name: 'b', description: '', transport: 'http', url: 'https://b.test/mcp', auth: { type: 'none' }, enabled: true, order: 1 });
+  const loaded = await core.loadMcpConnectionsFrom(store);
+  assert.deepEqual(loaded.map(c => c.name), ['a', 'b']);
+});
+
+test('updating a server by name replaces it rather than duplicating', async () => {
+  const core = await import('../src/mcp-core.ts');
+  const store = memoryStore();
+  await core.saveMcpConnectionTo(store, { name: 'a', description: '', transport: 'http', url: 'https://a.test/mcp', auth: { type: 'none' }, enabled: true, order: 0 });
+  await core.saveMcpConnectionTo(store, { name: 'a', description: '', transport: 'http', url: 'https://changed.test/mcp', auth: { type: 'none' }, enabled: false, order: 0 });
+  const loaded = await core.loadMcpConnectionsFrom(store);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0].url, 'https://changed.test/mcp');
+  assert.equal(loaded[0].enabled, false);
+});
+
+test('delete removes exactly one server', async () => {
+  const core = await import('../src/mcp-core.ts');
+  const store = memoryStore();
+  await core.saveMcpConnectionTo(store, { name: 'a', description: '', transport: 'http', url: 'https://a.test/mcp', auth: { type: 'none' }, enabled: true, order: 0 });
+  await core.saveMcpConnectionTo(store, { name: 'b', description: '', transport: 'http', url: 'https://b.test/mcp', auth: { type: 'none' }, enabled: true, order: 1 });
+  await core.deleteMcpConnectionFrom(store, 'a');
+  const loaded = await core.loadMcpConnectionsFrom(store);
+  assert.deepEqual(loaded.map(c => c.name), ['b']);
+});

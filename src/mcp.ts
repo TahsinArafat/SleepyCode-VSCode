@@ -3,10 +3,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import type { McpConnectionData, McpConnectionStatus, McpOAuthConfig, McpOAuthTokens } from './types';
 
-import { usableConnections } from './settings-adapter';
 import {
   connectServerDefinitions,
+  deleteMcpConnectionFrom,
   expandEnvironment,
+  loadMcpConnectionsFrom,
+  saveMcpConnectionTo,
   isMcpAuthRequired,
   type McpConnection,
   type McpServer,
@@ -15,46 +17,29 @@ import {
 export { connectMcpServers, emptyMcpConnection, expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
 export type { HttpServer, McpConnection, McpServer, StdioServer } from './mcp-core';
 
-const MCP_CONNECTIONS_KEY = 'sleepycode.mcpConnections';
+const MCP_AUTH_SECRET_PREFIX = 'sleepycode.mcpAuth.';
+
+/** The subset of `ExtensionContext.globalState` the connection store needs. */
+function connectionStore(context: vscode.ExtensionContext) {
+  return {
+    get: <T>(key: string, fallback: T) => context.globalState.get<T>(key, fallback),
+    update: (key: string, value: unknown) => context.globalState.update(key, value),
+  };
+}
 
 export async function loadMcpConnections(context: vscode.ExtensionContext): Promise<McpConnectionData[]> {
-  const stored = context.globalState.get<unknown[]>(MCP_CONNECTIONS_KEY, []);
-  if (!Array.isArray(stored)) return [];
-  // A connection needs a URL *or* a command to be reachable. Requiring a URL
-  // silently dropped every stdio entry the settings window could save.
-  // Stored data is a trust boundary (globalState can hold anything), so each
-  // field is normalised rather than assumed present.
-  return usableConnections(stored as Partial<McpConnectionData>[])
-    .map((connection): McpConnectionData => ({
-      name: connection.name ?? '',
-      description: connection.description ?? '',
-      transport: connection.transport ?? (connection.command ? 'stdio' : 'http'),
-      auth: connection.auth?.type ? connection.auth : { type: 'none' },
-      enabled: connection.enabled !== false,
-      order: connection.order ?? 0,
-      ...(connection.url ? { url: connection.url } : {}),
-      ...(connection.command ? { command: connection.command } : {}),
-      ...(connection.args ? { args: connection.args } : {}),
-      ...(connection.env ? { env: connection.env } : {}),
-      ...(connection.headers ? { headers: connection.headers } : {}),
-    }))
-    .sort((a, b) => a.order - b.order);
+  // The round trip lives in mcp-core so it is directly testable; this is the
+  // vscode-shaped adapter for it.
+  return (await loadMcpConnectionsFrom(connectionStore(context))) as McpConnectionData[];
 }
 
 export async function saveMcpConnection(context: vscode.ExtensionContext, connection: McpConnectionData): Promise<void> {
-  const existing = await loadMcpConnections(context);
-  const index = existing.findIndex((c) => c.name === connection.name);
-  if (index >= 0) existing[index] = connection;
-  else existing.push(connection);
-  existing.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  await context.globalState.update(MCP_CONNECTIONS_KEY, existing);
+  await saveMcpConnectionTo(connectionStore(context), connection as never);
 }
 
 export async function deleteMcpConnection(context: vscode.ExtensionContext, name: string): Promise<void> {
-  const existing = await loadMcpConnections(context);
-  await context.globalState.update(MCP_CONNECTIONS_KEY, existing.filter((c) => c.name !== name));
-  await context.secrets.delete(`sleepycode.mcpAuth.${name}`);
-  await context.secrets.delete(oauthTokenKey(name));
+  await deleteMcpConnectionFrom(connectionStore(context), name);
+  await context.secrets.delete(`${MCP_AUTH_SECRET_PREFIX}${name}`);
 }
 
 /** Build request headers for a connection's configured auth method. */

@@ -308,3 +308,84 @@ export function emptyMcpConnection(errors: string[] = []): McpConnection {
     close: async () => {},
   };
 }
+
+// ---------------------------------------------------------------- persistence
+
+/**
+ * Storage the MCP connection list needs. `vscode.ExtensionContext.globalState`
+ * satisfies this, and an in-memory object satisfies it in tests, so the
+ * save/load round trip — the thing that decides whether a server the user just
+ * added is still there on the next render — is directly testable.
+ */
+export interface McpKeyValueStore {
+  get<T>(key: string, fallback: T): T | undefined;
+  update(key: string, value: unknown): PromiseLike<void>;
+}
+
+export const MCP_CONNECTIONS_KEY = 'sleepycode.mcpConnections';
+
+export interface StoredMcpConnectionRecord {
+  name: string;
+  description?: string;
+  transport?: 'stdio' | 'sse' | 'http';
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  oauth?: { clientId?: string; scopes?: string[] };
+  auth?: { type?: string };
+  enabled?: boolean;
+  order?: number;
+}
+
+/**
+ * Read the saved connections, normalised.
+ *
+ * Each field is normalised rather than assumed: `globalState` can hold anything
+ * a previous version wrote, and an entry with neither `url` nor `command` would
+ * connect to nothing — so it is dropped instead of shown as a server that
+ * silently does not work.
+ */
+export async function loadMcpConnectionsFrom(store: McpKeyValueStore): Promise<StoredMcpConnectionRecord[]> {
+  const stored = store.get<unknown>(MCP_CONNECTIONS_KEY, []);
+  if (!Array.isArray(stored)) return [];
+  return stored
+    .filter((item): item is StoredMcpConnectionRecord => {
+      if (!item || typeof item !== 'object') return false;
+      const entry = item as StoredMcpConnectionRecord;
+      if (typeof entry.name !== 'string' || !entry.name) return false;
+      return Boolean((entry.url && entry.url.trim()) || (entry.command && entry.command.trim()));
+    })
+    .map((entry) => ({
+      name: entry.name,
+      description: entry.description ?? '',
+      transport: entry.transport ?? (entry.command ? 'stdio' : 'http'),
+      auth: entry.auth?.type ? entry.auth : { type: 'none' },
+      enabled: entry.enabled !== false,
+      order: entry.order ?? 0,
+      ...(entry.url ? { url: entry.url } : {}),
+      ...(entry.command ? { command: entry.command } : {}),
+      ...(entry.args ? { args: entry.args } : {}),
+      ...(entry.env ? { env: entry.env } : {}),
+      ...(entry.headers ? { headers: entry.headers } : {}),
+      ...(entry.oauth ? { oauth: entry.oauth } : {}),
+    }))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+/** Insert or replace one connection by name, preserving order. */
+export async function saveMcpConnectionTo(store: McpKeyValueStore, connection: StoredMcpConnectionRecord): Promise<void> {
+  const existing = await loadMcpConnectionsFrom(store);
+  const index = existing.findIndex((entry) => entry.name === connection.name);
+  if (index >= 0) existing[index] = connection;
+  else existing.push(connection);
+  existing.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  await store.update(MCP_CONNECTIONS_KEY, existing);
+}
+
+/** Remove one connection by name. */
+export async function deleteMcpConnectionFrom(store: McpKeyValueStore, name: string): Promise<void> {
+  const existing = await loadMcpConnectionsFrom(store);
+  await store.update(MCP_CONNECTIONS_KEY, existing.filter((entry) => entry.name !== name));
+}
