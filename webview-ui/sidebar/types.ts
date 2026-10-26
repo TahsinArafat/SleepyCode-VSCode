@@ -23,6 +23,7 @@ import type {
   Turn,
 } from "../../src/shared/turns";
 import type { ChatWorkspaceState, ConversationGoal, GoalStatus, QueuedMessage, ReviewTarget } from "../../src/shared/chatSession";
+import type { PanelRow } from "../../src/panel-core";
 import type { ApprovalPolicy } from "../../src/agent/approvalPolicy";
 export type { ApprovalPolicy } from "../../src/agent/approvalPolicy";
 export type {
@@ -128,7 +129,11 @@ export type InMessage =
   | { type: "approvalRequest"; convId: string; request: ApprovalRequestInfo }
   | { type: "approvalResolved"; convId: string; requestId: string; approved: boolean }
   | { type: "fileIcon"; filename: string; icon?: FileIconInfo }
-  | { type: "toast"; id: number; title: string; message: string; kind: "info" | "attention" };
+  | { type: "toast"; id: number; title: string; message: string; kind: "info" | "attention" }
+  /** The host opened one of its side panels; the drawer shows a loading state. */
+  | { type: "showPanel"; panel: string }
+  /** The rows for that panel. `id` is what a row's button acts on. */
+  | { type: "panel"; panel: string; rows: PanelRow[]; hint?: string };
 
 /** Icon resolved from the IDE's active file-icon theme (data-URI assets). */
 export type FileIconInfo =
@@ -198,5 +203,11 @@ export type OutMessage =
   | { type: "logError"; message: string; info?: string }
   | { type: "openLog" }
   | { type: "getFileIcon"; filename: string }
-  | { type: "resolvePastedCode"; text: string; requestId: number };
+  | { type: "resolvePastedCode"; text: string; requestId: number }
+  // Side-panel actions. Each one already has a host handler; the drawer only
+  // needs to send them.
+  | { type: "requestPanel"; panel: string }
+  | { type: "reindexProject" }
+  | { type: "selectAgent"; agentId: string }
+  | { type: "restoreCheckpoint"; conversationId: string; itemId: string };
 

@@ -4337,3 +4337,81 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 @media (prefers-reduced-motion: reduce) {
 	.toast { animation: none; }
 }
+
+/* ---------------------------------------------------------------- side panels
+ * Worktrees, Project Index, Agents, Scheduled Tasks, Undo History.
+ * Same shell as the thread list so the two surfaces feel like one app.
+ */
+.panel-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 100;
+	background: #00000033;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding: 46px 12px 12px;
+	animation: fade-in var(--dur-2) var(--ease);
+}
+.panel-popup {
+	width: 460px;
+	max-width: 100%;
+	max-height: min(560px, 100%);
+	background: var(--dropdown-bg);
+	border: 1px solid var(--line);
+	border-radius: var(--r-xl);
+	display: flex;
+	flex-direction: column;
+	box-shadow: var(--el-3);
+	overflow: hidden;
+}
+.panel-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--sp-4);
+	padding: 14px 16px 8px;
+	font-size: 14px;
+	font-weight: 500;
+}
+.panel-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-heading-actions { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.panel-heading-actions .btn-ghost { display: inline-flex; align-items: center; gap: 4px; }
+.panel-close {
+	display: inline-flex;
+	padding: 5px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--fg-dim);
+	cursor: pointer;
+}
+.panel-close:hover { background: var(--surface-2); }
+.panel-list { overflow-y: auto; padding: 4px 8px 8px; }
+.panel-empty {
+	padding: 14px 8px;
+	font-size: 11px;
+	color: var(--fg-dim);
+}
+.panel-row {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--sp-4);
+	padding: 7px 8px;
+	border-radius: var(--r-md, 6px);
+}
+.panel-row:hover { background: var(--surface-2); }
+.panel-row-main { flex: 1; min-width: 0; }
+.panel-row-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-row-detail {
+	font-size: 11px;
+	color: var(--fg-dim);
+	word-break: break-word;
+}
+.panel-row-action { flex: 0 0 auto; }
+.panel-hint {
+	padding: 8px 16px 14px;
+	font-size: 11px;
+	color: var(--fg-dim);
+	border-top: 1px solid var(--line-soft);
+}

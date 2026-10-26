@@ -22,6 +22,7 @@ import { MessageActions } from "./components/MessageActions";
 import { WorkingSection } from "./components/WorkingSection";
 import { collapsePlanBlocks, splitWork, hasLiveWork } from "./workPresentation";
 import { ToastStack, type ToastItem } from "./components/Toast";
+import { PanelDrawer, type PanelState } from "./components/PanelDrawer";
 import { QueuedMessageRow } from "./components/QueuedMessageRow";
 import { ThinkingStatus } from "../shared/ThinkingStatus";
 import { StaggerReveal, TextSwap } from "../shared/TextTransitions";
@@ -755,6 +756,10 @@ export function App() {
   // The base had no toast renderer, so every `toast` the host posted was dropped.
   const [toasts, setToasts] = React.useState<ToastItem[]>([]);
   const dismissToast = React.useCallback((id: number) => setToasts((list) => list.filter((toast) => toast.id !== id)), []);
+  // The host's side panels (worktrees, index, agents, hooks, undo history). It
+  // names the panel first and sends the rows after, so the drawer can open with
+  // a loading state instead of appearing empty and then filling in.
+  const [panel, setPanel] = React.useState<PanelState | null>(null);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1232,6 +1237,19 @@ export function App() {
         }
         case "toast":
           setToasts((list) => [...list.filter((toast) => toast.id !== msg.id), { id: msg.id, title: msg.title, message: msg.message, kind: msg.kind }]);
+          break;
+        case "showPanel":
+          setPanel({ id: msg.panel, rows: [], loading: true });
+          break;
+        case "panel":
+          // A payload for a different panel than the open one is stale (the user
+          // switched panels before the host answered) — drop it rather than
+          // relabel the open drawer with the wrong rows.
+          setPanel((current) =>
+            current && current.id !== msg.panel
+              ? current
+              : { id: msg.panel, rows: msg.rows || [], hint: msg.hint, loading: false },
+          );
           break;
         case "modelSelected":
           setSelectedModel(msg.model || ""); // auto hidden for now
@@ -2036,6 +2054,13 @@ export function App() {
           </div>
         </div>
       )}
+      <PanelDrawer
+        panel={panel}
+        conversationId={activeId}
+        running={isRunning}
+        onClose={() => setPanel(null)}
+        onPost={post}
+      />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

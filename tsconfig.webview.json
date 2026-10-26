@@ -22,5 +22,5 @@
     "allowImportingTsExtensions": true,
     "types": []
   },
-  "include": ["webview-ui", "src/shared", "src/webview-adapter.ts", "src/agent-mode.ts", "src/settings-adapter.ts", "src/plan-file.ts"]
+  "include": ["webview-ui", "src/shared", "src/webview-adapter.ts", "src/agent-mode.ts", "src/settings-adapter.ts", "src/plan-file.ts", "src/panel-core.ts"]
 }
