@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import { jsonSchema } from 'ai';
 import { McpConnection as McpServerConnection, type McpHost } from './mcp-client.ts';
 
+export type { McpHost } from './mcp-client.ts';
+
 /**
  * Pure MCP configuration and naming helpers.
  * No `vscode` import: the strip-types test runner loads this module directly,
@@ -19,6 +21,12 @@ export type McpConnection = {
   errors: string[];
   /** Tool count per server name, so a "test connection" can report it. */
   toolCounts: Record<string, number>;
+  /**
+   * Per-server outcome, including servers that failed. `auth_required` means the
+   * server wants a token and the settings window should offer Sign in; a plain
+   * transport error must not be mistaken for it.
+   */
+  authStates: Record<string, McpServerState>;
   /** Resources exposed by a connected server (empty when it has none). */
   listResources(serverName: string): Promise<{ uri: string; name?: string; description?: string; mimeType?: string }[]>;
   /** Read one resource's text contents. */
@@ -212,6 +220,7 @@ export async function connectServerDefinitions(
   const instructions: string[] = [];
   const errors: string[] = [];
   const toolCounts: Record<string, number> = {};
+  const authStates: Record<string, McpServerState> = {};
 
   for (const [serverName, server] of Object.entries(definitions)) {
     const { config, cwd } = toClientConfig(serverName, server);
@@ -222,6 +231,7 @@ export async function connectServerDefinitions(
       connections.set(serverName, connection);
       if (connection.tools.length === 0 && connection.lastError) throw new Error(connection.lastError);
       toolCounts[serverName] = connection.tools.length;
+      authStates[serverName] = 'ok';
       // Server-provided guidance goes into the system prompt, so it is scoped by
       // server name in the same way the tools are.
       if (connection.instructions?.trim()) instructions.push(`${serverName}: ${connection.instructions.trim()}`);
@@ -238,11 +248,14 @@ export async function connectServerDefinitions(
         };
       }
     } catch (error) {
-      await connection.dispose?.bind(connection)?.();
       connection.dispose();
       const message = error instanceof Error ? error.message : String(error);
       // A server that needs interactive sign-in is not a failure to report as
-      // "broken"; the settings surface turns this into a Sign in action.
+      // "broken"; the settings surface turns this into a Sign in action. The
+      // classification comes from the client's own auth state, because the
+      // server's wording ("missing authorization header") does not match the
+      // usual 401 phrasings.
+      authStates[serverName] = connection.authState === 'required' ? 'auth_required' : 'error';
       errors.push(`${serverName}: ${message}`);
     }
   }
@@ -252,6 +265,7 @@ export async function connectServerDefinitions(
     instructions,
     errors,
     toolCounts,
+    authStates,
     listResources: async (serverName: string) => {
       const connection = connections.get(serverName);
       if (!connection) return [];
@@ -293,6 +307,37 @@ export async function connectMcpServers(
 }
 
 /**
+ * Run the interactive OAuth sign-in for one remote server.
+ *
+ * The ported provider owns the whole flow (PKCE, dynamic client registration,
+ * loopback callback), and stores the resulting tokens in secret storage, so the
+ * next connect picks them up and attaches the bearer token itself.
+ */
+export async function mcpOAuthLogin(
+  server: { name: string; url?: string; transport?: 'stdio' | 'sse' | 'http'; oauth?: { clientId?: string; scopes?: string[] } },
+  workspaceRoot: string,
+  host: McpHost,
+): Promise<void> {
+  if (!server.url) throw new Error('OAuth applies to remote MCP servers.');
+  const connection = new McpServerConnection(
+    {
+      name: server.name,
+      transport: server.transport === 'sse' ? 'sse' : 'http',
+      url: server.url,
+      oauth: server.oauth,
+      enabled: true,
+    },
+    workspaceRoot,
+    host,
+  );
+  try {
+    await connection.login();
+  } finally {
+    connection.dispose();
+  }
+}
+
+/**
  * An MCP connection with nothing in it, for the timeout and failure paths.
  * Keeping one constructor means the placeholders cannot drift from the real
  * shape as capabilities are added.
@@ -303,6 +348,7 @@ export function emptyMcpConnection(errors: string[] = []): McpConnection {
     instructions: [],
     errors,
     toolCounts: {},
+    authStates: {},
     listResources: async () => [],
     readResource: async () => '',
     close: async () => {},

@@ -79,11 +79,11 @@ export function McpPanel({
                 <Icon name="link" size={14} />
                 <span>{srv.name || "(unnamed)"}</span>
                 <span className={"mcp-status " + (st?.connected ? "ok" : st?.error ? "err" : "idle")}>
-                  {st?.connected ? `${st.toolCount} tools` : st?.error ? "error" : "idle"}
+                  {st?.connected ? `${st.toolCount} tools` : st?.authState === "required" ? "sign in" : st?.error ? "error" : "idle"}
                 </span>
               </div>
               <Toggle label={`Enable ${srv.name}`} checked={srv.enabled} onChange={(v) => toggle(i, v)} />
-              {srv.transport !== "stdio" && srv.oauth && <button className="btn-ghost sm" disabled={st?.authState === "authorizing"} onClick={() => {
+              {srv.transport !== "stdio" && (srv.oauth || st?.authState === "required" || st?.authState === "authenticated") && <button className="btn-ghost sm" disabled={st?.authState === "authorizing"} onClick={() => {
                 setAuthError(""); vscode.postMessage({ type: st?.authState === "authenticated" ? "mcpLogout" : "mcpLogin", name: srv.name });
               }}>{st?.authState === "authorizing" ? "Signing in…" : st?.authState === "authenticated" ? "Sign out" : "Sign in"}</button>}
               <button className="btn-ghost sm" onClick={() => openEdit(i)}>

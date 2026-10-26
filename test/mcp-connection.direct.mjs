@@ -289,3 +289,105 @@ test('delete removes exactly one server', async () => {
   const loaded = await core.loadMcpConnectionsFrom(store);
   assert.deepEqual(loaded.map(c => c.name), ['b']);
 });
+
+// ---------------------------------------------------------------- oauth plumbing
+
+async function startHttpServerWith(args = []) {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [join(here, 'fixtures', 'mcp-http-server.mjs'), ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('HTTP MCP server did not report a port')), 10_000);
+    child.stdout.on('data', (chunk) => {
+      const match = /PORT=(\d+)/.exec(String(chunk));
+      if (match) { clearTimeout(timer); resolve(Number(match[1])); }
+    });
+    child.on('error', reject);
+  });
+  return { port, stop: () => child.kill() };
+}
+
+test('a server demanding a token reports auth_required, not a generic failure', async () => {
+  const http = await startHttpServerWith(['--require-auth']);
+  try {
+    const connection = await connectMcpServers(
+      JSON.stringify({ protected: { url: `http://127.0.0.1:${http.port}/mcp` } }),
+      here,
+      async () => {},
+      // A host is what makes the ported OAuth provider available. Without it the
+      // client cannot ask for a token, so the server's 401 surfaced as a plain
+      // transport error and the window had no Sign in affordance.
+      { secrets: memorySecrets(), openExternal: async () => undefined },
+    );
+    try {
+      assert.equal(connection.authStates.protected, 'auth_required', `errors: ${connection.errors.join(' | ')}`);
+    } finally {
+      await connection.close();
+    }
+  } finally {
+    http.stop();
+  }
+});
+
+test('the 401 is classified as auth_required even without a host', async () => {
+  const http = await startHttpServerWith(['--require-auth']);
+  try {
+    const connection = await connectMcpServers(
+      JSON.stringify({ protected: { url: `http://127.0.0.1:${http.port}/mcp` } }),
+      here,
+      async () => {},
+    );
+    try {
+      // The SDK recognises the 401 on its own, so the window can offer Sign in
+      // regardless. What the host adds is the ability to actually *complete* the
+      // sign-in (secret storage + opening the browser).
+      assert.equal(connection.authStates.protected, 'auth_required');
+    } finally {
+      await connection.close();
+    }
+  } finally {
+    http.stop();
+  }
+});
+
+test('OAuth sign-in refuses a stdio server with a clear reason', async () => {
+  const core = await import('../src/mcp-core.ts');
+  await assert.rejects(
+    () => core.mcpOAuthLogin({ name: 'local', transport: 'stdio' }, here, { secrets: memorySecrets(), openExternal: async () => undefined }),
+    /remote MCP servers/i,
+  );
+});
+
+test('OAuth sign-in is exported so the settings panel can drive it', async () => {
+  const core = await import('../src/mcp-core.ts');
+  assert.equal(typeof core.mcpOAuthLogin, 'function');
+});
+
+test('an unauthenticated server still connects when no auth is demanded', async () => {
+  const http = await startHttpServerWith([]);
+  try {
+    const connection = await connectMcpServers(
+      JSON.stringify({ open: { url: `http://127.0.0.1:${http.port}/mcp` } }),
+      here,
+      async () => {},
+      { secrets: memorySecrets(), openExternal: async () => undefined },
+    );
+    try {
+      assert.equal(connection.errors.length, 0);
+      assert.equal(Object.keys(connection.tools).length, 1);
+      assert.equal(connection.authStates.open, 'ok');
+    } finally {
+      await connection.close();
+    }
+  } finally {
+    http.stop();
+  }
+});
+
+function memorySecrets() {
+  const store = new Map();
+  return {
+    get: async (key) => store.get(key),
+    store: async (key, value) => { store.set(key, value); },
+    delete: async (key) => { store.delete(key); },
+  };
+}

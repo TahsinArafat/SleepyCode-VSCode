@@ -11,13 +11,30 @@ import {
   saveMcpConnectionTo,
   isMcpAuthRequired,
   type McpConnection,
+  type McpHost,
   type McpServer,
 } from './mcp-core';
 
-export { connectMcpServers, emptyMcpConnection, expandEnvironment, parseMcpServers, restrictedEnv } from './mcp-core';
+export { connectMcpServers, emptyMcpConnection, expandEnvironment, mcpOAuthLogin, parseMcpServers, restrictedEnv } from './mcp-core';
 export type { HttpServer, McpConnection, McpServer, StdioServer } from './mcp-core';
 
 const MCP_AUTH_SECRET_PREFIX = 'sleepycode.mcpAuth.';
+
+/**
+ * Adapt VS Code's secret storage and browser opener to the MCP client's host
+ * interface. This is what makes OAuth possible at all: the ported provider keeps
+ * tokens in secret storage and needs a way to open the authorization page.
+ */
+export function mcpHost(context: vscode.ExtensionContext): McpHost {
+  return {
+    secrets: {
+      get: (key: string) => Promise.resolve(context.secrets.get(key)),
+      store: (key: string, value: string) => Promise.resolve(context.secrets.store(key, value)),
+      delete: (key: string) => Promise.resolve(context.secrets.delete(key)),
+    },
+    openExternal: (url) => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
+  };
+}
 
 /** The subset of `ExtensionContext.globalState` the connection store needs. */
 function connectionStore(context: vscode.ExtensionContext) {
@@ -79,6 +96,9 @@ export async function connectToMcpConnections(
           url: connection.url ?? '',
           transport: connection.transport === 'sse' ? 'sse' : 'http',
           headers: { ...connection.headers, ...expandEnvironment(connection.auth?.customHeaders), ...authHeaders },
+          // Without this the client never builds an OAuth provider, so it can
+          // never attach a bearer token and a protected server stays unusable.
+          ...(connection.oauth ? { oauth: connection.oauth } : {}),
         };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -87,7 +107,7 @@ export async function connectToMcpConnections(
   }
 
   // stdio servers resolve `cwd` against this, so it cannot be empty.
-  const connection = await connectServerDefinitions(definitions, workspaceRoot ?? '', approve);
+  const connection = await connectServerDefinitions(definitions, workspaceRoot ?? '', approve, mcpHost(context));
 
   for (const [name, error] of connection.errors.map((entry) => {
     const index = entry.indexOf(': ');

@@ -61,7 +61,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private resolveCode?: (code: string) => void;
   private rejectCode?: (error: Error) => void;
   private timeout?: ReturnType<typeof setTimeout>;
-  private redirect = 'http://127.0.0.1/mcp/oauth/callback';
+  // `localhost` rather than `127.0.0.1`: OAuth servers commonly allow plain
+  // HTTP for the literal hostname `localhost` and refuse it for a numeric
+  // loopback address, which is what "web clients require https redirect URIs on
+  // non-loopback hosts" actually meant.
+  private redirect = 'http://localhost/mcp/oauth/callback';
   private interactive = false;
   public authorizationUrl?: string;
   readonly key: string;
@@ -100,8 +104,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
+      // RFC 7591 §2. Without it the authorization server classifies us as a
+      // "web" client and refuses a loopback http redirect with "web clients
+      // require https redirect URIs on non-loopback hosts", which makes OAuth
+      // impossible for a desktop extension. The SDK does not model this field,
+      // but it serialises the object as-is when registering.
+      application_type: 'native',
       ...(this.options.scopes?.length ? { scope: this.options.scopes.join(' ') } : {}),
-    };
+    } as OAuthClientMetadata;
   }
 
   state(): string {
@@ -238,7 +248,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     });
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Could not bind OAuth callback listener.');
-    this.redirect = `http://127.0.0.1:${address.port}/mcp/oauth/callback`;
+    this.redirect = `http://localhost:${address.port}/mcp/oauth/callback`;
     this.timeout = setTimeout(() => {
       this.rejectCode?.(new Error('MCP sign in timed out.'));
       this.endAuthorization();

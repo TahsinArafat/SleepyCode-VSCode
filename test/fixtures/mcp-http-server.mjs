@@ -21,6 +21,9 @@ const TOOLS = [
 ];
 
 const sessions = new Set();
+// --require-auth makes every request demand a Bearer token, which is how a
+// protected server answers before OAuth has run.
+const requireAuth = process.argv.includes('--require-auth');
 
 function handle(request) {
   if (request.method === 'initialize') {
@@ -40,6 +43,14 @@ function handle(request) {
 }
 
 const server = createServer((req, res) => {
+  if (requireAuth && !/^Bearer\s+\S+/i.test(req.headers.authorization || '')) {
+    res.writeHead(401, {
+      'content-type': 'application/json',
+      'www-authenticate': 'Bearer resource_metadata="http://127.0.0.1/mcp/.well-known/oauth-protected-resource"',
+    });
+    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'missing authorization header' }, id: null }));
+    return;
+  }
   if (req.method === 'GET') {
     // The stream endpoint the spec allows when sessions use server-sent events.
     res.writeHead(405, { 'content-type': 'application/json' });

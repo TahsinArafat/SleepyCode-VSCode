@@ -32,7 +32,8 @@ import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
 import { systemNotify } from './notifications';
 import { aggregateUsage, loadUsage, recordUsage } from './usage';
-import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
+import { beginMcpOAuth, connectMcpServers, connectToMcpConnections, deleteMcpConnection, emptyMcpConnection, finishMcpOAuth, loadMcpConnections, mcpHost, mcpOAuthLogin, parseMcpServers, saveMcpConnection, type McpConnection } from './mcp';
+import { McpOAuthProvider } from './mcp-oauth';
 import { clearGatewayConfig, fetchSleepyAccountData, fetchSleepyModelPrices, getSleepyAccount, getSleepyToken, getSleepyTokenSync, loginWithBrowser, loginWithDevice, refreshSleepyToken, sleepyApiBase, SLEEPY_ACCOUNT_URL, SLEEPY_WEBSITE_URL, type SleepyModelPrice } from './sleepyai';
 import { chooseAutoModel, rankModelsByPrice, sortModelsA2Z } from './model-routing-core';
 import { TerminalManager } from './terminal';
@@ -937,10 +938,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       mcpLogin: async (name) => {
         const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
         if (!connection) throw new Error(`MCP connection "${name}" was not found.`);
-        await beginMcpOAuth({ name: connection.name, auth: connection.auth }, this.context);
+        this.log('info', 'mcp.oauth.login.start', `${name} ${connection.url ?? ''}`);
+        // The ported provider runs the whole flow (PKCE, dynamic client
+        // registration, loopback callback) and stores tokens in secret storage,
+        // so the next connect attaches the bearer token itself. The old path
+        // required a hand-configured oauth2Config that a server added in the
+        // settings window never has, which is why OAuth could not work.
+        await mcpOAuthLogin(
+          { name: connection.name, url: connection.url, transport: connection.transport, oauth: connection.oauth },
+          this.workspaceRoot()?.fsPath ?? '',
+          mcpHost(this.context),
+        );
+        this.log('info', 'mcp.oauth.login.done', name);
+        this.mcpCache = undefined;
       },
       mcpLogout: async (name) => {
+        const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
+        if (connection?.url) {
+          // Clear the tokens the ported provider actually wrote.
+          await new McpOAuthProvider(connection.url, name, mcpHost(this.context).secrets, () => Promise.resolve(undefined))
+            .invalidateCredentials('all')
+            .catch(() => undefined);
+        }
         await this.context.secrets.delete(`sleepycode.mcpOAuth.tokens.${name}`);
+        this.log('info', 'mcp.oauth.logout', name);
         this.mcpCache = undefined;
       },
       log: (level, event, detail) => this.log(level, `panel.${event}`, detail),
@@ -3658,6 +3679,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             instructions: [...baseConnection.instructions, ...extra.connection.instructions],
             errors: [...baseConnection.errors, ...extra.connection.errors],
             toolCounts: { ...baseConnection.toolCounts, ...extra.connection.toolCounts },
+            authStates: { ...baseConnection.authStates, ...extra.connection.authStates },
             // Resources are looked up by server name, so the merged view asks
             // each side and takes whichever knows the server.
             listResources: async (serverName: string) => {

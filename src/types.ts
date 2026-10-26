@@ -338,6 +338,8 @@ export type McpConnectionData = {
   args?: string[];
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  /** OAuth client hints for a remote server; presence enables interactive sign-in. */
+  oauth?: { clientId?: string; scopes?: string[] };
   transport: McpTransportType;
   auth: McpAuthConfig;
   enabled: boolean;
