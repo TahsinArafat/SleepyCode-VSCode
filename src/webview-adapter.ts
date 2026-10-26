@@ -307,6 +307,35 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'workPhase':
       return agentEvent(message.conversationId, { type: 'shell-notify', message: message.first ?? '' });
 
+    case 'compactProgress':
+      return agentEvent(message.conversationId, {
+        type: 'compaction',
+        // React's compaction block only knows running/done/failed. A cancelled
+        // run did not summarize, so it must not read as done.
+        status: message.phase === 'done' ? 'done' : message.phase === 'error' || message.phase === 'cancelled' ? 'failed' : 'running',
+        ...(message.text ? { summary: message.text } : {}),
+      });
+
+    case 'queuedPrompt':
+      return queuedPrompts(message);
+
+    case 'contextNotice':
+      // React has no persistent notice block, but dropping this would hide a
+      // real change to what the model can see.
+      return agentEvent(message.conversationId, { type: 'shell-notify', message: message.text ?? '' });
+
+    case 'settingsResult':
+      // No toast surface in the React base; a failure is the only part that
+      // needs to be visible.
+      return message.ok === false
+        ? agentEvent(undefined, { type: 'error', message: message.text ?? 'Settings could not be saved.' })
+        : null;
+
+    case 'modelRoute':
+      return message.model && message.requested !== message.model
+        ? agentEvent(message.conversationId, { type: 'shell-notify', message: `Using ${message.model}${message.reason ? ` (${message.reason})` : ''}` })
+        : null;
+
     case 'restoreDraft':
       return { type: 'queueDraft', convId: message.conversationId ?? '', draft: { text: message.text ?? '', attachments: [] } };
 
@@ -381,6 +410,24 @@ const TOOL_NAMES: Record<string, string> = {
 export function reactToolName(tool: string | undefined): string {
   if (!tool) return 'Tool';
   return TOOL_NAMES[tool] ?? tool;
+}
+
+/**
+ * SleepyCode reports the queued prompts for a conversation; React keeps them in
+ * `workflowState.queues`. Rows need an id to be removable, so one is derived
+ * when the host did not supply ids.
+ */
+function queuedPrompts(message: SleepyMsg): ReactMsg {
+  const prompts: unknown[] = Array.isArray(message.prompts) ? message.prompts : [];
+  const ids: unknown[] = Array.isArray(message.ids) ? message.ids : [];
+  const now = Date.now();
+  const rows = prompts.map((prompt, index) => ({
+    id: typeof ids[index] === 'string' ? ids[index] : `queued-${now}-${index}`,
+    text: typeof prompt === 'string' ? prompt : String(prompt ?? ''),
+    status: 'queued',
+    createdAt: now,
+  }));
+  return { type: 'workflowState', queues: { [message.conversationId ?? '']: rows } };
 }
 
 function agentEvent(conversationId: string | undefined, event: Record<string, any>): ReactMsg {

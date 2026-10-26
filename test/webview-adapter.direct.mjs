@@ -813,3 +813,79 @@ test('configState carries the policy so the picker shows the current preset', ()
   const out = adapter.toReactMessage({ type: 'config', approvalMode: 'autonomous' });
   assert.equal(out.approvalPolicy.shell.mode, 'allow');
 });
+
+// ---------------------------------------------------------------- run notices
+
+test('compaction progress becomes a compaction event', () => {
+  const running = adapter.toReactMessage({ type: 'compactProgress', conversationId: 'c1', phase: 'summarizing' });
+  assert.equal(running.event.type, 'compaction');
+  assert.equal(running.event.status, 'running');
+
+  const done = adapter.toReactMessage({ type: 'compactProgress', conversationId: 'c1', phase: 'done', text: 'summary here' });
+  assert.equal(done.event.status, 'done');
+  assert.equal(done.event.summary, 'summary here');
+
+  const failed = adapter.toReactMessage({ type: 'compactProgress', conversationId: 'c1', phase: 'error' });
+  assert.equal(failed.event.status, 'failed');
+});
+
+test('a cancelled compaction does not claim success', () => {
+  const out = adapter.toReactMessage({ type: 'compactProgress', conversationId: 'c1', phase: 'cancelled' });
+  // There is no "cancelled" block in the React transcript, and claiming "done"
+  // would say the context was summarized when it was not.
+  assert.equal(out.event.status, 'failed');
+});
+
+test('queued prompts become the React queue', () => {
+  const out = adapter.toReactMessage({ type: 'queuedPrompt', conversationId: 'c1', prompts: ['first', 'second'], ids: ['q1', 'q2'] });
+  assert.equal(out.type, 'workflowState');
+  assert.equal(out.queues.c1.length, 2);
+  assert.equal(out.queues.c1[0].text, 'first');
+  assert.equal(out.queues.c1[0].id, 'q1');
+  assert.equal(out.queues.c1[0].status, 'queued');
+  assert.equal(typeof out.queues.c1[0].createdAt, 'number');
+});
+
+test('an empty queue clears the React queue', () => {
+  const out = adapter.toReactMessage({ type: 'queuedPrompt', conversationId: 'c1', prompts: [], ids: [] });
+  assert.deepEqual(out.queues.c1, []);
+});
+
+test('a queue without ids still produces addressable rows', () => {
+  const out = adapter.toReactMessage({ type: 'queuedPrompt', conversationId: 'c1', prompts: ['only'] });
+  assert.equal(out.queues.c1.length, 1);
+  assert.ok(out.queues.c1[0].id, 'a queued row needs an id to be removable');
+});
+
+test('a context notice is surfaced rather than dropped', () => {
+  const out = adapter.toReactMessage({
+    type: 'contextNotice', conversationId: 'c1', kind: 'trimmed',
+    text: 'Older history was trimmed to keep this conversation within memory limits.',
+  });
+  // React has no persistent notice block, but silence would hide a real change
+  // to what the model can see.
+  assert.equal(out.event.type, 'shell-notify');
+  assert.match(out.event.message, /trimmed/);
+});
+
+test('a failed settings save becomes an error event', () => {
+  const out = adapter.toReactMessage({ type: 'settingsResult', ok: false, text: 'bad value' });
+  assert.equal(out.event.type, 'error');
+  assert.equal(out.event.message, 'bad value');
+});
+
+test('a successful settings save needs no event', () => {
+  assert.equal(adapter.toReactMessage({ type: 'settingsResult', ok: true, text: 'Settings saved.' }), null);
+});
+
+test('a routed model is reported so Auto is not silent', () => {
+  const out = adapter.toReactMessage({ type: 'modelRoute', conversationId: 'c1', requested: 'auto', model: 'm1', reason: 'cheapest' });
+  assert.equal(out.event.type, 'shell-notify');
+  assert.match(out.event.message, /m1/);
+});
+
+test('reasoningEnd needs no mapping: thinking closes on the next delta', () => {
+  // applyToBlocks closes a thinking block on text-delta and tool-call-started,
+  // so a dedicated event would be redundant.
+  assert.equal(adapter.toReactMessage({ type: 'reasoningEnd' }), null);
+});
