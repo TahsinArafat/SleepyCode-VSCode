@@ -486,3 +486,66 @@ export function validatePanelMcpUrl(value: string | undefined): string | null {
 // ---------------------------------------------------------------- modes
 
 export { approvalAppliesInMode } from './webview-adapter.ts';
+
+// ---------------------------------------------------------------- sections
+
+/**
+ * Settings sections that belong to OpenCursor-only features.
+ *
+ * This is the canonical list. The webview's rail re-exports it rather than
+ * keeping its own copy, because two lists that must match are a bug waiting to
+ * happen: the rail would offer a section the host refuses to route to, or the
+ * host would refuse one the rail shows.
+ *
+ * Nothing is deleted — re-enabling a section is one line here.
+ */
+export const HIDDEN_SETTINGS_SECTIONS = [
+  'providers',
+  'llamacpp',
+  'ollama',
+  'personas',
+  'subagents',
+  'indexing',
+  'hooks',
+  // Backed by OpenCursor's own stores, which SleepyCode does not have: showing
+  // them would present controls that write nowhere.
+  'models',
+  'agents',
+] as const;
+
+const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
+
+/**
+ * The sections this build actually serves. Listed so an unknown id can be told
+ * apart from a known one: the window renders nothing for either, and a blank
+ * settings page reads as broken rather than as absent.
+ */
+export const VISIBLE_SETTINGS_SECTIONS = [
+  'general',
+  'usage',
+  'behavior',
+  'rules',
+  'marketplace',
+  'mcp',
+  'advanced',
+  'about',
+] as const;
+
+const visibleSections = new Set<string>(VISIBLE_SETTINGS_SECTIONS);
+
+/** True when a settings section is OpenCursor-only and must not be displayed. */
+export function isSectionHidden(id: string | undefined): boolean {
+  return typeof id === 'string' && hiddenSections.has(id);
+}
+
+/**
+ * The section the window should actually show.
+ *
+ * A jump or a host `navigate` can name a hidden section, or one that does not
+ * exist at all; the window renders nothing for either, so both resolve to the
+ * fallback instead of going blank. A visible section is never redirected.
+ */
+export function visibleSection(id: string | undefined, fallback = 'general'): string {
+  if (typeof id !== 'string' || !id) return fallback;
+  return visibleSections.has(id) ? id : fallback;
+}

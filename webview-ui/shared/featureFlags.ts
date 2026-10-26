@@ -8,35 +8,16 @@
  * a flag back on without restoring code from history.
  */
 
-/** Settings rail sections that belong to OpenCursor-only features. */
-export const HIDDEN_SETTINGS_SECTIONS = [
-  // OpenCursor-only connection and agent surfaces.
-  'providers',
-  'llamacpp',
-  'ollama',
-  'personas',
-  'subagents',
-  'indexing',
-  'hooks',
-  // Backed by OpenCursor's own stores, which SleepyCode does not have: showing
-  // them would present controls that write nowhere. MCP, General, Usage,
-  // Behavior, Advanced and About are the surfaces SleepyCode actually serves.
-  'models',
-  'agents',
-] as const;
+// The settings-section rules are the HOST's. The rail shows a section and the
+// host routes to it, so two lists that must match are a bug waiting to happen —
+// the rail would offer a page the host refuses to open. Re-exported, not copied.
+export { HIDDEN_SETTINGS_SECTIONS, isSectionHidden } from '../../src/settings-adapter.ts';
 
-export type HiddenSection = (typeof HIDDEN_SETTINGS_SECTIONS)[number];
-
-const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
-
-/** True when a settings section is OpenCursor-only and must not be rendered. */
-export function isSectionHidden(id: string): boolean {
-  return hiddenSections.has(id);
-}
+import { isSectionHidden } from '../../src/settings-adapter.ts';
 
 /** Drop hidden sections from a nav list while preserving the original order. */
 export function filterSections<T extends { id: string }>(sections: readonly T[]): T[] {
-  return sections.filter(section => !hiddenSections.has(section.id));
+  return sections.filter(section => !isSectionHidden(section.id));
 }
 
 /**

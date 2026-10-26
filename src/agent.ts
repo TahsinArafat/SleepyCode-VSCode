@@ -1245,6 +1245,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private settingsPanelHost(): SettingsPanelHost {
     return {
+      signIn: () => this.signIn(),
       readSettings: () => ({
         model: this.config().model,
         maxSteps: this.config().maxSteps,
@@ -1774,12 +1775,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void vscode.window.showInformationMessage(`SleepyCode received an unrecognized URI: ${uri.toString()}`);
   }
 
-  private async showSettings(initialSetup = false): Promise<void> {
+  private async showSettings(initialSetup = false, section?: string): Promise<void> {
     // In React mode the OpenCursor settings window is the real surface: it is
     // the only structured editor for MCP servers. The classic webview keeps its
     // own settings view for the fallback path.
     if (this.reactMode && !initialSetup) {
-      SettingsPanel.show(this.context, this.settingsPanelHost());
+      // The section is forwarded, not resolved here: the window owns which
+      // sections exist, so a hidden or unknown id falls back there and can say
+      // so on screen.
+      SettingsPanel.show(this.context, this.settingsPanelHost(), section);
       return;
     }
     const config = this.config();
@@ -2550,7 +2554,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       run.controller.abort();
       return;
     }
-    if (message.type === 'requestSettings') return void this.showSettings();
+    if (message.type === 'requestSettings') return void this.showSettings(false, message.section);
     if (message.type === 'compact') return this.compactConversation(message.conversationId);
     if (message.type === 'cancelCompact') {
       const compactProject = this.activeProject();

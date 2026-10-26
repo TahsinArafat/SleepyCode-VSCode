@@ -393,3 +393,38 @@ test('approval is only offered in agent mode', () => {
   assert.equal(adapter.approvalAppliesInMode('ask'), false);
   assert.equal(adapter.approvalAppliesInMode('plan'), false);
 });
+
+// ---------------------------------------------------------------- section routing
+
+test('a hidden section resolves to a visible one instead of a blank page', () => {
+  // The rail never offers a hidden section, but a jump or a host `navigate` can
+  // still name one — and the window renders nothing for it, which reads as a
+  // broken settings page rather than an absent one.
+  assert.equal(adapter.visibleSection('providers'), 'general');
+  assert.equal(adapter.visibleSection('models'), 'general');
+  assert.equal(adapter.visibleSection('personas'), 'general');
+  // A visible section is returned unchanged, so no jump is ever redirected.
+  for (const id of ['general', 'usage', 'behavior', 'rules', 'mcp', 'marketplace', 'advanced', 'about']) {
+    assert.equal(adapter.visibleSection(id), id, `${id} must not be redirected`);
+  }
+});
+
+test('no section, or an unknown one, falls back to the fallback', () => {
+  assert.equal(adapter.visibleSection(undefined), 'general');
+  assert.equal(adapter.visibleSection(''), 'general');
+  assert.equal(adapter.visibleSection('not-a-section'), 'general');
+  assert.equal(adapter.visibleSection('providers', 'about'), 'about');
+  assert.equal(adapter.visibleSection('mcp', 'about'), 'mcp');
+});
+
+test('the webview and the host agree on which sections are hidden', () => {
+  // Two lists that must match are a bug waiting to happen: the rail would show a
+  // section the host refuses to route to, or vice versa. The webview re-exports
+  // this one, so they cannot drift — assert that it is still the same list.
+  for (const id of adapter.HIDDEN_SETTINGS_SECTIONS) {
+    assert.equal(adapter.isSectionHidden(id), true, `${id} should be hidden`);
+    assert.equal(adapter.visibleSection(id), 'general', `${id} should resolve away`);
+  }
+  assert.equal(adapter.isSectionHidden('general'), false);
+  assert.equal(adapter.isSectionHidden('marketplace'), false);
+});

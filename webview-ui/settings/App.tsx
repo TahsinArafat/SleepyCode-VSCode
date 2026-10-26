@@ -19,6 +19,7 @@ import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection"
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
+import { visibleSection } from "../../src/settings-adapter.ts";
 import { MarketplacePanel } from "./panels/MarketplacePanel";
 
 interface Settings {
@@ -604,6 +605,9 @@ function IndexingPanel({
 
 export function App() {
   const [section, setSection] = React.useState<Section>("general");
+  // Set when a jump asked for a section this build does not serve, so the
+  // reason for landing elsewhere is on screen rather than only in the log.
+  const [sectionNotice, setSectionNotice] = React.useState("");
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
@@ -650,7 +654,15 @@ export function App() {
       if (msg.type === "loadSettings") {
         setS({ ...DEFAULTS, ...msg.settings });
       } else if (msg.type === "navigate") {
-        if (msg.section) setSection(msg.section as Section);
+        if (msg.section) {
+          // A hidden or unknown section renders nothing at all, which reads as a
+          // broken settings page. Resolve it to one this build serves and say so
+          // — silently landing the user somewhere else is worse than the truth.
+          const target = visibleSection(msg.section);
+          if (target !== msg.section) setSectionNotice(`“${msg.section}” is not part of this build, so ${target === "general" ? "General" : target} is shown instead.`);
+          else setSectionNotice("");
+          setSection(target as Section);
+        }
       } else if (msg.type === "modelsFetched") {
         setModels(msg.models || []);
         if (msg.modelList) setModelList(msg.modelList);
@@ -737,7 +749,7 @@ export function App() {
         {navFiltered.map((n) => (
           <React.Fragment key={n.id}>
             {n.sep && !navQuery && <div className="nav-sep" />}
-            <button className={"nav-item" + (section === n.id ? " active" : "")} aria-current={section === n.id ? "page" : undefined} onClick={() => setSection(n.id)}>
+            <button className={"nav-item" + (section === n.id ? " active" : "")} aria-current={section === n.id ? "page" : undefined} onClick={() => { setSectionNotice(""); setSection(n.id); }}>
               <Icon name={n.icon} />
               <span>{n.label}</span>
             </button>
@@ -754,13 +766,21 @@ export function App() {
       <main className="content" ref={contentRef}>
         <div className="settings-page">
         <div className="content-inner" key={section}>
+          {sectionNotice && <div className="panel-hint" role="status" style={{ marginTop: 0 }}>{sectionNotice}</div>}
           {section === "general" && (
             <>
               <h1 className="page-title">General</h1>
 
               <Group>
-                <Row title="Providers & API Keys" desc="Manage the AI providers, API keys and OAuth accounts this extension talks to.">
-                  <button className="btn-secondary" onClick={() => setSection("providers")}>Open</button>
+                {/*
+                  This opened the hidden `providers` section and rendered a blank
+                  page. That section is not part of this build (its data lives in
+                  OpenCursor's feature store), so the row now states what is true
+                  and offers the one provider action that exists: signing in to
+                  SleepyAI, the first-party provider.
+                */}
+                <Row title="Providers & API Keys" desc="SleepyAI is the built-in provider. Compatibility endpoints and their API keys are not editable in this window yet.">
+                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "signIn" })}>Sign in to SleepyAI</button>
                 </Row>
               </Group>
 

@@ -171,7 +171,12 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'requestFilePicker' };
 
     case 'openSettings':
-      return { type: 'requestSettings' };
+      // The requested section travels with the request; dropping it landed every
+      // jump on General, so "Get started" and "Add models" both opened the wrong
+      // page. Whether the section exists is the settings window's call.
+      return message.section
+        ? { type: 'requestSettings', section: message.section }
+        : { type: 'requestSettings' };
 
     case 'openLog':
       return { type: 'requestExtensionLogs' };

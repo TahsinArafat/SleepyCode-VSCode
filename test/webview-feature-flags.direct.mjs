@@ -57,3 +57,25 @@ test('multitask and project modes are hidden', () => {
   ];
   assert.deepEqual(flags.filterModes(modes).map(m => m.id), ['agent', 'plan', 'ask']);
 });
+
+test('the webview section rules ARE the host adapter rules, not a second copy', async () => {
+  // The rail shows a section and the host routes to it; if these two disagreed,
+  // the rail would offer a page the host refuses to open — or hide one it would.
+  // Re-exporting is what keeps them identical, so assert the identity.
+  const host = await import('../src/settings-adapter.ts');
+  assert.equal(flags.isSectionHidden, host.isSectionHidden, 'isSectionHidden must be the same function');
+  assert.equal(flags.HIDDEN_SETTINGS_SECTIONS, host.HIDDEN_SETTINGS_SECTIONS, 'the hidden list must be shared');
+});
+
+test('the rail never offers a section the host will not route to', async () => {
+  const host = await import('../src/settings-adapter.ts');
+  const nav = ['general', 'providers', 'llamacpp', 'ollama', 'usage', 'agents', 'models', 'behavior',
+    'personas', 'rules', 'marketplace', 'subagents', 'mcp', 'hooks', 'indexing', 'advanced', 'about'];
+  for (const id of nav) {
+    // Either it is visible and routes to itself, or it is hidden and drops out
+    // of the rail. Nothing may be visible-but-unroutable.
+    if (!flags.isSectionHidden(id)) {
+      assert.equal(host.visibleSection(id), id, `${id} is visible in the rail, so it must route to itself`);
+    }
+  }
+});

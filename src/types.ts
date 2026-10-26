@@ -29,7 +29,9 @@ export type WebMessage =
   | { type: 'selectModel'; model: string; provider?: string }
   | { type: 'selectReasoningEffort'; effort: string }
   | { type: 'refreshModels' }
-  | { type: 'requestSettings' }
+  // `section` is the page to open on; the settings window resolves it, so a
+  // hidden or unknown id falls back there rather than rendering a blank page.
+  | { type: 'requestSettings'; section?: string }
   | { type: 'requestExtensionLogs' }
   | { type: 'logError'; message: string; info?: string }
   | { type: 'openBrowserTab'; url?: string }

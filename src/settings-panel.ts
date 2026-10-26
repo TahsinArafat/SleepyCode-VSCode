@@ -42,6 +42,8 @@ export interface SettingsPanelHost {
   usage(): unknown;
   /** Refresh the provider catalog and return the model ids for the picker. */
   refreshModels(): Promise<string[]>;
+  /** Start the first-party sign-in flow. */
+  signIn(): void;
   /** Report a panel-level event to the extension log. */
   log(level: 'info' | 'warn' | 'error', event: string, detail?: string): void;
   /** Installed skills, for the Rules & Skills section. */
@@ -246,6 +248,12 @@ export class SettingsPanel {
         if (/^https?:\/\//i.test(target)) void vscode.env.openExternal(vscode.Uri.parse(target));
         return;
       }
+      case 'signIn':
+        // The window's only provider action. Compatibility-endpoint API keys have
+        // no editor here (that section is hidden), so this is what a signed-out
+        // user can actually do, instead of a row that opened a blank page.
+        this.host.signIn();
+        return;
       default:
         return;
     }

@@ -510,6 +510,17 @@ test('openSettings requests the settings surface', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'openSettings' }), { type: 'requestSettings' });
 });
 
+test('openSettings carries the section it was asked for', () => {
+  // Dropping it landed every jump on General, so "Get started" and "Add models"
+  // both opened the wrong page.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'openSettings', section: 'mcp' }),
+    { type: 'requestSettings', section: 'mcp' },
+  );
+  // No section still means "whatever the window opens on".
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openSettings', section: undefined }), { type: 'requestSettings' });
+});
+
 test('openLog requests extension logs', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'openLog' }), { type: 'requestExtensionLogs' });
 });
