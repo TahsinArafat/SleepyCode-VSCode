@@ -33,6 +33,7 @@ export type WebMessage =
   | { type: 'openBrowserTab'; url?: string }
   | { type: 'exportConversation'; conversationId?: string }
   | { type: 'cancelSubagent'; callId: string; reason?: 'timeout' | 'user' }
+  | { type: 'setMode'; mode: 'agent' | 'ask' | 'plan' }
   | { type: 'clearExtensionLogs' }
   | { type: 'extensionLogs'; logs: string[] }
   | { type: 'saveSettings'; maxSteps: number; approvalMode: string; searxngUrl: string; mcpServers: string; activeProvider: string; providers: import('./providers').Provider[]; apiKey: string; extraFreeModels: string; onlyDefaultModels: boolean; confirmDelete: boolean; compactionModel?: string; initialSetup?: boolean; subagentModels?: SubagentModelMap; maxPersistedReasoning?: number; useCli?: boolean; compact?: boolean }
@@ -259,6 +260,12 @@ export type Conversation = {
    * which sends no reasoning parameter at all.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Composer mode. `agent` acts (and is the only mode where approvals apply);
+   * `ask` and `plan` are read-only, enforced by withholding the mutating tools.
+   * Absent means `agent`, matching the composer's default.
+   */
+  mode?: 'agent' | 'ask' | 'plan';
 };
 
 /** User-defined agent that extends the built-in roster with its own model, tool policy, and skills. */

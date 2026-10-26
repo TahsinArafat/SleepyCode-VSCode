@@ -165,6 +165,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'searchFiles':
       return { type: 'fileMentionQuery', query: message.query };
 
+    case 'setMode':
+      return { type: 'setMode', mode: message.mode };
+
     case 'cancelSubagent':
       return { type: 'cancelSubagent', callId: message.callId, reason: message.reason };
 
@@ -674,12 +677,14 @@ export function buildInitialState(input: {
   turns?: Turn[];
   usedTokens?: number;
   approvalMode?: string;
+  /** Composer mode; `agent` acts, `ask` and `plan` are read-only. */
+  mode?: string;
   /** Drafts and open tabs restored from the host's per-workspace storage. */
   workspaceState?: unknown;
 }): ReactMsg {
   return {
     type: 'initialState',
-    mode: 'agent',
+    mode: input.mode === 'ask' || input.mode === 'plan' ? input.mode : 'agent',
     selectedModel: input.selectedModel ?? '',
     activeId: input.activeId,
     turns: input.turns ?? [],
@@ -1117,4 +1122,90 @@ export function exportFileName(title: string | undefined): string {
     .slice(0, 70)
     .trim();
   return `${base || 'conversation'}.md`;
+}
+
+// ---------------------------------------------------------------- modes
+
+/**
+ * The composer's modes: `agent` acts, `ask` and `plan` only look.
+ *
+ * Approval (the ask / auto-edits / open-access gate) is a property of *agent*
+ * mode alone, because edits and commands are the only things it guards. In `ask`
+ * and `plan` there is nothing to approve, so the tools that would need approval
+ * are simply not offered.
+ */
+export type ComposerMode = 'agent' | 'ask' | 'plan' | string | undefined;
+
+/** Tools that change the workspace or run commands. */
+const MUTATING_TOOLS = [
+  'write_file',
+  'replace_text',
+  'delete_file',
+  'run_command',
+  // Writing the project memory file is a workspace edit like any other.
+  'memory_update',
+  'terminal_start',
+  'terminal_write',
+  'terminal_stop',
+  'skillsmp_install_skill',
+  'worktree_create',
+  'worktree_merge',
+  'worktree_remove',
+  'github_commit',
+  // Opening a PR, commenting on one, or branching from an issue all change
+  // something on a remote the user has not approved. Reading an issue, listing
+  // issues, PR status and review comments are observations and stay available.
+  'github_open_pr',
+  'github_pr_comment',
+  'github_start_from_issue',
+];
+
+/** Prefixes whose tools mutate, so a newly added tool in the family is covered. */
+const MUTATING_PREFIXES = ['worktree_', 'skillsmp_install'];
+
+/**
+ * Tools whose family contains both reads and writes, so a prefix would be wrong.
+ * `terminal_read` and `terminal_list` only observe; `terminal_start`/`write`/`stop`
+ * change state. `worktree_list`/`status`/`compare` likewise only report.
+ */
+const NON_MUTATING_FAMILY_TOOLS = new Set([
+  'terminal_read',
+  'terminal_list',
+  'worktree_list',
+  'worktree_status',
+  'worktree_compare',
+]);
+
+/**
+ * Browser tools that act on a page rather than observe it. Reading a page is an
+ * observation; navigating, clicking, typing and evaluating change external state
+ * the user has not approved, so they are gated like a command.
+ */
+const BROWSER_ACTION_TOOLS = [
+  'browser_navigate', 'browser_back', 'browser_forward', 'browser_reload',
+  'browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_evaluate',
+  'browser_new_tab', 'browser_close_tab', 'browser_switch_tab', 'browser_close', 'browser_wait',
+];
+
+function isMutatingTool(tool: string): boolean {
+  if (NON_MUTATING_FAMILY_TOOLS.has(tool)) return false;
+  if (MUTATING_TOOLS.includes(tool)) return true;
+  if (BROWSER_ACTION_TOOLS.includes(tool)) return true;
+  return MUTATING_PREFIXES.some(prefix => tool.startsWith(prefix));
+}
+
+/**
+ * Whether a tool may be offered in this mode.
+ *
+ * An unrecognised mode is treated as read-only. Assuming "agent" would grant
+ * write access on the strength of a typo.
+ */
+export function isToolAllowedInMode(mode: ComposerMode, tool: string): boolean {
+  if (mode === 'agent') return true;
+  return !isMutatingTool(tool);
+}
+
+/** Approval is only meaningful where edits and commands can happen. */
+export function approvalAppliesInMode(mode: ComposerMode): boolean {
+  return mode === 'agent';
 }

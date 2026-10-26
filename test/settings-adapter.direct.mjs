@@ -383,3 +383,13 @@ test('installed skill rows carry the folder needed to uninstall', () => {
   assert.equal(rows[0].folder, 'pdf');
   assert.equal(rows[0].name, 'pdf');
 });
+
+// ---------------------------------------------------------------- mode display
+
+test('approval is only offered in agent mode', () => {
+  // Approval governs edits and commands, which only agent mode can perform, so a
+  // read-only mode should not present an approval preset at all.
+  assert.equal(adapter.approvalAppliesInMode('agent'), true);
+  assert.equal(adapter.approvalAppliesInMode('ask'), false);
+  assert.equal(adapter.approvalAppliesInMode('plan'), false);
+});

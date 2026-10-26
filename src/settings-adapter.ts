@@ -482,3 +482,7 @@ export function validatePanelMcpUrl(value: string | undefined): string | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------- modes
+
+export { approvalAppliesInMode } from './webview-adapter.ts';

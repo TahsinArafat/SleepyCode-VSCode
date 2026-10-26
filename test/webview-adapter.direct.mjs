@@ -502,9 +502,9 @@ test('deleteConversation passes through', () => {
 });
 
 test('messages with no SleepyCode counterpart are dropped', () => {
-  // updateChatWorkspace is now persisted by the host, so it is no longer in
-  // this list.
-  for (const type of ['setGoal', 'setMode', 'persistTurns', 'setPersona', 'getFileIcon']) {
+  // Both were closed since this test was written: updateChatWorkspace is
+  // persisted and setMode is applied as a tool policy.
+  for (const type of ['setGoal', 'persistTurns', 'setPersona', 'getFileIcon']) {
     assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
   }
 });
@@ -1201,4 +1201,107 @@ test('cancelSubagent reaches the host with the subagent id', () => {
   const out = adapter.toSleepyMessage({ type: 'cancelSubagent', callId: 'sub-1', reason: 'user' });
   assert.equal(out.type, 'cancelSubagent');
   assert.equal(out.callId, 'sub-1');
+});
+
+// ---------------------------------------------------------------- modes
+
+test('setMode reaches the host', () => {
+  const out = adapter.toSleepyMessage({ type: 'setMode', mode: 'ask' });
+  assert.equal(out.type, 'setMode');
+  assert.equal(out.mode, 'ask');
+});
+
+test('ask and plan modes are read-only: every mutating tool is blocked', () => {
+  const mutating = ['write_file', 'replace_text', 'delete_file', 'run_command', 'terminal_start', 'skillsmp_install_skill', 'worktree_create'];
+  for (const mode of ['ask', 'plan']) {
+    for (const tool of mutating) {
+      assert.equal(adapter.isToolAllowedInMode(mode, tool), false, `${tool} must be blocked in ${mode}`);
+    }
+  }
+});
+
+test('ask and plan modes keep the read-only tools', () => {
+  for (const mode of ['ask', 'plan']) {
+    for (const tool of ['read_file', 'list_files', 'search_files', 'get_diagnostics', 'plan', 'delegate_task', 'web_search', 'browser_snapshot', 'browser_inspect']) {
+      assert.equal(adapter.isToolAllowedInMode(mode, tool), true, `${tool} should stay available in ${mode}`);
+    }
+  }
+});
+
+test('driving a browser is an action, so ask and plan cannot do it', () => {
+  // Reading a page is an observation; navigating, clicking, typing and
+  // evaluating change external state the user has not approved.
+  for (const mode of ['ask', 'plan']) {
+    for (const tool of ['browser_navigate', 'browser_click', 'browser_type', 'browser_evaluate']) {
+      assert.equal(adapter.isToolAllowedInMode(mode, tool), false, `${tool} must be blocked in ${mode}`);
+    }
+  }
+});
+
+test('agent mode allows everything', () => {
+  for (const tool of ['write_file', 'run_command', 'delete_file', 'read_file']) {
+    assert.equal(adapter.isToolAllowedInMode('agent', tool), true, `${tool} should be allowed in agent mode`);
+  }
+});
+
+test('an unknown mode is treated as read-only rather than unrestricted', () => {
+  // Guessing "agent" for an unrecognised mode would silently grant write access.
+  assert.equal(adapter.isToolAllowedInMode('mystery', 'write_file'), false);
+  assert.equal(adapter.isToolAllowedInMode(undefined, 'run_command'), false);
+  assert.equal(adapter.isToolAllowedInMode('mystery', 'read_file'), true);
+});
+
+test('approval only applies to agent mode', () => {
+  // Approval governs edits and commands, which only agent mode can perform.
+  assert.equal(adapter.approvalAppliesInMode('agent'), true);
+  assert.equal(adapter.approvalAppliesInMode('ask'), false);
+  assert.equal(adapter.approvalAppliesInMode('plan'), false);
+  assert.equal(adapter.approvalAppliesInMode(undefined), false);
+});
+
+test('initialState carries the mode so the picker reflects reality', () => {
+  const out = adapter.buildInitialState({ mode: 'plan' });
+  assert.equal(out.mode, 'plan');
+});
+
+// ---------------------------------------------------------------- mode coverage
+
+// The real tool set, read from src/tools.ts so this cannot drift from the code.
+const realTools = await import('node:fs/promises').then(async (fs) => {
+  const src = await fs.readFile(new URL('../src/tools.ts', import.meta.url), 'utf8');
+  const literal = [...src.matchAll(/\n    ([a-z_]+): tool\(\{/g)].map((m) => m[1]);
+  const assigned = [...src.matchAll(/tools\.([a-z_]+) = tool\(/g)].map((m) => m[1]);
+  return [...new Set([...literal, ...assigned])].sort();
+});
+
+test('the real tool set was found', () => {
+  assert.ok(realTools.length > 30, `only found ${realTools.length} tools: ${realTools.join(',')}`);
+});
+
+test('read-only modes withhold every tool that changes something', () => {
+  const mutating = realTools.filter((tool) => !adapter.isToolAllowedInMode('ask', tool));
+  // Every mutating tool must be one we deliberately classified, never a
+  // read-only tool caught by an over-broad prefix.
+  const expected = [
+    'browser_back', 'browser_click', 'browser_close', 'browser_close_tab', 'browser_evaluate',
+    'browser_forward', 'browser_navigate', 'browser_new_tab', 'browser_press', 'browser_reload',
+    'browser_scroll', 'browser_switch_tab', 'browser_type', 'browser_wait',
+    'delete_file', 'github_commit', 'github_open_pr', 'github_pr_comment', 'github_start_from_issue',
+    'memory_update', 'replace_text', 'run_command', 'skillsmp_install_skill',
+    'terminal_start', 'terminal_stop', 'terminal_write',
+    'worktree_create', 'worktree_merge', 'worktree_remove', 'worktree_run',
+    'write_file',
+  ];
+  assert.deepEqual(mutating, expected.sort());
+});
+
+test('read-only modes keep every observation tool', () => {
+  const readOnly = realTools.filter((tool) => adapter.isToolAllowedInMode('plan', tool));
+  for (const tool of ['read_file', 'list_files', 'search_files', 'get_diagnostics', 'plan', 'web_search', 'repo_search', 'repo_symbol', 'browser_snapshot', 'browser_screenshot', 'terminal_read', 'terminal_list', 'memory_read', 'github_list_issues', 'worktree_list', 'worktree_status', 'skillsmp_search']) {
+    assert.ok(readOnly.includes(tool), `${tool} should stay available in plan mode`);
+  }
+});
+
+test('agent mode withholds nothing from the real tool set', () => {
+  assert.deepEqual(realTools.filter((tool) => !adapter.isToolAllowedInMode('agent', tool)), []);
 });

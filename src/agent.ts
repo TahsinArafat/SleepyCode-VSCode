@@ -266,6 +266,8 @@ type Selection = {
   provider: string;
   agentId: string;
   reasoningEffort: ReasoningEffort;
+  /** Composer mode; absent means `agent`. */
+  mode?: 'agent' | 'ask' | 'plan';
 };
 
 type ProjectMetaEntry = { id?: unknown; name?: unknown; path?: unknown; createdAt?: unknown; updatedAt?: unknown };
@@ -891,6 +893,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
       approvalMode: this.config().approvalMode,
+      mode: active?.mode ?? 'agent',
       // Drafts and open tabs live per workspace; without this they are lost on
       // every reload.
       workspaceState: this.readChatWorkspace(),
@@ -2150,6 +2153,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         for (const run of this.runs.values()) run.controller.abort();
         this.post({ type: 'state', conversationId: activeId, running: false, label: '' });
       }
+      return;
+    }
+    if (message.type === 'setMode') {
+      const conversation = this.activeConversation();
+      const mode = message.mode === 'ask' || message.mode === 'plan' ? message.mode : 'agent';
+      if (!conversation) return;
+      conversation.mode = mode;
+      this.log('info', 'conversation.mode', `${conversation.id} -> ${mode}`);
+      await this.persistProjects();
+      // The composer reflects the mode, and a read-only mode changes which tools
+      // the next turn is offered, so both are republished.
+      this.post({ type: 'config', mode });
       return;
     }
     if (message.type === 'cancelSubagent') {
@@ -4150,6 +4165,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         ...mcpConnection.tools,
       }, conversationAgent?.tools);
 
+      // Read-only modes withhold the tools that would need approval, which is how
+      // `ask` and `plan` are enforced: approval is a property of agent mode, so a
+      // mode that cannot act never reaches the gate.
+      const mode = selection.mode ?? 'agent';
+      const runTools = mode === 'agent'
+        ? agentTools
+        : Object.fromEntries(Object.entries(agentTools).filter(([name]) => adapter.isToolAllowedInMode(mode, name)));
+      if (mode !== 'agent') {
+        const withheld = Object.keys(agentTools).length - Object.keys(runTools).length;
+        this.log('info', 'run.mode.readonly', `${mode}: withheld ${withheld} tool(s)`);
+      }
+
       // Reasoning effort rides along as provider options so it reaches the
       // wire only for models that accept it; an unsupported model gets `{}`
       // and therefore no unexpected 400.
@@ -4163,7 +4190,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // so the loop decides.
         maxRetries: 1,
         instructions,
-        tools: agentTools,
+        tools: runTools,
         stopWhen: maxSteps === 0 ? isLoopFinished() : isStepCount(maxSteps),
         ...(Object.keys(effortBody).length ? { providerOptions: { [providerConfig.id]: effortBody } } : {}),
       });
@@ -5419,6 +5446,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       provider: conversation.provider ?? base.activeProvider,
       agentId: conversation.agentId ?? base.agentId,
       reasoningEffort: conversation.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      mode: conversation.mode ?? 'agent',
     };
   }
 
