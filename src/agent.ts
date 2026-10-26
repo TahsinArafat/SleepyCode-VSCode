@@ -1068,6 +1068,40 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * an aborted run, or the timeout — because a run that never resolves is a hung
    * extension.
    */
+  /**
+   * Report which preflight stage a send reached, and complain if one stalls.
+   *
+   * A send that never produces a run used to leave no trace beyond
+   * "message.send.received", which is indistinguishable from a dead extension.
+   * Each call records the stage; a 20 s timer names the stage that never
+   * finished.
+   */
+  private beginSendStage(conversationId: string): (stage: string) => void {
+    let current = 'start';
+    const started = Date.now();
+    let reported = false;
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - started;
+      this.log('warn', 'message.send.stalled', `conversation=${conversationId}; stage=${current}; elapsed=${elapsed}ms`);
+      // Say it in the chat too: a send that silently never starts is
+      // indistinguishable from a broken extension.
+      if (!reported && elapsed >= 20_000) {
+        reported = true;
+        this.post({
+          type: 'error',
+          conversationId,
+          text: `This message has not started after ${Math.round(elapsed / 1000)}s (stuck at "${current}"). Open the SleepyCode log for details, or press Stop and try again.`,
+        });
+      }
+    }, 20_000);
+    timer.unref?.();
+    return (next: string) => {
+      current = next;
+      this.log('info', 'message.send.stage', `${next} (${Date.now() - started}ms)`);
+      if (next === 'done') clearInterval(timer);
+    };
+  }
+
   private async askUser(
     conversationId: string,
     header: string,
@@ -3364,7 +3398,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       let conversationId = message.conversationId || project.activeConversationId;
       if (!project.conversations.some(conversation => conversation.id === conversationId)) {
         const active = this.activeConversation();
-        if (!active) return;
+        if (!active) {
+          // Returning silently here meant a send produced no run, no stream and
+          // no message: the message simply disappeared.
+          this.log('error', 'message.send.noConversation', `asked=${conversationId || '(none)'}; project=${project.id}; conversations=${project.conversations.length}`);
+          this.post({ type: 'error', text: 'This conversation is no longer open. Start a new chat and try again.' });
+          return;
+        }
+        this.log('warn', 'message.send.recovered', `asked=${conversationId || '(none)'} -> ${active.id}`);
         conversationId = active.id;
       }
       // The React composer renders the user's turn immediately in a placeholder
@@ -3424,15 +3465,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       // The React composer sends its own attachment shape. Images arrive as data
       // URLs, so they are written to temp files here before the run reads them.
+      // Named stages plus a watchdog: a preflight that never finishes used to
+      // look like "nothing happens" with no evidence of where it stopped.
+      const stage = this.beginSendStage(conversationId);
+      stage('attachments');
       const composerContext = await this.withReactAttachments(message);
+      stage('editor-context');
       const editorContext = root ? await this.composerContextBlock(root, composerContext) : '';
+      stage('project-context');
       const projectContext = root && composerContext?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
+      stage('engine');
       const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
 
       // The CLI owns the loop, tools, permissions, and history for a conversation
       // that has none of its own yet, so the local ToolLoopAgent must not also
       // run this send. A chat with leftover local history stays local instead.
       const engine = await this.ensureEngine();
+      stage('dispatch');
       const sending = project.conversations.find(conversation => conversation.id === conversationId);
       if (sending && this.cliOwns(sending, engine)) {
         void this.sendViaCli(conversationId, sendText, root).catch(error => {
@@ -3443,6 +3492,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      stage('done');
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
         this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
         this.enqueue(sendText, conversationId, composerContext, promptContext);
