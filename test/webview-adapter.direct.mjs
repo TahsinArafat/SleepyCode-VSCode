@@ -519,3 +519,68 @@ test('signed-in or in-progress status does not', () => {
   assert.equal(adapter.shouldOfferSignIn({ type: 'delta', text: 'x' }), false);
   assert.equal(adapter.shouldOfferSignIn(null), false);
 });
+
+// ---------------------------------------------------------------- pending changes
+
+test('conversation file changes become pending changes', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversation',
+    id: 'c1',
+    items: [{
+      id: 'i1', role: 'assistant', text: 'edited', timestamp: 1,
+      changes: [
+        { path: 'src/a.ts', action: 'Modified', additions: 4, deletions: 2 },
+        { path: 'src/new.ts', action: 'Created', additions: 9 },
+        { path: 'src/gone.ts', action: 'Deleted' },
+      ],
+    }],
+  });
+  assert.equal(out.changes.length, 3);
+  assert.deepEqual(out.changes[0], { path: 'src/a.ts', existedBefore: true, added: 4, removed: 2 });
+  assert.equal(out.changes[1].existedBefore, false);
+  assert.equal(out.changes[2].existedBefore, true);
+});
+
+test('reverted changes are left out of pending changes', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversation',
+    id: 'c1',
+    items: [{ id: 'i1', role: 'assistant', text: '', timestamp: 1, changes: [{ path: 'a.ts', action: 'Modified', reverted: true }] }],
+  });
+  assert.deepEqual(out.changes, []);
+});
+
+test('conversations without changes report an empty list', () => {
+  const out = adapter.toReactMessage({ type: 'conversation', id: 'c1', items: [{ id: 'i', role: 'user', text: 'x', timestamp: 1 }] });
+  assert.deepEqual(out.changes, []);
+});
+
+test('pendingChangesMessage wraps the latest turn changes', () => {
+  const out = adapter.pendingChangesMessage([
+    { id: 'i1', role: 'assistant', text: '', timestamp: 1, changes: [{ path: 'src/a.ts', action: 'Modified', additions: 1 }] },
+  ]);
+  assert.equal(out.type, 'pendingChanges');
+  assert.equal(out.changes.length, 1);
+  assert.equal(out.changes[0].path, 'src/a.ts');
+});
+
+test('pendingChangesMessage is empty without changes', () => {
+  assert.deepEqual(adapter.pendingChangesMessage(undefined).changes, []);
+});
+
+// ---------------------------------------------------------------- change review target
+
+test('latestAssistantItemId finds the newest assistant item', () => {
+  const items = [
+    { id: 'a', role: 'assistant' },
+    { id: 'u', role: 'user' },
+    { id: 'b', role: 'assistant' },
+    { id: 'u2', role: 'user' },
+  ];
+  assert.equal(adapter.latestAssistantItemId(items), 'b');
+});
+
+test('latestAssistantItemId is undefined without an assistant turn', () => {
+  assert.equal(adapter.latestAssistantItemId([{ id: 'u', role: 'user' }]), undefined);
+  assert.equal(adapter.latestAssistantItemId(undefined), undefined);
+});

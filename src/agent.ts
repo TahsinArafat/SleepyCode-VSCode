@@ -282,6 +282,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly reactStreaming = new Set<string>();
   /** The React base has no sign-in banner, so the offer is surfaced once. */
   private signInOffered = false;
+  /** Newest assistant item per conversation, used to route React change review. */
+  private readonly reactChangeTarget = new Map<string, string>();
   private projects: Project[] = [];
   private activeProjectId = '';
   private loaded = false;
@@ -798,6 +800,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       ? renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode')
       : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
     view.webview.onDidReceiveMessage((message: any) => {
+      if (this.reactMode && this.handleReactChangeAction(message)) return;
       const translated = this.reactMode ? adapter.toSleepyMessage(message) : message;
       // React sends messages with no SleepyCode counterpart (drafts, queue
       // actions, goals). Dropping them keeps the host handler from having to
@@ -842,6 +845,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
     }));
+  }
+
+  /**
+   * React's change-review actions name only a path. SleepyCode resolves an edit
+   * through the conversation and the assistant turn that made it, so the action
+   * is rewritten here using the tracked target before reaching `onMessage`.
+   */
+  private handleReactChangeAction(message: any): boolean {
+    const conversationId = this.activeProject()?.activeConversationId;
+    const itemId = conversationId ? this.reactChangeTarget.get(conversationId) : undefined;
+    if (!conversationId || !itemId || typeof message?.path !== 'string') return false;
+    if (message.type === 'diffChange') {
+      void this.onMessage({ type: 'gitReviewFile', conversationId, itemId, path: message.path } as WebMessage);
+      return true;
+    }
+    if (message.type === 'acceptChange') {
+      void this.onMessage({ type: 'gitStageChanges', conversationId, itemId, paths: [message.path] } as WebMessage);
+      return true;
+    }
+    if (message.type === 'rejectChange') {
+      void this.onMessage({ type: 'gitRevertFile', conversationId, itemId, path: message.path } as WebMessage);
+      return true;
+    }
+    return false;
   }
 
   /** Start the SleepyAI browser sign-in, used by the command and the React nudge. */
@@ -5383,6 +5410,14 @@ ${cached}`;
         void this.view?.webview.postMessage({ type: 'modelSelected', model: typed.selected });
       }
       if (adapter.shouldOfferSignIn(typed as any)) this.offerSignInOnce();
+      // React keeps the change-review list in its own state, so the files a turn
+      // touched travel as a separate message rather than inside the transcript.
+      if (typed.type === 'conversation') {
+        const items = (typed as { items?: unknown[] }).items;
+        void this.view?.webview.postMessage(adapter.pendingChangesMessage(items));
+        const target = adapter.latestAssistantItemId(items);
+        if (typed.id && target) this.reactChangeTarget.set(typed.id, target);
+      }
       // Side panels have no React screen yet, so their rows go to a QuickPick
       // instead of vanishing. The commands stay usable until they are ported.
       if (typed.type === 'panel') {

@@ -395,7 +395,37 @@ function conversationPayload(message: SleepyMsg): ReactMsg {
     usedTokens: message.usedTokens ?? contextTokensOf(message.items),
     running: message.running === true,
     workspaceRoot: message.workspaceRoot,
+    changes: pendingChangesOf(message.items),
   };
+}
+
+/** The React change-review message for a transcript's latest edits. */
+export function pendingChangesMessage(items: readonly any[] | undefined): ReactMsg {
+  return { type: 'pendingChanges', changes: pendingChangesOf(items) };
+}
+
+/**
+ * Files the latest turn edited, in the shape React's change review uses.
+ * Reverted files are dropped: they are no longer pending anything, and listing
+ * them would offer a "keep/reject" for a change that has already been undone.
+ */
+export function pendingChangesOf(items: readonly any[] | undefined): { path: string; existedBefore: boolean; added?: number; removed?: number }[] {
+  for (let i = (items?.length ?? 0) - 1; i >= 0; i--) {
+    const changes = items?.[i]?.changes;
+    if (!Array.isArray(changes) || !changes.length) continue;
+    return changes
+      .filter(change => change && !change.reverted)
+      .map(change => {
+        const out: { path: string; existedBefore: boolean; added?: number; removed?: number } = {
+          path: String(change.path ?? ''),
+          existedBefore: change.action !== 'Created',
+        };
+        if (typeof change.additions === 'number') out.added = change.additions;
+        if (typeof change.deletions === 'number') out.removed = change.deletions;
+        return out;
+      });
+  }
+  return [];
 }
 
 /**
@@ -570,4 +600,20 @@ export function shouldOfferSignIn(message: SleepyMsg | null | undefined): boolea
   if (!message || message.type !== 'sleepyStatus') return false;
   if (message.busy) return false;
   return message.loggedIn === false;
+}
+
+// ---------------------------------------------------------------- change review
+
+/**
+ * SleepyCode identifies a turn's edits by conversation + assistant item id,
+ * which the React change-review actions do not carry. The host remembers the
+ * newest assistant item so `diffChange`/`acceptChange`/`rejectChange` can be
+ * routed back to the right turn.
+ */
+export function latestAssistantItemId(items: readonly any[] | undefined): string | undefined {
+  for (let i = (items?.length ?? 0) - 1; i >= 0; i--) {
+    const item = items?.[i];
+    if (item?.role === 'assistant' && item.id) return String(item.id);
+  }
+  return undefined;
 }
