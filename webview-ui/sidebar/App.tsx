@@ -33,6 +33,7 @@ function footerTime(ts: number | undefined): string {
 }
 import { COMPOSER_HINTS, STARTERS, indexCard, recentConversations } from "../../src/empty-state.ts";
 import { modelLabel, signInBanner } from "../../src/webview-adapter.ts";
+import { retryCountdown } from "../../src/shared/turns.ts";
 import { DEFAULT_CONTEXT, contextFor, normalizeContext, toggleContext } from "../../src/context-panel.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
@@ -472,12 +473,30 @@ function ThinkingCard({ block }: { block: ThinkingBlock }) {
   );
 }
 
+/** The waiting half of a retry: a silent wait reads as a hang, so the planned
+ * delay counts down. Derived from the delay the host reported, never invented. */
+function RetryNote({ attempt, max, delayMs }: { attempt: number; max: number; delayMs?: number }) {
+  const [elapsed, setElapsed] = React.useState(0);
+  React.useEffect(() => {
+    if (!delayMs) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Date.now() - started), 250);
+    return () => window.clearInterval(timer);
+  }, [delayMs]);
+  const countdown = retryCountdown(delayMs, elapsed);
+  return (
+    <span>
+      Retrying ({attempt}/{max}){countdown ? ` · ${countdown}` : ""}…{" "}
+    </span>
+  );
+}
+
 function ErrorCard({ block }: { block: ErrorBlock }) {
   if (block.retrying) {
     return (
       <div className="error-card retrying">
         <Icon name="brain" size={12} className="error-spark" />
-        <span>Request failed, retrying ({block.retrying.attempt}/{block.retrying.max})… </span>
+        <RetryNote attempt={block.retrying.attempt} max={block.retrying.max} delayMs={block.retrying.delayMs} />
         <span className="error-detail">{block.message}</span>
       </div>
     );

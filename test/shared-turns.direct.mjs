@@ -133,3 +133,38 @@ test('a note with no reason still says which model ran', () => {
   assert.match(note.text, /gpt-6-sol/);
   assert.doesNotMatch(note.text, /\(\)/, 'no empty parenthetical');
 });
+
+// ---------------------------------------------------------------- retry countdown
+//
+// The classic retry row counted down ("retry in 8s") because a silent wait reads
+// as a hang. The retry event carries the delay; the block dropped it.
+
+const applyAllRetry = (events) => events.reduce((list, ev) => turns.applyEvent(list, ev), []);
+
+test('a retry block keeps the delay it will wait', () => {
+  const list = applyAllRetry([{ type: 'retry', attempt: 2, max: 5, delayMs: 8000, error: 'connection reset' }]);
+  const block = list[0].blocks.find(b => b.kind === 'error');
+  assert.equal(block.retrying.attempt, 2);
+  assert.equal(block.retrying.max, 5);
+  assert.equal(block.retrying.delayMs, 8000, 'without the delay there is nothing to count down');
+});
+
+test('a retry with no stated delay still records the attempt', () => {
+  // Some attempts are immediate; the countdown simply has nothing to show.
+  const list = applyAllRetry([{ type: 'retry', attempt: 1, max: 3, error: 'boom' }]);
+  const block = list[0].blocks.find(b => b.kind === 'error');
+  assert.equal(block.retrying.attempt, 1);
+  assert.equal(block.retrying.delayMs, undefined);
+});
+
+test('countdown text is derived from the delay, never fabricated', () => {
+  // The number shown has to be the wait that was actually planned.
+  assert.equal(turns.retryCountdown(8000, 0), 'retry in 8s');
+  assert.equal(turns.retryCountdown(8000, 3000), 'retry in 5s');
+  assert.equal(turns.retryCountdown(1000, 500), 'retry in 1s');
+  // Past the deadline the card stops claiming a wait is coming.
+  assert.equal(turns.retryCountdown(8000, 8000), 'retrying now');
+  assert.equal(turns.retryCountdown(8000, 20000), 'retrying now');
+  // No delay at all: nothing to count.
+  assert.equal(turns.retryCountdown(undefined, 0), '');
+});

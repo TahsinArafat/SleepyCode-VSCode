@@ -95,7 +95,7 @@ export interface ErrorBlock {
   kind: "error";
   message: string;
   /** When set, the run is retrying; shows a transient "retrying" notice. */
-  retrying?: { attempt: number; max: number };
+  retrying?: { attempt: number; max: number; /** How long this attempt will wait. */ delayMs?: number };
 }
 /** Context-compaction marker: earlier conversation was auto-summarized. */
 export interface CompactionBlock {
@@ -303,7 +303,13 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     blocks[i] = { ...b, status: ev.status, result: ev.result, diff: ev.diff, startLine: ev.startLine, endLine: ev.endLine, outcome: ev.outcome ?? b.outcome };
     return blocks;
   } else if (ev.type === "retry") {
-    const note: ErrorBlock = { kind: "error", message: ev.error, retrying: { attempt: ev.attempt, max: ev.max } };
+    const note: ErrorBlock = {
+      kind: "error",
+      message: ev.error,
+      // The delay travels with the attempt: a silent wait reads as a hang, and the
+      // card counts down from this number rather than inventing one.
+      retrying: { attempt: ev.attempt, max: ev.max, ...(ev.delayMs ? { delayMs: ev.delayMs } : {}) },
+    };
     if (last && last.kind === "error") blocks[blocks.length - 1] = note;
     else blocks.push(note);
   } else if (ev.type === "error") {
@@ -324,6 +330,19 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     else blocks.push(note);
   }
   return blocks;
+}
+
+/**
+ * The countdown for a waiting retry, derived from the planned delay.
+ *
+ * Empty when there is no delay (an immediate attempt), and "retrying now" once the
+ * deadline has passed — claiming a wait that is already over would be a lie.
+ */
+export function retryCountdown(delayMs: number | undefined, elapsedMs: number): string {
+  if (typeof delayMs !== 'number' || !Number.isFinite(delayMs) || delayMs <= 0) return '';
+  const remaining = delayMs - Math.max(0, elapsedMs);
+  if (remaining <= 0) return 'retrying now';
+  return `retry in ${Math.max(1, Math.ceil(remaining / 1000))}s`;
 }
 
 /** One line: which model ran, and the reason when there is one. */
@@ -549,7 +568,13 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   if (ev.type === "retry") {
     const { list, turn } = ensureAssistant(turns);
     const last = turn.blocks[turn.blocks.length - 1];
-    const note = { kind: "error" as const, message: ev.error, retrying: { attempt: ev.attempt, max: ev.max } };
+    const note = {
+      kind: "error" as const,
+      message: ev.error,
+      // Same shape as the block helper above: the delay is what the card counts
+      // down from, so it has to travel on both paths.
+      retrying: { attempt: ev.attempt, max: ev.max, ...(ev.delayMs ? { delayMs: ev.delayMs } : {}) },
+    };
     if (last && last.kind === "error") turn.blocks[turn.blocks.length - 1] = note;
     else turn.blocks.push(note);
     return list;
