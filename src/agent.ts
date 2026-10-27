@@ -2073,6 +2073,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   openUsage(): void {
+    // The React window owns the Usage page; posting `showUsage` at it was a
+    // message nothing read, so the command revealed the chat and did nothing.
+    if (this.reactMode) { void this.showSettings(false, 'usage'); return; }
     this.view?.show?.(true);
     this.post({ type: 'showUsage' });
     this.sendUsage();
@@ -2120,6 +2123,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   openMarketplace(): void {
+    // Same as openUsage: the section is a page in the settings window now.
+    if (this.reactMode) { void this.showSettings(false, 'marketplace'); return; }
     this.view?.show?.(true);
     this.post({ type: 'showMarketplace' });
     this.sendMarketplaceInstalled();
@@ -2761,7 +2766,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const selection = this.selectionFor(active);
         const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
         const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
-        this.post({ type: 'conversation', id: active.id, items: webviewTranscriptItems(active.items), model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, compactionUndoable, compactionRedoable });
+        this.post({ type: 'conversation', id: active.id, items: webviewTranscriptItems(active.items), model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, personaId: this.personaIdFor(active), compactionUndoable, compactionRedoable });
       }
     }
   }
@@ -2857,7 +2862,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.log('info', 'conversation.persona', `${conversation.id} -> ${personaId}`);
       await this.persistProjects();
       // The composer shows the persona in force; republish so the chip agrees.
-      this.post({ type: 'config', personaId });
+      this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: personaId });
       this.syncConversations();
       return;
     }
@@ -4415,7 +4420,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const { taken, rest } = takeSteering(this.queue, conversationId);
     if (!taken.length) return [];
     this.queue = rest;
-    for (const entry of taken) this.post({ type: 'steered', conversationId, text: entry.text });
+    for (const entry of taken) this.post({ type: 'steered', conversationId, requestId: entry.id, text: entry.text });
     this.postWorkflow(conversationId);
     this.log('info', 'message.steer.applied', `conversation=${conversationId}; updates=${taken.length}`);
     return taken.map(entry => entry.text);

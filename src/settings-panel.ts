@@ -221,8 +221,10 @@ export class SettingsPanel {
     // happened to press Sync, which reads as "nothing was checked".
     await this.pushFeatures();
     await this.pushFeatures(await this.safeSync());
-    const models = await this.host.refreshModels().catch(() => []);
-    this.post({ type: 'modelsFetched', models });
+    // Bootstrap through the same payload `fetchAllModels` uses: the Models page
+    // reads `modelList` (ids plus their options), so posting only the ids left it
+    // saying "No models are known yet" until the user pressed something.
+    await this.postModels();
   }
 
   private async pushFeatures(statuses?: PanelMcpStatus[]): Promise<void> {

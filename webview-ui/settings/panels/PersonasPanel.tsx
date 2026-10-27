@@ -48,7 +48,13 @@ export function PersonasPanel() {
   React.useEffect(() => {
     const handler = (event: MessageEvent) => {
       const message = event.data;
-      if (message?.type !== "personas") return;
+      // `personaSaved` is the reply to this page's own save: it carries the
+      // refreshed list AND the reason a save was refused. Listening only for
+      // `personas` meant a rejected save did nothing visible and a good one did
+      // not appear until the page was reopened.
+      if (message?.type !== "personas" && message?.type !== "personaSaved") return;
+      if (message.type === "personaSaved" && message.error) { setError(String(message.error)); return; }
+      if (message.type === "personaSaved") { setDraft(null); setError(""); }
       setState({
         personas: Array.isArray(message.personas) ? message.personas : [],
         activePersonaId: typeof message.activePersonaId === "string" ? message.activePersonaId : DEFAULT_PERSONA_ID,
@@ -73,7 +79,6 @@ export function PersonasPanel() {
     );
     if (problem) { setError(problem); return; }
     vscode.postMessage({ type: "savePersona", persona: personaFromDraft(draft.value) });
-    setDraft(null);
     setError("");
   };
 

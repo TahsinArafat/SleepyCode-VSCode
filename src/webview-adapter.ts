@@ -397,6 +397,29 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'conversations':
       return conversationsPayload(message);
 
+    case 'approvalResolved':
+      // The host answered a prompt the user did not: a cancelled run, an aborted
+      // tool. The card has to say so, or it keeps asking for a decision already
+      // taken — the webview marks it resolved and offers nothing further.
+      return {
+        type: 'approvalResolved',
+        convId: message.conversationId ?? '',
+        requestId: String(message.requestId ?? ''),
+        approved: message.approved === true,
+      };
+
+    case 'fileIcon':
+      // The IDE's icon for one file, resolved from the active icon theme. Without
+      // this every edit card and mention pill falls back to the generic glyph and
+      // the webview's waiters are never drained.
+      return { type: 'fileIcon', filename: String(message.filename ?? ''), icon: message.icon ?? null };
+
+    case 'pasteResolved':
+      // The host's answer to `resolvePastedCode`: whether the pasted text is a file
+      // it recognises. Dropping it left the webview's paste request pending forever,
+      // so every paste after the first was ignored.
+      return { type: 'pasteResolved', requestId: message.requestId, ...(message.mention ? { mention: message.mention } : {}) };
+
     case 'conversation':
       return conversationPayload(message);
 
@@ -473,7 +496,10 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       return null;
 
     case 'steered':
-      return agentEvent(message.conversationId, { type: 'user-steering', text: message.text ?? '' });
+      // The `requestId` is the queue row this guidance consumed: the webview
+      // prunes its optimistic steering row by it, and without it the row was
+      // re-inserted on every workflow update and never cleared.
+      return agentEvent(message.conversationId, { type: 'user-steering', text: message.text ?? '', ...(message.requestId ? { requestId: String(message.requestId) } : {}) });
 
     case 'liveUsage': {
       const prompt = message.inputTokens ?? 0;
@@ -824,6 +850,9 @@ function conversationPayload(message: SleepyMsg): ReactMsg {
     // the buttons render from one shape.
     compactionUndoable: message.compactionUndoable === true,
     compactionRedoable: message.compactionRedoable === true,
+    // The persona this chat runs on. Without it, switching to a chat with its own
+    // override kept showing the previous one.
+    ...(typeof message.personaId === 'string' ? { personaId: message.personaId } : {}),
   };
 }
 

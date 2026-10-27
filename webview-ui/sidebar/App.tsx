@@ -1528,6 +1528,10 @@ export function App() {
           setAccountStatus(msg);
           break;
         case "sessionStats":
+          // The host publishes these for whichever conversation is running, so a
+          // background run used to overwrite the context ring of the chat on
+          // screen with another chat's numbers.
+          if (msg.convId && activeIdRef.current && msg.convId !== activeIdRef.current) break;
           setSessionStats(msg);
           break;
         case "pendingChanges":
