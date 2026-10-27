@@ -59,6 +59,10 @@ export interface SettingsPanelHost {
   readModels(): Promise<unknown>;
   /** Built-in agents and the user's own, as the Agents page lists them. */
   readAgents(): Promise<unknown>;
+  /** The model chosen for each subagent role, and the models available. */
+  readSubagents(): Promise<unknown>;
+  /** Replace the per-role model map. */
+  writeSubagentModels(models: unknown): Promise<void>;
   /** Create or update one agent. */
   saveAgent(agent: unknown): Promise<void>;
   /** Remove one agent. Built-ins are refused host-side. */
@@ -347,6 +351,13 @@ export class SettingsPanel {
         // section is hidden while the list is empty.
         this.post(settingsAdapter.panelOAuthStatusMessage());
         return;
+      case 'getSubagents':
+        await this.postSubagents();
+        return;
+      case 'saveSubagentModels':
+        await this.host.writeSubagentModels(message.models).catch(() => undefined);
+        await this.postSubagents();
+        return;
       case 'getAgents':
         this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
         return;
@@ -483,6 +494,12 @@ export class SettingsPanel {
       default:
         return;
     }
+  }
+
+  /** Publish the per-role subagent models and the catalog they are chosen from. */
+  private async postSubagents(): Promise<void> {
+    const payload = (await this.host.readSubagents().catch(() => null)) as { models?: unknown; catalog?: string[] } | null;
+    this.post({ type: 'subagents', models: payload?.models ?? {}, catalog: payload?.catalog ?? [] });
   }
 
   /**

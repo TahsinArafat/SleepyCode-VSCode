@@ -417,7 +417,7 @@ test('a hidden section resolves to a visible one instead of a blank page', () =>
   assert.equal(adapter.visibleSection('models'), 'models');
   assert.equal(adapter.visibleSection('personas'), 'general');
   // A visible section is returned unchanged, so no jump is ever redirected.
-  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'hooks', 'indexing', 'models', 'agents', 'mcp', 'marketplace', 'advanced', 'about']) {
+  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'hooks', 'indexing', 'models', 'agents', 'subagents', 'mcp', 'marketplace', 'advanced', 'about']) {
     assert.equal(adapter.visibleSection(id), id, `${id} must not be redirected`);
   }
 });

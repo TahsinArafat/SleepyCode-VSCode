@@ -392,6 +392,9 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'getAgents',
   'saveAgent',
   'deleteAgent',
+  // Subagents: the per-role model map the host already consults at delegate time.
+  'getSubagents',
+  'saveSubagentModels',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -556,7 +559,6 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'llamacpp',
   'ollama',
   'personas',
-  'subagents',
   // Backed by a feature store SleepyCode does not have: showing it would present
   // controls that write nowhere.
 ] as const;
@@ -585,6 +587,8 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'models',
   // Backed now: it manages the agents the host already resolves.
   'agents',
+  // Backed now: it sets the model each subagent role runs on.
+  'subagents',
   'marketplace',
   'mcp',
   'advanced',

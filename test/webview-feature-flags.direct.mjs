@@ -6,7 +6,7 @@ const flags = await import('../webview-ui/shared/featureFlags.ts');
 test('sections with no host backing are hidden', () => {
   // `hooks` left this list: it now edits the rules the host actually evaluates,
   // instead of shell commands nothing ran and nothing stored.
-  for (const id of ['llamacpp', 'ollama', 'personas', 'subagents']) {
+  for (const id of ['llamacpp', 'ollama', 'personas']) {
     assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
 });
@@ -15,7 +15,7 @@ test('sections SleepyCode actually backs stay visible', () => {
   // These are the surfaces the settings window serves real SleepyCode data for.
   // `providers` is here on purpose: it gained a real surface, so it is no longer
   // an OpenCursor-only page.
-  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'models', 'agents', 'mcp', 'advanced', 'about']) {
+  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'models', 'agents', 'subagents', 'mcp', 'advanced', 'about']) {
     assert.equal(flags.isSectionHidden(id), false, `${id} should stay visible`);
   }
 });

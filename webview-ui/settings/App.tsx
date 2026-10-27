@@ -75,7 +75,7 @@ const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "personas", label: "Personas", icon: "bot", sep: true },
   { id: "rules", label: "Rules & Skills", icon: "ruler" },
   { id: "marketplace", label: "Skill Marketplace", icon: "book" },
-  { id: "subagents", label: "Subagents & Teams", icon: "agent" },
+  { id: "subagents", label: "Subagents", icon: "agent" },
   { id: "mcp", label: "Tools & MCPs", icon: "task" },
   { id: "hooks", label: "Hooks", icon: "infinity" },
   { id: "indexing", label: "Indexing & Docs", icon: "database" },
@@ -750,7 +750,7 @@ export function App() {
 
           {section === "marketplace" && <MarketplacePanel />}
 
-          {section === "subagents" && !isSectionHidden("subagents") && <SubagentsPanel features={features} setFeatures={setFeatures} models={models} modelList={modelList} />}
+          {section === "subagents" && <SubagentsPanel />}
 
           {section === "mcp" && (
             <McpPanel

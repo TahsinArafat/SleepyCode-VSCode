@@ -1,3 +1,4 @@
+import * as subagentRoles from './subagent-roles';
 import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
 import * as skillIdentity from './skill-identity';
@@ -1342,6 +1343,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       signIn: () => this.signIn(),
       readModels: async () => adapter.modelOptionsPayload(this.lastModelGroups, this.storedModelOptions()),
       readAgents: async () => ({ builtIn: AGENT_DEFINITIONS, custom: this.customAgents() }),
+      readSubagents: async () => ({
+        models: subagentRoles.normalizeSubagentModels(this.subagentModels()),
+        catalog: this.lastModelGroups.flatMap(group => group.models.map(model => (typeof model === 'string' ? model : model.id))).filter(Boolean),
+      }),
+      writeSubagentModels: async (models) => {
+        await this.context.globalState.update('sleepycode.subagentModels', subagentRoles.normalizeSubagentModels(models));
+      },
       saveAgent: async (agent) => {
         // The chat's own handler: one validation path and one upsert rule.
         await this.onMessage({ type: 'saveAgent', agent } as unknown as WebMessage);
