@@ -71,6 +71,16 @@ export interface SettingsPanelHost {
   readSubagents(): Promise<unknown>;
   /** Replace the per-role model map. */
   writeSubagentModels(models: unknown): Promise<void>;
+  /** Create or update one subagent definition. The host re-validates. */
+  saveSubagent(draft: unknown): Promise<void>;
+  /** Remove one subagent definition, and any team membership it had. */
+  deleteSubagent(id: string): Promise<void>;
+  /** Create or update one team. The host re-validates. */
+  saveTeam(draft: unknown): Promise<void>;
+  /** Remove one team, and its assignment to project runs. */
+  deleteTeam(id: string): Promise<void>;
+  /** Choose which teams project-mode runs delegate to. */
+  setActiveTeams(ids: string[]): Promise<void>;
   /** Create or update one agent. */
   saveAgent(agent: unknown): Promise<void>;
   /** Remove one agent. Built-ins are refused host-side. */
@@ -487,6 +497,33 @@ export class SettingsPanel {
       case 'setActiveProvider':
         await this.host.setActiveProvider(String(message.id ?? '')).catch(() => undefined);
         this.post({ type: 'providers', providers: await this.host.readProviders().catch(() => []) });
+        return;
+      case 'getSubagents':
+        this.post({ type: 'subagents', ...(await this.host.readSubagents().catch(() => ({}))) as object });
+        return;
+      case 'saveSubagent': {
+        let failure = '';
+        await this.host.saveSubagent(message.draft).catch((error) => { failure = error instanceof Error ? error.message : String(error); });
+        this.post({ type: 'subagentSaved', ok: !failure, error: failure || undefined, ...(await this.host.readSubagents().catch(() => ({}))) as object });
+        return;
+      }
+      case 'deleteSubagent':
+        await this.host.deleteSubagent(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'subagents', ...(await this.host.readSubagents().catch(() => ({}))) as object });
+        return;
+      case 'saveTeam': {
+        let failure = '';
+        await this.host.saveTeam(message.draft).catch((error) => { failure = error instanceof Error ? error.message : String(error); });
+        this.post({ type: 'teamSaved', ok: !failure, error: failure || undefined, ...(await this.host.readSubagents().catch(() => ({}))) as object });
+        return;
+      }
+      case 'deleteTeam':
+        await this.host.deleteTeam(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'subagents', ...(await this.host.readSubagents().catch(() => ({}))) as object });
+        return;
+      case 'setActiveTeams':
+        await this.host.setActiveTeams(Array.isArray(message.ids) ? message.ids.map(String) : []).catch(() => undefined);
+        this.post({ type: 'subagents', ...(await this.host.readSubagents().catch(() => ({}))) as object });
         return;
       case 'getPersonas':
         this.post({ type: 'personas', ...(await this.host.readPersonas().catch(() => ({ personas: [], activePersonaId: '' }))) as object });

@@ -1134,3 +1134,37 @@ test('the web-search switch is the endpoint the tool is registered from', () => 
   assert.match(agent, /searxngUrl: this\.context\.globalState\.get<string>\('sleepycode\.searxngUrl', ''\)/);
   assert.match(agent, /if \(patch\.searxngUrl !== undefined\) await this\.context\.globalState\.update\('sleepycode\.searxngUrl', patch\.searxngUrl \|\| undefined\);/);
 });
+
+test('a named subagent carries its own instructions, capability and model', () => {
+  // The chain: stored → listed to the model → resolved by name at delegate time →
+  // its prompt, capability and model used → a read-only one never gets write tools.
+  const core = read('src/subagents.ts');
+  assert.match(core, /export function findSubagent/);
+  assert.match(core, /export function subagentRosterBlock/);
+  const toolsSource = read('src/tools.ts');
+  assertSource(toolsSource, /subagent: z\.string\(\)\.max\(60\)\.optional\(\)/);
+  assertSource(toolsSource, /delegate\(role, task, context, subagent\)/);
+  assert.match(agent, /const definition = subagents\.findSubagent\(this\.delegatableSubagents\(\), subagentName\);/);
+  // Capability comes from the definition, not from the role it happens to run on.
+  assert.match(agent, /const subagentReadonly = definition \? definition\.readonly : role !== 'worker';/);
+  assert.match(agent, /const roleTools = subagentReadonly\n/);
+  // Model precedence: the definition wins, then the role's model, then the chat's.
+  assert.match(agent, /const subagentModelId = definition\?\.model \|\| this\.subagentModels\(\)\[role\] \|\| model;/);
+  // The roster is stated up front: a roster the model never sees is one it invents.
+  assert.match(agent, /const rosterBlock = subagents\.subagentRosterBlock\(this\.delegatableSubagents\(\)\);/);
+});
+
+test('a team narrows the roster, and assigns nothing by default', () => {
+  const core = read('src/subagents.ts');
+  assert.match(core, /export function resolveTeamSubagents/);
+  // No assigned team means everyone: the behaviour that existed before teams.
+  assert.match(core, /if \(!active\.length\) return \[\.\.\.all\];/);
+  // An assigned team whose members were all deleted falls back to everyone.
+  assert.match(core, /return picked\.length \? picked : \[\.\.\.all\];/);
+  // Deleting a subagent cannot leave a ghost on a roster.
+  assert.match(agent, /await this\.context\.globalState\.update\('sleepycode\.teams', subagents\.normalizeTeams\(this\.context\.globalState\.get<unknown>\('sleepycode\.teams', \[\]\), known\)\);/);
+  const panel = read('webview-ui/settings/panels/SubagentsPanel.tsx');
+  assertSource(panel, /vscode\.postMessage\(\{ type: "setActiveTeams", ids: next \}\)/);
+  assertSource(panel, /vscode\.postMessage\(\{ type: "saveSubagent", draft: subDraft\.value \}\)/);
+  assertSource(panel, /vscode\.postMessage\(\{ type: "saveTeam", draft: teamDraft\.value \}\)/);
+});

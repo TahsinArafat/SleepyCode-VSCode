@@ -36,7 +36,7 @@ export interface ToolContext {
   describePlan(): string;
   abortSignal?: AbortSignal;
   terminals?: TerminalManager;
-  delegate?: (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string) => Promise<string>;
+  delegate?: (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string, subagent?: string) => Promise<string>;
   /**
    * Ask the user a question and wait for the answer. Absent when there is no UI
    * to ask through, in which case the tool is not offered at all rather than
@@ -277,13 +277,14 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
   const delegate = ctx.delegate;
   if (delegate) {
     tools.delegate_task = tool({
-      description: 'Delegate one bounded task to an isolated specialized subagent and wait for its result. Use explorer for read-only repository research, reviewer for an independent read-only critique, and worker for focused implementation or verification. Give a precise task and only necessary context. Subagents cannot recursively delegate.',
+      description: 'Delegate one bounded task to an isolated specialized subagent and wait for its result. Name a `subagent` from the roster when one fits the job; otherwise use explorer for read-only repository research, reviewer for an independent read-only critique, or worker for focused implementation or verification. Give a precise task and only necessary context. Subagents cannot recursively delegate.',
       inputSchema: z.object({
         role: z.enum(['explorer', 'reviewer', 'worker']),
+        subagent: z.string().max(60).optional().describe('Name of a subagent from the <subagents> roster. Its own instructions, capability and model replace the role default; a read-only subagent stays read-only.'),
         task: z.string().trim().min(1).max(4000),
         context: z.string().max(12000).optional().describe('Only the context the subagent needs; it does not receive the parent conversation.'),
       }),
-      execute: async ({ role, task, context }) => delegate(role, task, context),
+      execute: async ({ role, subagent, task, context }) => delegate(role, task, context, subagent),
     });
   }
   if (ctx.terminals) {

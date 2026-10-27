@@ -2,6 +2,7 @@ import * as subagentRoles from './subagent-roles';
 import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
 import * as personas from './personas';
+import * as subagents from './subagents';
 import { steeringGuidance, takeSteering } from './steering';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
@@ -1385,7 +1386,69 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       readSubagents: async () => ({
         models: subagentRoles.normalizeSubagentModels(this.subagentModels()),
         catalog: this.lastModelGroups.flatMap(group => group.models.map(model => (typeof model === 'string' ? model : model.id))).filter(Boolean),
+        subagents: this.allSubagents(),
+        teams: this.teams(),
+        activeTeamIds: this.activeTeamIds(),
+        roles: subagentRoles.SUBAGENT_ROLES.map(role => ({ role, ...subagentRoles.ROLE_META[role] })),
       }),
+      saveSubagent: async (draft) => {
+        const value = draft as Record<string, unknown>;
+        const custom = subagents.normalizeCustomSubagents(this.context.globalState.get<unknown>('sleepycode.subagents', []));
+        const candidate = subagents.subagentFromDraft({
+          id: String(value.id ?? ''),
+          name: String(value.name ?? ''),
+          description: String(value.description ?? ''),
+          prompt: String(value.prompt ?? ''),
+          role: value.role as subagents.SubagentDef['role'],
+          readonly: value.readonly === true,
+          model: typeof value.model === 'string' ? value.model : undefined,
+        });
+        const existing = custom.find(item => item.id === candidate.id);
+        // Built-ins take part in the name-uniqueness rule too, or a custom
+        // definition could take the name the model already knows.
+        const problem = subagents.validateSubagentDraft(candidate, this.allSubagents(), { isNew: !existing });
+        if (problem) throw new Error(problem);
+        const next = existing ? custom.map(item => item.id === candidate.id ? candidate : item) : [...custom, candidate];
+        await this.context.globalState.update('sleepycode.subagents', next);
+      },
+      deleteSubagent: async (id) => {
+        const stringId = String(id ?? '');
+        const next = subagents.normalizeCustomSubagents(this.context.globalState.get<unknown>('sleepycode.subagents', [])).filter(item => item.id !== stringId);
+        await this.context.globalState.update('sleepycode.subagents', next);
+        // A removed member cannot stay on a roster: normalizeTeams drops it, and
+        // re-saving makes that durable rather than a display-only correction.
+        const known = subagents.allSubagents(next).map(def => def.id);
+        await this.context.globalState.update('sleepycode.teams', subagents.normalizeTeams(this.context.globalState.get<unknown>('sleepycode.teams', []), known));
+      },
+      saveTeam: async (draft) => {
+        const value = draft as Record<string, unknown>;
+        const candidate = subagents.teamFromDraft({
+          id: String(value.id ?? ''),
+          name: String(value.name ?? ''),
+          description: String(value.description ?? ''),
+          subagentIds: Array.isArray(value.subagentIds) ? value.subagentIds.map(String) : [],
+        });
+        const existingTeams = this.teams();
+        const problem = subagents.validateTeamDraft(candidate, existingTeams, { isNew: !existingTeams.some(team => team.id === candidate.id) });
+        if (problem) throw new Error(problem);
+        const known = this.allSubagents().map(def => def.id);
+        const next = existingTeams.some(team => team.id === candidate.id)
+          ? existingTeams.map(team => team.id === candidate.id ? candidate : team)
+          : [...existingTeams, candidate];
+        await this.context.globalState.update('sleepycode.teams', subagents.normalizeTeams(next, known));
+      },
+      deleteTeam: async (id) => {
+        const stringId = String(id ?? '');
+        const next = this.teams().filter(team => team.id !== stringId);
+        await this.context.globalState.update('sleepycode.teams', next);
+        await this.context.globalState.update('sleepycode.activeTeamIds', this.activeTeamIds().filter(teamId => teamId !== stringId));
+      },
+      setActiveTeams: async (ids) => {
+        const known = new Set(this.teams().map(team => team.id));
+        const active = (Array.isArray(ids) ? ids.map(String) : []).filter(id => known.has(id));
+        await this.context.globalState.update('sleepycode.activeTeamIds', active);
+        this.post({ type: 'config', teams: this.teams(), activeTeamIds: active });
+      },
       writeSubagentModels: async (models) => {
         await this.context.globalState.update('sleepycode.subagentModels', subagentRoles.normalizeSubagentModels(models));
       },
@@ -4829,10 +4892,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       } else {
         this.mcpNoticeSignatures.delete(conversationId);
       }
+      // Who this run may delegate to, and whether a team was assigned. Both are
+      // stated up front: a roster the model never sees is a roster it invents.
+      const rosterBlock = subagents.subagentRosterBlock(this.delegatableSubagents());
+      const teamBlock = subagents.teamRosterNote(this.teams(), this.activeTeamIds());
       const instructions = [
         modeRules.modeGuidance(runMode),
         goalCore.goalGuidance(conversation.goal),
         await this.systemPrompt(root, selection.agentId, this.personaIdFor(conversation)),
+        rosterBlock,
+        teamBlock,
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
         `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
         mcpConnection.instructions.length ? `Connected MCP server instructions:\n${mcpConnection.instructions.join('\n')}` : '',
@@ -4854,9 +4923,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const repoMemory = repoIndex ? this.loadRepoMemory(root) : undefined;
       this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex?.files.length ?? 0}`);
 
-      const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string): Promise<string> => {
+      const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string, subagentName?: string): Promise<string> => {
         const cleanTask = task.trim();
         if (!cleanTask) throw new Error('Subagent task cannot be empty.');
+        // A named subagent brings its own instructions, capability and model. It
+        // may narrow what the role allows (a read-only worker) but never widen it.
+        const definition = subagents.findSubagent(this.delegatableSubagents(), subagentName);
+        if (definition) role = definition.role;
+        const subagentReadonly = definition ? definition.readonly : role !== 'worker';
         const subagentId = `subagent-${Date.now().toString(36)}-${(++this.subagentSequence).toString(36)}`;
         const subagentAbort = new AbortController();
         this.subagentControllers.set(subagentId, subagentAbort);
@@ -4892,9 +4966,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // A subagent may not exceed its parent. Permissions flow down only: a
         // worker in a read-only run gets no write tools, which is the difference
         // between "the model was told not to" and "the tool is not there".
-        const roleTools = role === 'worker'
-          ? subagentTools
-          : Object.fromEntries(Object.entries(subagentTools).filter(([name]) => !modeRules.isMutatingTool(name)));
+        const roleTools = subagentReadonly
+          ? Object.fromEntries(Object.entries(subagentTools).filter(([name]) => !modeRules.isMutatingTool(name)))
+          : subagentTools;
         delete roleTools.delegate_task;
         // Run-only grants are stripped by the subagent ceiling: a subagent has no
         // plan to save, and the grant must not flow down.
@@ -4904,12 +4978,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           this.log('info', 'subagent.ceiling', `${role} in ${runMode}: withheld ${dropped.length} (${dropped.join(',')})`);
         }
         const subagentToolSetBase = filterAgentTools(ceiling as Record<string, any>, conversationAgent?.tools);
-        const roleInstruction = role === 'explorer'
+        const roleInstruction = definition
+          ? definition.prompt
+          : role === 'explorer'
           ? 'Research the repository read-only. Return findings with precise workspace-relative file paths and line references.'
           : role === 'reviewer'
             ? 'Review independently and read-only. Look for correctness, regressions, security issues, and missing verification. Return only actionable findings or state that none were found.'
             : 'Complete the bounded implementation or verification task. Inspect before editing, preserve unrelated changes, and verify the result.';
-        const label = `Subagent (${role}): ${cleanTask.slice(0, 96)}${cleanTask.length > 96 ? '…' : ''}`;
+        const label = `Subagent (${definition?.name ?? role}): ${cleanTask.slice(0, 96)}${cleanTask.length > 96 ? '…' : ''}`;
         this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'start' });
         const subagentInstructions = [
           modeRules.subagentGuidance(runMode),
@@ -4921,7 +4997,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           role === 'worker' && mcpConnection?.instructions.length ? `Connected MCP instructions:\n${mcpConnection.instructions.join('\n')}` : '',
           skillBlock,
         ].filter(Boolean).join('\n\n');
-        const subagentModelId = this.subagentModels()[role] || model;
+        const subagentModelId = definition?.model || this.subagentModels()[role] || model;
         let subagentProvider = provider;
         let subagentProviderId = providerConfig.id;
         if (subagentModelId && subagentModelId !== model) {
@@ -6506,6 +6582,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private subagentModels(): SubagentModelMap {
     return this.context.globalState.get<SubagentModelMap>('sleepycode.subagentModels', {}) ?? {};
+  }
+
+  /** Custom subagent definitions; malformed entries are dropped on read. */
+  private allSubagents(): subagents.SubagentDef[] {
+    return subagents.allSubagents(this.context.globalState.get<unknown>('sleepycode.subagents', []));
+  }
+
+  /** Teams, with members that no longer exist dropped. */
+  private teams(): subagents.TeamDef[] {
+    return subagents.normalizeTeams(this.context.globalState.get<unknown>('sleepycode.teams', []), this.allSubagents().map(def => def.id));
+  }
+
+  /** Teams assigned to project-mode runs. */
+  private activeTeamIds(): string[] {
+    const stored = this.context.globalState.get<unknown>('sleepycode.activeTeamIds', []);
+    const known = new Set(this.teams().map(team => team.id));
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string' && known.has(id)) : [];
+  }
+
+  /** Who this run may delegate to: the assigned teams, or everyone. */
+  private delegatableSubagents(): subagents.SubagentDef[] {
+    return subagents.resolveTeamSubagents(this.allSubagents(), this.teams(), this.activeTeamIds());
   }
 
   private activeSelection(): Selection {

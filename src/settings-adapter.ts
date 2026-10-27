@@ -413,6 +413,12 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'saveAgent',
   'deleteAgent',
   // Subagents: the per-role model map the host already consults at delegate time.
+  'getSubagents',
+  'saveSubagent',
+  'deleteSubagent',
+  'saveTeam',
+  'deleteTeam',
+  'setActiveTeams',
   'getPersonas',
   'savePersona',
   'deletePersona',
