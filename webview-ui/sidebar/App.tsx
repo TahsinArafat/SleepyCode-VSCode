@@ -15,6 +15,7 @@ import { Select } from "../shared/Select";
 import { ImagePreview } from "../shared/ImagePreview";
 import { renderMarkdown } from "../shared/markdown";
 import { copyText } from "../shared/clipboard";
+import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -2075,6 +2076,7 @@ export function App() {
           queuedCount={queued.filter(item => !isQueuedSteering(item)).length}
           onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
           draft={draft}
+          prompts={promptsFromTurns(turns)}
           tabDraft={draftsRef.current.get(draftKey) ?? null}
           onTabDraft={(d) => setTabDraft(draftKey, d)}
           onSubmit={(text, attachments) => {

@@ -35,6 +35,11 @@ interface ComposerEditorOptions {
   onSubmit?: () => void;
   /** Allows suggestion menus to own Enter, Tab, Escape and arrow keys. */
   shouldHandleKeys?: () => boolean;
+  /**
+   * Up/Down at the document edge, for prompt recall. Returns true when it took
+   * the key; otherwise the arrow keeps its normal meaning.
+   */
+  onRecall?: (older: boolean) => boolean;
 }
 
 let codeId = 0;
@@ -307,7 +312,8 @@ export class ComposerEditor {
         "Mod-b": toggleMark(schema.marks.strong), "Mod-i": toggleMark(schema.marks.em),
         Backspace: chainCommands(clearCodeBlock, undoInputRule, baseKeymap.Backspace),
         Delete: chainCommands(clearCodeBlock, baseKeymap.Delete),
-        ArrowUp: leaveCodeBoundary(-1, true), ArrowDown: leaveCodeBoundary(1, true),
+        ArrowUp: chainCommands(this.recallKey(true), leaveCodeBoundary(-1, true)),
+        ArrowDown: chainCommands(this.recallKey(false), leaveCodeBoundary(1, true)),
         ArrowLeft: leaveCodeBoundary(-1, false), ArrowRight: leaveCodeBoundary(1, false),
         Enter: (state, dispatch, view) => {
           if (closeCodeFence(state, dispatch, view) || openCodeFence(state, dispatch, view)) return true;
@@ -507,6 +513,33 @@ export class ComposerEditor {
     this.flush();
     const doc = this.view.state.doc;
     return doc.childCount === 1 && doc.firstChild?.type === schema.nodes.paragraph && doc.firstChild.content.size === 0;
+  }
+
+  /**
+   * Whether the caret sits at the very start or the very end of the document.
+   *
+   * Prompt recall only takes over an arrow key at an edge; anywhere else the
+   * arrow belongs to the caret. Expressed as edges because that is what the
+   * editor's selection reports.
+   */
+  /**
+   * Prompt recall for an edge arrow key. `false` hands the key back to the normal
+   * handlers, so this can never swallow a caret movement.
+   */
+  private recallKey(older: boolean) {
+    return (state: EditorState) => {
+      if (state.selection.$from.parent.type === this.view.state.schema.nodes.code_block) return false;
+      const edge = this.caretAtEdge();
+      if (older ? !edge.atStart : !edge.atEnd) return false;
+      return this.options.onRecall?.(older) === true;
+    };
+  }
+
+  caretAtEdge(): { atStart: boolean; atEnd: boolean } {
+    this.flush();
+    const { doc, selection } = this.view.state;
+    if (!selection.empty) return { atStart: false, atEnd: false };
+    return { atStart: selection.from === 0, atEnd: selection.to === doc.content.size };
   }
 
   isInCodeBlock(): boolean {

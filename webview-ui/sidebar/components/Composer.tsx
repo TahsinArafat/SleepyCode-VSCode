@@ -25,6 +25,7 @@ import { getCodeLanguage } from "../../shared/codeLanguages";
 import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PersonaInfo, TeamInfo } from "../types";
 import { filterModes } from "../../shared/featureFlags";
 import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
+import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
 
 /** Top-level @ menu categories. */
 /**
@@ -921,6 +922,7 @@ export function Composer({
   submitWithCtrlEnter,
   draft,
   tabDraft,
+  prompts: promptsFromTurnsProp = [],
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -964,6 +966,11 @@ export function Composer({
   tabDraft?: ComposerDraft | null;
   /** Fired whenever the composer content changes (tab switch / typing). */
   onTabDraft?: (d: ComposerDraft) => void;
+  /**
+   * Prompts already sent in this conversation, oldest first, for Up/Down recall.
+   * Supplied by the transcript so recall needs no second store to keep in step.
+   */
+  prompts?: string[];
   /** Tokens consumed by the conversation so far (drives the context ring). */
   usedTokens?: number;
   /** Queued messages count; Enter on an empty editor fires the next one now. */
@@ -1009,9 +1016,16 @@ export function Composer({
   const pastePendingRef = React.useRef<{ id: number; text: string } | null>(null);
   // Set after detectMention is defined (insert fns are declared before it).
   const detectMentionRef = React.useRef<(() => void) | null>(null);
+  // Walk position for Up/Down prompt recall. Refs, not state: changing it must
+  // not re-render, and it resets whenever the composer is submitted or swapped.
+  const recallRef = React.useRef<RecallState>(IDLE);
+  const promptsRef = React.useRef<string[]>([]);
 
   const undoEdit = () => richEditor.current?.undo();
   const redoEdit = () => richEditor.current?.redo();
+
+  const prompts = promptsFromTurnsProp;
+  promptsRef.current = prompts;
 
   React.useLayoutEffect(() => {
     const element = edRef.current;
@@ -1023,6 +1037,23 @@ export function Composer({
       submitWithCtrlEnter: () => !!submitWithCtrlEnterRef.current,
       onSubmit: () => submitRef.current(),
       shouldHandleKeys: () => !mentionOpenRef.current,
+      // Up/Down at the edge walks the prompts already in this conversation. The
+      // editor only offers the key at a document edge outside a code block, so
+      // an arrow that has caret work to do keeps it.
+      onRecall: (older) => {
+        const current = richEditor.current?.getText() ?? "";
+        const edge = richEditor.current?.caretAtEdge() ?? { atStart: false, atEnd: false };
+        if (!canRecallAtEdge(current, edge.atStart, edge.atEnd, older)) return false;
+        const next = older
+          ? recallOlder(promptsRef.current, recallRef.current, current)
+          : recallNewer(promptsRef.current, recallRef.current);
+        if (!next) return false;
+        recallRef.current = next.state;
+        richEditor.current?.setText(next.text);
+        refreshEmpty();
+        emitDraft();
+        return true;
+      },
     });
     richEditor.current = editor;
     return () => { editor.destroy(); richEditor.current = null; };
@@ -1419,6 +1450,8 @@ export function Composer({
       if ((queuedCount ?? 0) > 0) onRunNextQueued?.();
       return;
     }
+    // Sending ends the walk: the composer is cleared and nothing is stowed.
+    recallRef.current = IDLE;
     if (!editing) clear();
     const sent = attachments;
     if (!editing) setAttachments([]);
