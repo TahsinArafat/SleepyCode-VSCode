@@ -15,15 +15,16 @@ test('sections SleepyCode actually backs stay visible', () => {
   // These are the surfaces the settings window serves real SleepyCode data for.
   // `providers` is here on purpose: it gained a real surface, so it is no longer
   // an OpenCursor-only page.
-  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'mcp', 'advanced', 'about']) {
+  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'models', 'mcp', 'advanced', 'about']) {
     assert.equal(flags.isSectionHidden(id), false, `${id} should stay visible`);
   }
 });
 
-test('sections backed only by OpenCursor stores are hidden', () => {
-  // Their data lives in OpenCursor's feature store, which SleepyCode does not
-  // have; rendering them would show controls that write nowhere.
-  for (const id of ['models', 'agents']) {
+test('sections backed only by base-UI stores are hidden', () => {
+  // Their data lives in a feature store SleepyCode does not have; rendering them
+  // would show controls that write nowhere. `models` left this list: it now edits
+  // the per-model options the host budgets with.
+  for (const id of ['agents']) {
     assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
 });

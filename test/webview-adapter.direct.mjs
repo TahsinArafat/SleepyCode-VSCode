@@ -2161,3 +2161,42 @@ test('the webview can ask for a transcript it never received', () => {
   // the user is looking at.
   assert.equal(adapter.toSleepyMessage({ type: 'requestTranscript' }), null);
 });
+
+// ---------------------------------------------------------------- the model list
+
+/*
+ * The chat's picker and the settings window's Models page read the same list. Two
+ * copies of this mapping is how they start disagreeing about what a model's
+ * context window is, so both go through one function.
+ */
+
+test('the model list carries each model options built from its overrides', () => {
+  const out = adapter.modelOptionsPayload(
+    [{ providerId: 'sleepy', providerName: 'SleepyAI', models: [{ id: 'm1', name: 'Model One', contextWindow: 128_000, maxOutputLimit: 8_000 }] }],
+    { m1: { max_context: 200_000 } },
+  );
+  assert.equal(out.type, 'modelsFetched');
+  assert.deepEqual(out.models, ['m1']);
+  const model = out.modelList[0];
+  assert.equal(model.id, 'm1');
+  assert.equal(model.providerName, 'SleepyAI');
+  // The override wins over the discovered value: that is what an override is.
+  const context = model.options.find((option) => option.key === 'max_context');
+  assert.equal(context.value, '200000');
+  assert.ok(context.values.includes('200000'));
+  assert.equal(model.options.find((option) => option.key === 'max_output').value, '8000');
+});
+
+test('a bare id string still becomes a model row', () => {
+  const out = adapter.modelOptionsPayload([{ providerId: 'p', models: ['bare-model'] }], undefined);
+  assert.deepEqual(out.models, ['bare-model']);
+  assert.equal(out.modelList[0].name, 'bare-model');
+  // No discovered limits and no overrides means no options, not options of zero.
+  assert.deepEqual(out.modelList[0].options, []);
+});
+
+test('a model listed twice is offered once', () => {
+  const out = adapter.modelOptionsPayload([{ models: [{ id: 'm' }, { id: 'm' }] }], undefined);
+  assert.deepEqual(out.models, ['m']);
+  assert.equal(out.modelList.length, 1);
+});

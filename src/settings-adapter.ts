@@ -385,6 +385,9 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // its rebuild talked to an embedding store that does not exist here.
   'getIndexStatus',
   'reindexIndex',
+  // Models: the same option store the chat's own model menu writes.
+  'saveModelOptions',
+  'resetModelOptions',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -552,7 +555,6 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'subagents',
   // Backed by the base UI's own stores, which SleepyCode does not have: showing
   // them would present controls that write nowhere.
-  'models',
   'agents',
 ] as const;
 
@@ -576,6 +578,8 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'hooks',
   // Backed now: it reports SleepyCode's own project index.
   'indexing',
+  // Backed now: it edits the per-model options SleepyCode actually budgets with.
+  'models',
   'marketplace',
   'mcp',
   'advanced',

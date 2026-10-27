@@ -12,7 +12,7 @@ import { Select } from "../shared/Select";
 import { Icon, IconName } from "../shared/icons";
 import { vscode } from "../shared/vscode";
 import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMPTY_FEATURES, FeatureConfig, LlamacppStatus, McpStatus, ModelDef, ModelUsage, OAUTH_LABEL, OAuthStatus, OllamaModel, OllamaStatus, Persona, RuleInfo, SkillInfo, uid } from "./features";
-import { HooksPanel, LlamacppPanel, McpPanel, ModelsPanel, OAuthAccountCard, OllamaPanel, PersonasPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
+import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, PersonasPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
@@ -22,6 +22,7 @@ import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapt
 import { AccountPanel } from "./panels/AccountPanel";
 import { SleepyQuota, useSleepyAccount } from "./panels/SleepyQuota";
 import { IndexPanel } from "./panels/IndexPanel";
+import { ModelOptionsPanel } from "./panels/ModelOptionsPanel";
 import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
@@ -815,19 +816,7 @@ export function App() {
               SleepyCode actually supports. */}
           {section === "providers" && <ProviderKeysPanel providers={providers} />}
 
-          {section === "models" && (
-            <ModelsPanel
-              models={models}
-              modelList={modelList}
-              features={features}
-              setFeatures={setFeatures}
-              fetchModels={fetchModels}
-              catalog={modelCatalog}
-              llamacppStatus={llamacppStatus}
-              ollamaModels={ollamaModels}
-              oauthStatus={oauthStatus}
-            />
-          )}
+          {section === "models" && <ModelOptionsPanel />}
 
           {section === "llamacpp" && !isSectionHidden("llamacpp") && <LlamacppPanel features={features} status={llamacppStatus} />}
 

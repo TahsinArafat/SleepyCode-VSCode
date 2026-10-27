@@ -55,6 +55,12 @@ export interface SettingsPanelHost {
   readHooks(): Promise<unknown[]>;
   /** Replace the hook rules. */
   writeHooks(rules: unknown): Promise<void>;
+  /** The model catalog, with each model's configurable options. */
+  readModels(): Promise<unknown>;
+  /** Save one model's options, in the shape the chat's model menu posts. */
+  saveModelOptions(modelId: string, options: unknown): Promise<void>;
+  /** Return one model's options to the discovered values. */
+  resetModelOptions(modelId: string): Promise<void>;
   /** SleepyCode's project index, as the Indexing page shows it. */
   indexReport(): Promise<unknown>;
   /** Rebuild the index now, and return the fresh report. */
@@ -336,7 +342,15 @@ export class SettingsPanel {
         this.post(settingsAdapter.panelOAuthStatusMessage());
         return;
       case 'fetchAllModels':
-        this.post({ type: 'modelsFetched', models: await this.host.refreshModels().catch(() => []) });
+        await this.postModels();
+        return;
+      case 'saveModelOptions':
+        await this.host.saveModelOptions(String(message.modelId ?? ''), message.options).catch(() => undefined);
+        await this.postModels();
+        return;
+      case 'resetModelOptions':
+        await this.host.resetModelOptions(String(message.modelId ?? '')).catch(() => undefined);
+        await this.postModels();
         return;
       case 'openVsCodeSettings':
         void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:TahsinArafat.sleepycode-agent');
@@ -452,6 +466,18 @@ export class SettingsPanel {
       default:
         return;
     }
+  }
+
+  /**
+   * Publish the model catalog.
+   *
+   * The full list, not just the ids: the Models page edits per-model options, and
+   * a bare id carries none. This is the same payload the chat's picker receives,
+   * so the two cannot disagree about a model's context window.
+   */
+  private async postModels(): Promise<void> {
+    const payload = (await this.host.readModels().catch(() => null)) as { models?: string[]; modelList?: unknown[] } | null;
+    this.post({ type: 'modelsFetched', models: payload?.models ?? [], modelList: payload?.modelList ?? [] });
   }
 
   /**

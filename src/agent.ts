@@ -1340,6 +1340,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private settingsPanelHost(): SettingsPanelHost {
     return {
       signIn: () => this.signIn(),
+      readModels: async () => adapter.modelOptionsPayload(this.lastModelGroups, this.storedModelOptions()),
+      saveModelOptions: async (modelId, options) => {
+        // Straight through the chat's own handler: one store, one validation path.
+        await this.onMessage({ type: 'saveModelOptions', modelId, options } as unknown as WebMessage);
+      },
+      resetModelOptions: async (modelId) => {
+        await this.onMessage({ type: 'resetModelOptions', modelId } as WebMessage);
+      },
       indexReport: async () => indexReport.indexReport(this.projectIndex.snapshot),
       rebuildIndex: async () => indexReport.indexReport(await this.ensureProjectIntelligence(true)),
       readHooks: async () => this.hookRules(),

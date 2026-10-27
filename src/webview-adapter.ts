@@ -745,7 +745,21 @@ function agentEvent(conversationId: string | undefined, event: Record<string, an
  * Model entries may be either `{ id, name }` objects or bare id strings.
  */
 function modelsFetched(message: SleepyMsg): ReactMsg {
-  const groups: any[] = Array.isArray(message.groups) ? message.groups : [];
+  return modelOptionsPayload(message.groups as any[], message.overrides as Record<string, any> | undefined);
+}
+
+/**
+ * The flat model list, with the options each model can be configured with.
+ *
+ * Shared by the chat's model message and the settings window's Models page: two
+ * copies of this mapping is how the picker and the editor start disagreeing about
+ * what a model's context window is.
+ */
+export function modelOptionsPayload(
+  inputGroups: readonly any[] | undefined,
+  inputOverrides: Record<string, any> | undefined,
+): ReactMsg {
+  const groups: any[] = Array.isArray(inputGroups) ? (inputGroups as any[]) : [];
   const models: string[] = [];
   const modelList: any[] = [];
   for (const group of groups) {
@@ -763,7 +777,7 @@ function modelsFetched(message: SleepyMsg): ReactMsg {
         // the model-options editor; sending [] left both with nothing.
         options: modelOptions.optionsFor(
           { contextWindow: typeof model === 'string' ? undefined : model?.contextWindow, maxOutputLimit: typeof model === 'string' ? undefined : model?.maxOutputLimit },
-          message.overrides?.[id],
+          inputOverrides?.[id],
         ),
       });
     }
