@@ -4534,6 +4534,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const runChanges = new Map<string, FileChange>((resume?.changes ?? []).map(change => [change.path, change]));
     // Written after each completed iteration so an interrupted run is recoverable.
     let runMessages: ModelMessage[] = [];
+    // Guidance the user added mid-run, kept for the REST of the run and not just
+    // the step that consumed it. Wiping it after one step meant the model read the
+    // update, acted on it, and then went back to what it had been doing because
+    // the next request no longer contained it.
+    const runGuidance: string[] = [];
+    /** Hand the guidance to the transcript once, at the end, so later turns see it. */
+    const flushGuidance = (): void => {
+      for (const guidance of runGuidance.splice(0)) runMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
+    };
     const snapshotByPath = new Map<string, FileSnapshot>((resume?.fileSnapshot ?? []).map(snap => [snap.path, snap]));
     const postToolEvent = (message: unknown): void => {
       if (!message || typeof message !== 'object') {
@@ -5299,7 +5308,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // It goes AFTER the request (see the push below), because the request
             // itself is the last message `iterationRequestMessages` produces: a
             // guidance message placed before it reads as the original ask.
-            const steered = this.drainSteering(conversationId);
+            runGuidance.push(...this.drainSteering(conversationId));
             const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
             let agentMessages: ModelMessage[] | undefined;
             if (history.length || runMessages.length) {
@@ -5310,9 +5319,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 if (last) last.content = [{ type: 'text' as const, text: streamPrompt }, ...imageParts];
               }
             }
-            if (steered.length) {
+            if (runGuidance.length) {
               if (!agentMessages) agentMessages = [{ role: 'user', content: streamPrompt } as ModelMessage];
-              for (const guidance of steered) agentMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
+              // Every update so far, every step: the model has to keep steering by
+              // them, not merely have steered by them once.
+              for (const guidance of runGuidance) agentMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
             }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
             this.log('info', 'run.stream.start', `conversation=${conversationId}; model=${model}`);
@@ -5532,6 +5543,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (snapshotByPath.size) assistantItem.fileSnapshot = [...snapshotByPath.values()];
           // Persist the structured model history so the next turn keeps prior tool
           // calls and their results in context instead of re-reading files.
+          flushGuidance();
           if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
           conversation.pending = undefined;
           conversation.turnRedo = [];
@@ -5597,6 +5609,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Keep whatever the turn accomplished before it was stopped so a later
         // message continues from real context instead of re-reading files.
         appendPartialAnswer(runMessages, partialAnswer || resume?.partialText);
+        flushGuidance();
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         if (planState) { planState.interrupted = true; postPlan(); }
@@ -5661,6 +5674,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // streamed text, and results into the structured history so a retry continues
         // instead of re-reading every file.
         appendPartialAnswer(runMessages, fields.partialText || partialAnswer || resume?.partialText);
+        flushGuidance();
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         conversation.items.push(errorItem);

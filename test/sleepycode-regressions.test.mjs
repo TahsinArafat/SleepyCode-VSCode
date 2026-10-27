@@ -1047,7 +1047,7 @@ test('an update sent mid-run reaches the running task instead of starting a turn
   assert.match(agent, /if \(steering && this\.runs\.has\(conversationId\)\)/);
   assert.match(agent, /this\.enqueue\(sendText, conversationId, composerContext, promptContext, true\)/);
   assert.match(agent, /private drainSteering\(conversationId: string\): string\[\]/);
-  assert.match(agent, /const steered = this\.drainSteering\(conversationId\)/);
+  assert.match(agent, /runGuidance\.push\(\.\.\.this\.drainSteering\(conversationId\)\)/);
   // It goes AFTER the request: `iterationRequestMessages` puts the user's ask
   // last, so guidance pushed before it would read as the original ask.
   assert.match(agent, /agentMessages\.push\(\{ role: 'user', content: steeringGuidance\(guidance\) \}/);
@@ -1272,4 +1272,31 @@ test('the small ones: a re-used toast, a re-posted list, a queued edit', () => {
   assert.match(app, /setTabDraft\(draftKey, draft\);/);
   // The bypass is gone: no direct write to the draft map in this path.
   assert.doesNotMatch(app, /draftsRef\.current\.set\(draftKey, draft\);/);
+});
+
+test('mid-run guidance keeps steering, it does not steer once and lapse', () => {
+  // The fault: the guidance was appended to that step's messages only. The next
+  // iteration rebuilt its request from history + this turn's messages + the
+  // prompt, so the update vanished — the model obeyed it for one step and then
+  // carried on as before.
+  assert.match(agent, /const runGuidance: string\[\] = \[\];/);
+  assert.match(agent, /runGuidance\.push\(\.\.\.this\.drainSteering\(conversationId\)\);/);
+  assert.match(agent, /for \(const guidance of runGuidance\) agentMessages\.push\(/);
+  // Every step, not just the one that took it.
+  assert.doesNotMatch(agent, /const steered = this\.drainSteering\(conversationId\);/);
+  // And it survives the turn: persisted with the messages, after the work, so a
+  // later turn knows what was asked mid-run.
+  assert.match(agent, /const flushGuidance = \(\): void => \{/);
+  const flushes = [...agent.matchAll(/flushGuidance\(\);/g)].length;
+  const appends = [...agent.matchAll(/appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/g)].length;
+  assert.equal(flushes, appends, 'each persistence point must flush the guidance first');
+});
+
+test('a steering request the host never answers does not linger on screen', () => {
+  const app = read('webview-ui/sidebar/App.tsx');
+  // The host's queue is authoritative: a pending marker for an entry it no longer
+  // lists has been answered or dropped, and waiting for the event that would clear
+  // it leaves a "Steering…" row on screen for the rest of the session.
+  assertSource(app, /if \(!rows\.some\(row => row\.id === pendingId\) && !mailbox\.some\(entry => entry\.id === pendingId\)\) pending\.delete\(pendingId\);/);
+  assertSource(app, /if \(!pending\.size\) pendingSteeringRef\.current\.delete\(id\);/);
 });

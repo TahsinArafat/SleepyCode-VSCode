@@ -1437,7 +1437,19 @@ export function App() {
             const mailbox = msg.steeringQueues?.[id] ?? [];
             const waiting = new Map((pendingSteeringRef.current.get(id) ?? new Map()).entries());
             for (const item of mailbox) waiting.set(item.id, item);
+            // The host's list is authoritative. A pending marker for an entry the
+            // host no longer lists has been answered or dropped — leaving it would
+            // keep a "Steering…" row on screen for the rest of the session, waiting
+            // for an event that is never coming.
+            const pending = pendingSteeringRef.current.get(id);
+            if (pending) {
+              for (const pendingId of [...pending.keys()]) {
+                if (!rows.some(row => row.id === pendingId) && !mailbox.some(entry => entry.id === pendingId)) pending.delete(pendingId);
+              }
+              if (!pending.size) pendingSteeringRef.current.delete(id);
+            }
             for (const item of waiting.values()) {
+              if (!pendingSteeringRef.current.get(id)?.has(item.id) && !mailbox.some(entry => entry.id === item.id)) continue;
               if (rows.some(row => row.id === item.id)) continue;
               const index = previous.findIndex(row => row.id === item.id);
               rows.splice(index < 0 ? rows.length : Math.min(index, rows.length), 0, {
