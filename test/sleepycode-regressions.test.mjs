@@ -998,3 +998,15 @@ test('a turn that changed files publishes its review bar when it ends', () => {
   // through a conversation AND a turn.
   assertSource(agentSource, /this\.reactChangeTarget\.set\(conversationId, target\)/);
 });
+
+test('the last known models and account answer before the network does', () => {
+  const agentSource = read('src/agent.ts');
+  // A fresh window used to be unusable until two round trips came back, and stayed
+  // unusable offline: the picker had no models and the sign-in banner knew nothing.
+  assertSource(agentSource, /this\.postCachedModelGroups\(\);[\s\S]{0,80}this\.postCachedAccount\(\);/);
+  assertSource(agentSource, /globalState\.update\('sleepycode\.cache\.models'/);
+  assertSource(agentSource, /globalState\.update\('sleepycode\.cache\.account'/);
+  // The cache is only a head start: a fetch that arrives later still wins.
+  assertSource(agentSource, /if \(this\.lastModelGroups\.length\) return;/);
+  assertSource(agentSource, /if \(this\.lastSleepyAccountRefresh\) return;/);
+});

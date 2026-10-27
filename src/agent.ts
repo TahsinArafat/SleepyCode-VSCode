@@ -911,6 +911,33 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Last session's model list, if this window has not fetched its own yet. */
+  private postCachedModelGroups(): void {
+    if (this.lastModelGroups.length) return;
+    const cached = this.context.globalState.get<{ at?: number; groups?: ProviderModelGroup[] }>('sleepycode.cache.models');
+    const groups = Array.isArray(cached?.groups) ? cached.groups : [];
+    if (!groups.length) return;
+    this.lastModelGroups = groups;
+    const config = this.config();
+    const selection = this.activeSelection();
+    this.post({
+      type: 'models',
+      overrides: this.storedModelOptions(),
+      groups,
+      selected: selection.model,
+      defaultProvider: config.activeProvider,
+      onlyDefaultModels: config.onlyDefaultModels,
+    });
+  }
+
+  /** The last known account, so the banner and the quota pages are populated at once. */
+  private postCachedAccount(): void {
+    if (this.lastSleepyAccountRefresh) return;
+    const cached = this.context.globalState.get<{ at?: number; status?: Record<string, unknown> }>('sleepycode.cache.account');
+    if (!cached?.status || cached.status.loggedIn !== true) return;
+    this.post({ type: 'sleepyStatus', ...cached.status, busy: false, text: '' });
+  }
+
   /**
    * Hand the React webview its opening payload: the conversation list, the
    * active transcript and the bootstrap state. The React app renders nothing
@@ -925,6 +952,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private sendReactBootstrap(): void {
     const active = this.activeConversation();
     const selection = active ? this.selectionFor(active) : undefined;
+    // Answer from the last known state first. The network round trip for models and
+    // account data used to gate the picker and the sign-in banner, so a fresh
+    // window sat unusable until both came back — and stayed that way offline.
+    this.postCachedModelGroups();
+    this.postCachedAccount();
     this.post(adapter.buildInitialState({
       activeId: active?.id,
       workspaceRoot: this.workspaceRoot()?.fsPath,
@@ -1950,7 +1982,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const data = await fetchSleepyAccountData(token);
       this.lastSleepyModelPrices = data.modelPrices ?? [];
       this.lastSleepyPriceRefresh = Date.now();
-      this.post({ type: 'sleepyStatus', ...account, ...data, busy: false, text: '' });
+      const status = { ...account, ...data };
+      this.post({ type: 'sleepyStatus', ...status, busy: false, text: '' });
+      // Remember it, so the next start knows who is signed in and what the plan
+      // allows before the dashboard answers — or when it cannot.
+      void this.context.globalState.update('sleepycode.cache.account', { at: Date.now(), status });
     } catch {
       this.post({ type: 'sleepyStatus', ...account, busy: false, text: 'Could not refresh account usage.' });
     }
@@ -6452,6 +6488,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     }
     this.lastModelGroups = groups;
+    // Kept on disk so the next start has a working model list before the network
+    // answers, or when it cannot answer at all.
+    if (groups.some(group => group.models.length)) {
+      void this.context.globalState.update('sleepycode.cache.models', { at: Date.now(), groups });
+    }
     // Keep the active conversation's pick in step with the engine it runs on
     // before the selection below is computed from it.
     const activeForSelection = this.activeConversation();
