@@ -794,7 +794,11 @@ export function pendingChangesOf(items: readonly any[] | undefined): { path: str
     const changes = items?.[i]?.changes;
     if (!Array.isArray(changes) || !changes.length) continue;
     return changes
-      .filter(change => change && !change.reverted)
+      // A staged change has been accepted, and a reverted one undone: neither is
+      // awaiting review, so neither belongs in the bar. Without the staged case
+      // "Keep All" left the bar showing files it had just accepted, and the
+      // buttons never closed.
+      .filter(change => change && !change.reverted && !change.staged)
       .map(change => {
         const out: { path: string; existedBefore: boolean; added?: number; removed?: number } = {
           path: String(change.path ?? ''),

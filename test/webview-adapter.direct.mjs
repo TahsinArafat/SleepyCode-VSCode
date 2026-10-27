@@ -2017,3 +2017,32 @@ test('the routed model becomes a persistent note, not a status line', () => {
   // A route with no model names nothing and is dropped rather than rendered blank.
   assert.equal(adapter.toReactMessage({ type: 'modelRoute', conversationId: 'c1' }), null);
 });
+
+// ---------------------------------------------------------------- review bar closes
+//
+// "Keep All" stages the turn's changes and then reports there is nothing left to
+// stage — while the review bar kept showing them. A staged change is no longer
+// awaiting review, so it must leave the bar; otherwise the buttons never go away.
+
+test('a staged change leaves the review bar', () => {
+  const items = [{
+    id: 'a1', role: 'assistant',
+    changes: [
+      { path: 'kept.ts', action: 'Modified', staged: true },
+      { path: 'pending.ts', action: 'Modified' },
+    ],
+  }];
+  assert.deepEqual(adapter.pendingChangesOf(items).map(c => c.path), ['pending.ts']);
+});
+
+test('a fully accepted turn closes the bar', () => {
+  const items = [{ id: 'a1', role: 'assistant', changes: [{ path: 'a.ts', staged: true }, { path: 'b.ts', staged: true }] }];
+  assert.deepEqual(adapter.pendingChangesOf(items), []);
+  // And the message carries no target, so the action buttons stay disabled.
+  assert.equal(adapter.pendingChangesMessage(items).itemId, undefined);
+});
+
+test('a reverted change still leaves the bar', () => {
+  const items = [{ id: 'a1', role: 'assistant', changes: [{ path: 'gone.ts', reverted: true }, { path: 'live.ts' }] }];
+  assert.deepEqual(adapter.pendingChangesOf(items).map(c => c.path), ['live.ts']);
+});

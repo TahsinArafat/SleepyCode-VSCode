@@ -2216,28 +2216,9 @@ export function Composer({
         {/* Two deliberate rows. One dense nowrap row plus one orphan was what the
             bar did before; each row now holds the things that belong together and
             divides the width evenly, so nothing overlaps. */}
+        {/* Inside the box: what goes into the message, and the send action. */}
         <div className="composer-bar">
-          {/* Row 1 — what will run. */}
-          <div className="composer-row">
-            <ModePicker mode={mode} onMode={onMode} />
-            {!editing && agentOptions.length > 0 && (
-              <AgentPicker openSignal={openControl?.name === "agent" ? openControl.token : undefined} value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
-            )}
-            {!editing && reasoningEfforts.length > 0 && (
-              <EffortPicker openSignal={openControl?.name === "effort" ? openControl.token : undefined} value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
-            )}
-            {!editing && approvalAppliesInMode(mode) && (
-              <ApprovalPicker openSignal={openControl?.name === "approval" ? openControl.token : undefined} policy={approvalPolicy} />
-            )}
-            <span className="composer-spacer" />
-            <ModelPicker
-              openSignal={openControl?.name === "model" ? openControl.token : undefined}
-              models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions}
-            />
-          </div>
-
-          {/* Row 2 — what goes in, and the action. */}
-          <div className="composer-row">
+          <div className="composer-actions">
             <AttachmentMenu onFiles={(imagesOnly) => {
               const input = fileRef.current;
               if (!input) return;
@@ -2263,10 +2244,15 @@ export function Composer({
                 contextLimit={sessionStats.contextLimit}
               />
             )}
-            {persona && persona.id !== "default" && (
-              <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>
-            )}
-            <span className="composer-spacer" />
+          </div>
+          <div className="right">
+            {/* The model lives here with the send button: it is part of "what will
+                happen when I press this". The rest of the identity row is below the
+                box, where it has room to spread. */}
+            <ModelPicker
+              openSignal={openControl?.name === "model" ? openControl.token : undefined}
+              models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions}
+            />
             {!editing && (() => {
               const sel = modelList.find((m) => m.id === selectedModel);
               const total = parseContextSize(sel?.options.find((o) => o.key === "max_context")?.value) || 128_000;
@@ -2294,6 +2280,25 @@ export function Composer({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Below the box: the identity row. Mode, agent, effort and approval share it
+          evenly with the persona chip — this is the row that already held the agent
+          dropdown, so the agent stays put and the others sit beside it. */}
+      <div className="composer-footer">
+        <ModePicker mode={mode} onMode={onMode} />
+        {!editing && agentOptions.length > 0 && (
+          <AgentPicker openSignal={openControl?.name === "agent" ? openControl.token : undefined} value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
+        )}
+        {!editing && reasoningEfforts.length > 0 && (
+          <EffortPicker openSignal={openControl?.name === "effort" ? openControl.token : undefined} value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
+        )}
+        {!editing && approvalAppliesInMode(mode) && (
+          <ApprovalPicker openSignal={openControl?.name === "approval" ? openControl.token : undefined} policy={approvalPolicy} />
+        )}
+        {persona && persona.id !== "default" && (
+          <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>
+        )}
       </div>
       <ImagePreview images={previewImages} activeId={previewImageId} onClose={() => setPreviewImageId(null)} />
     </div>
