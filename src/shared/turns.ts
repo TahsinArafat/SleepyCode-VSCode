@@ -173,6 +173,8 @@ export function renderMentionTokens(text: string, target: "display" | "html" = "
 export interface AssistantTurn {
   role: "assistant";
   blocks: AssistantBlock[];
+  /** Routed model id that produced this response, for the message footer. */
+  model?: string;
   /** Wall-clock boundaries of this assistant segment, in epoch milliseconds. */
   startedAt?: number;
   endedAt?: number;

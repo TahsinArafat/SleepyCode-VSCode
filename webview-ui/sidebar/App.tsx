@@ -19,8 +19,20 @@ import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
 import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
+
+/** Relative time for the message footer, matching the thread list's phrasing. */
+function footerTime(ts: number | undefined): string {
+  if (!ts) return "";
+  const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
 import { COMPOSER_HINTS, STARTERS, indexCard, recentConversations } from "../../src/empty-state.ts";
-import { signInBanner } from "../../src/webview-adapter.ts";
+import { modelLabel, signInBanner } from "../../src/webview-adapter.ts";
 import { DEFAULT_CONTEXT, contextFor, normalizeContext, toggleContext } from "../../src/context-panel.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
@@ -2105,8 +2117,16 @@ export function App() {
                         onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
                         compaction={compactionControls} />
                     </div>
-                    <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
-                      onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />
+                    <div className="message-footer">
+                      <span className="message-footer-meta">
+                        {modelLabel(modelList, turn.model) && (
+                          <span className="message-model" title={turn.model}>{modelLabel(modelList, turn.model)}</span>
+                        )}
+                        {footerTime(turn.startedAt) && <span className="message-time">{footerTime(turn.startedAt)}</span>}
+                      </span>
+                      <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
+                        onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />
+                    </div>
                   </div>
                 )
               )}

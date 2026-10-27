@@ -864,6 +864,10 @@ export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
     turns.push({
       role: 'assistant',
       blocks,
+      // The routed model, so the footer can say which one produced this response.
+      // Omitted when absent rather than sent as undefined, which would render an
+      // empty chip instead of none.
+      ...(item.model ? { model: item.model } : {}),
       startedAt: item.timestamp,
       endedAt: item.timestamp,
       durationMs: item.seconds ? item.seconds * 1000 : undefined,
@@ -1549,3 +1553,19 @@ export {
 } from './agent-mode.ts';
 
 
+
+// ---------------------------------------------------------------- message footer
+
+/**
+ * The display name for a model id.
+ *
+ * The catalog carries names and the transcript carries ids. A footer showing a raw
+ * id is worse than one showing nothing, so the id is only a fallback for a model
+ * the catalog does not know — which is normal right after a new model appears.
+ */
+export function modelLabel(modelList: readonly { id?: string; name?: string }[] | undefined, modelId: string | undefined): string {
+  const id = typeof modelId === 'string' ? modelId : '';
+  if (!id) return '';
+  const entry = (modelList ?? []).find(item => item?.id === id);
+  return entry?.name || id;
+}

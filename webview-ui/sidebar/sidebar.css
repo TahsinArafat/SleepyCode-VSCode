@@ -4638,3 +4638,9 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .limit-fill { height: 100%; border-radius: 2px; background: var(--accent, #6c7086); }
 .limit-fill.warn { background: var(--warn-line, #d7ba7d); }
 .limit-fill.danger { background: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* Message footer: which model produced this response, and when. */
+.message-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.message-footer-meta { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-dim); min-width: 0; }
+.message-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.message-time { flex: 0 0 auto; }

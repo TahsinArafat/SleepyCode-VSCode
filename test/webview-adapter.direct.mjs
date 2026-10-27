@@ -1960,3 +1960,45 @@ test('a malformed session payload degrades to empty rather than throwing', () =>
   assert.equal(out.contextLimit, 0);
   assert.equal(out.convId, '');
 });
+
+// ---------------------------------------------------------------- message footer
+//
+// The classic footer showed which model produced a response and when. The React
+// message actions show copy/edit/retry and neither — and the transcript item
+// carries both fields, they were simply not projected onto the turn.
+
+test('an assistant turn keeps the model that produced it and its time', () => {
+  const turns = adapter.itemsToTurns([
+    { id: 'a1', role: 'assistant', text: 'done', model: 'gpt-6-sol', timestamp: 1_700_000_000_000, seconds: 4 },
+  ]);
+  assert.equal(turns[0].role, 'assistant');
+  assert.equal(turns[0].model, 'gpt-6-sol');
+  // The time already travelled as `startedAt`; the footer reuses that accessor
+  // rather than a second field that could disagree with it.
+  assert.equal(turns[0].startedAt, 1_700_000_000_000);
+  assert.equal(turns[0].durationMs, 4000);
+});
+
+test('a user turn still carries its model, as it did before', () => {
+  const turns = adapter.itemsToTurns([{ id: 'u1', role: 'user', text: 'hi', model: 'm', timestamp: 5 }]);
+  assert.equal(turns[0].model, 'm');
+});
+
+test('a missing model or time is omitted rather than sent as undefined fields', () => {
+  // An undefined `model` would render an empty chip instead of none.
+  const turns = adapter.itemsToTurns([{ id: 'a2', role: 'assistant', text: 'x' }]);
+  assert.equal('model' in turns[0], false);
+  assert.equal('timestamp' in turns[0], false, 'no duplicate of startedAt');
+});
+
+test('the footer names the model from the catalog, falling back to the id', () => {
+  // The catalog carries display names; the transcript carries ids. A footer that
+  // shows a raw id is worse than one that shows nothing, so the id is only a
+  // fallback for a model the catalog does not know.
+  const list = [{ id: 'gpt-6-sol', name: 'GPT-6 Sol' }];
+  assert.equal(adapter.modelLabel(list, 'gpt-6-sol'), 'GPT-6 Sol');
+  assert.equal(adapter.modelLabel(list, 'mystery-model'), 'mystery-model');
+  assert.equal(adapter.modelLabel(list, ''), '');
+  assert.equal(adapter.modelLabel([], 'gpt-6-sol'), 'gpt-6-sol');
+  assert.equal(adapter.modelLabel(undefined, 'x'), 'x');
+});
