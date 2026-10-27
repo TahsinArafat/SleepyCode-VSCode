@@ -176,8 +176,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     }
 
     case 'steerMessage':
-      // SleepyCode steers by queueing the text onto the running conversation.
-      return { type: 'send', text: message.text, conversationId: message.convId };
+      // Guidance for the task in progress, not a new turn: flagged so the host
+      // hands it to the run that is working instead of queueing a follow-up.
+      return { type: 'send', text: message.text, conversationId: message.convId, steering: true };
 
     case 'queueAction':
       if (message.action === 'remove') return { type: 'removeQueued', conversationId: message.convId, id: message.id };
@@ -467,7 +468,7 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       return null;
 
     case 'steered':
-      return agentEvent(message.conversationId, { type: 'user-steering' });
+      return agentEvent(message.conversationId, { type: 'user-steering', text: message.text ?? '' });
 
     case 'liveUsage': {
       const prompt = message.inputTokens ?? 0;
@@ -703,12 +704,15 @@ function queueRows(queues: unknown): Record<string, unknown[]> {
   for (const [conversationId, list] of Object.entries(queues as Record<string, unknown>)) {
     const entries = Array.isArray(list) ? list : [];
     out[conversationId] = entries.map((entry, index) => {
-      const item = entry as { id?: unknown; text?: unknown };
+      const item = entry as { id?: unknown; text?: unknown; steering?: unknown };
       return {
         id: typeof item?.id === 'string' && item.id ? item.id : `queued-${now}-${index}`,
         text: typeof item?.text === 'string' ? item.text : String(item?.text ?? ''),
         status: 'queued',
         createdAt: now,
+        // A steering entry is guidance the running task will apply, so the row
+        // shows that state instead of offering to stop the run for it.
+        ...(item?.steering === true ? { steering: true } : {}),
       };
     });
   }

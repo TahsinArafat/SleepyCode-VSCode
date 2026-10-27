@@ -52,18 +52,30 @@ export function planBlockContent(input: any): string {
  * A plan is an artefact the user has to read and act on, not a step in the work:
  * burying its card under "Worked for 12s" hid the plan and its Implement button.
  */
-const isNotice = (block: AssistantBlock) => block.kind === "verification"
+type NoticeBlock = Exclude<AssistantBlock, { kind: "text" | "thinking" | "compaction" | "steering" }>;
+const isNotice = (block: AssistantBlock): block is NoticeBlock => block.kind === "verification"
   || (block.kind === "error" && !block.retrying)
   || block.kind === "max-steps"
   || (block.kind === "tool" && isPlanToolName(block.name));
+/** Guidance is work, not an answer: it never becomes the conclusion. */
+const isSteering = (block: AssistantBlock): block is Extract<AssistantBlock, { kind: "steering" }> => block.kind === "steering";
 
 /** Keep the final reply and actionable notices outside folded work history. */
 export function splitWork(turn: AssistantTurn, running: boolean): { activity: AssistantBlock[]; conclusion: AssistantBlock[] } {
   if (running) return { activity: turn.blocks, conclusion: [] };
+  // Steering belongs to the work, but it arrives mid-run — so a response can END
+  // with one. Scanning only text blocks would stop at the update and pull the
+  // answer into the collapsed work section, leaving "Worked for 4s" and nothing
+  // under it. The scan therefore steps over updates and the split sorts them out.
   let boundary = turn.blocks.length;
-  while (boundary > 0 && (turn.blocks[boundary - 1].kind === "text" || isNotice(turn.blocks[boundary - 1]))) boundary--;
-  let activity = turn.blocks.slice(0, boundary);
-  let conclusion = turn.blocks.slice(boundary);
+  while (boundary > 0) {
+    const block = turn.blocks[boundary - 1];
+    if (block.kind !== "steering" && block.kind !== "text" && !isNotice(block)) break;
+    boundary--;
+  }
+  const tail = turn.blocks.slice(boundary);
+  let activity: AssistantBlock[] = [...turn.blocks.slice(0, boundary), ...tail.filter(isSteering)];
+  let conclusion: AssistantBlock[] = tail.filter(block => !isSteering(block));
   const finalText = turn.finalText?.trim();
   if (finalText) {
     let finalIndex = turn.blocks.length - 1;

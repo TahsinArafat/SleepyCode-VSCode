@@ -40,6 +40,8 @@ export interface QueuedMessage {
   error?: string;
   /** Explicit resume reconciles possibly committed work before taking new actions. */
   resume?: boolean;
+  /** Guidance the running task will consume, rather than a turn of its own. */
+  steering?: true;
 }
 
 export interface ChatWorkspaceState {

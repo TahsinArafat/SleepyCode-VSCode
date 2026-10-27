@@ -211,7 +211,8 @@ test('sending during an active run queues without rendering a fake first send', 
 
 test('queue keeps every follow-up sent during a run (multi-message queue)', () => {
   // Server keeps one entry per queued prompt instead of replacing the previous one.
-  assert.match(agent, /this\.queue\.push\(\{ id: `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext \}\)/);
+  // One entry per prompt, appended: the queue never replaces what is waiting.
+  assert.match(agent, /this\.queue\.push\(\{ id: `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext,/);
   assert.doesNotMatch(agent, /this\.queue = this\.queue\.filter\(entry => entry\.conversationId !== conversationId\);\n\s*this\.queue\.push/);
   assert.match(agent, /prompts: entries\.map\(entry => entry\.text\), ids: entries\.map\(entry => entry\.id\)/);
   assertSource(runtime, /case'queuedPrompt':\{const ids=m\.ids\|\|\[\],texts=m\.prompts\|\|\[\]/);
@@ -1032,4 +1033,44 @@ test('a status scrolled out of view stops animating', () => {
   // be disconnected — an observer per re-render leaks on a streaming turn.
   assert.match(status, /<span ref=\{rootRef\} className=\{`activity-status/);
   assert.match(status, /observer\.disconnect\(\)/);
+});
+
+test('an update sent mid-run reaches the running task instead of starting a turn', () => {
+  // Four hops, and every one of them has to be present or the words are lost:
+  // the adapter flags the send, the host queues it as guidance rather than
+  // starting a run, the loop consumes it into the request, and the webview shows
+  // it where it landed. A hop that exists but is not reached was this codebase's
+  // most expensive recurring bug.
+  const adapter = read('src/webview-adapter.ts');
+  assert.match(adapter, /case 'steerMessage':/);
+  assert.match(adapter, /steering: true \};/);
+  assert.match(agent, /if \(steering && this\.runs\.has\(conversationId\)\)/);
+  assert.match(agent, /this\.enqueue\(sendText, conversationId, composerContext, promptContext, true\)/);
+  assert.match(agent, /private drainSteering\(conversationId: string\): string\[\]/);
+  assert.match(agent, /const steered = this\.drainSteering\(conversationId\)/);
+  // It goes AFTER the request: `iterationRequestMessages` puts the user's ask
+  // last, so guidance pushed before it would read as the original ask.
+  assert.match(agent, /agentMessages\.push\(\{ role: 'user', content: steeringGuidance\(guidance\) \}/);
+  // Guidance never stops the run. Aborting and restarting was the old behaviour,
+  // and it showed the same words twice while throwing away the work so far.
+  assert.doesNotMatch(agent, /run\.steering = true/);
+  assert.doesNotMatch(agent, /\.controller\.abort\(\);\s*\n\s*return;\s*\n\s*\}\s*\n\s*if \(message\.type === 'steerQueued'/);
+  // The queue row says which kind it is, and the webview keeps that flag.
+  assert.match(agent, /queues\[entry\.conversationId\] \?\?= \[\]\)\.push\(\{ id: entry\.id, text: entry\.text,/);
+  assert.match(adapter, /item\?\.steering === true \? \{ steering: true \}/);
+});
+
+test('a mid-run update is shown inside the work it changed, not as a message', () => {
+  const app = read('webview-ui/sidebar/App.tsx');
+  const css = read('webview-ui/sidebar/sidebar.css');
+  // The reducer files it as a block of the running response…
+  assert.match(read('src/shared/turns.ts'), /export interface SteeringBlock \{/);
+  assert.match(read('src/shared/turns.ts'), /turn\.blocks\.push\(\{ kind: "steering", text: ev\.text, at: Date\.now\(\) \}\)/);
+  // …the transcript renders it there…
+  assertSource(app, /if \(block.kind === "steering"\) return <SteeringNote key=\{index\} text=\{block\.text\} \/>;/);
+  // …and the note carries its own rule rather than borrowing the user bubble's
+  // class, which lives in a stylesheet the settings window does not share.
+  const rule = css.match(/\.steering-note\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(rule, '.steering-note has a rule');
+  assert.match(rule, /background:\s*var\(--user-bubble\)/);
 });

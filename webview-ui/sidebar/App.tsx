@@ -326,6 +326,14 @@ function renderMentionHtml(text: string): string {
   });
 }
 
+/** Guidance the user added mid-run, shown inline in the work it changed. */
+function SteeringNote({ text }: { text: string }) {
+  return <div className="steering-note" role="note" aria-label="Your update to the running task">
+    <div className="steering-note-head"><span className="steering-note-label"><Icon name="steer" size={12} /> You</span></div>
+    <div className="steering-note-text"><MentionText text={text} /></div>
+  </div>;
+}
+
 /** Message text with mention pills; swaps generic SVGs for the IDE's exact
  *  file icons after every render (innerHTML is replaced on re-render). */
 const MentionText = React.memo(function MentionText({ text }: { text: string }) {
@@ -581,6 +589,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} undoable={compaction?.undoable} redoable={compaction?.redoable} cancellable={compaction?.cancellable} onAction={compaction?.onAction} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
+      if (block.kind === "steering") return <SteeringNote key={index} text={block.text} />;
       return <div className="block-group" key={index}>
         <ToolCard block={block} onImplement={onImplement} onOpenSubagent={onOpenSubagent} awaitingApproval={!!taskApprovals[block.callId]?.length} />
         {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline onDecide={(id, approved) => onDecide?.(id, approved)} />}
@@ -658,6 +667,8 @@ function SubagentChat({
                 <div className="block-group" key={bi}><MaxStepsCard block={b} running={false} /></div>
               ) : b.kind === "verification" ? (
                 <VerificationCard key={bi} summary={b.summary} />
+              ) : b.kind === "steering" ? (
+                <SteeringNote key={bi} text={b.text} />
               ) : (
                 <div className="block-group" key={bi}><ToolCard block={b} /></div>
               )

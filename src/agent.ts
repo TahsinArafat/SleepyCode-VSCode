@@ -1,6 +1,7 @@
 import * as subagentRoles from './subagent-roles';
 import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
+import { steeringGuidance, takeSteering } from './steering';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
@@ -272,7 +273,6 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
 type ActiveRun = {
   conversationId: string;
   controller: AbortController;
-  steering: boolean;
 };
 
 /** Everything a turn needs to pick its model and its thinking budget. */
@@ -328,7 +328,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private loaded = false;
   private runs = new Map<string, ActiveRun>();
   private mcpNoticeSignatures = new Map<string, string>();
-  private queue: { id: string; text: string; conversationId: string; context?: ComposerContext; promptContext?: string }[] = [];
+  private queue: { id: string; text: string; conversationId: string; context?: ComposerContext; promptContext?: string; steering?: true }[] = [];
   private queueSeq = 0;
   private apiKeys: Record<string, string> = {};
   private persistChain: Promise<void> = Promise.resolve();
@@ -2904,10 +2904,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'steerQueued') {
-      const run = this.runs.get(message.conversationId);
-      if (!run) return;
-      run.steering = true;
-      run.controller.abort();
+      // Guidance for the run in progress. It used to abort the run and start a
+      // replacement, which threw away the work already done and then showed the
+      // same words twice: once as an update, once as a new message.
+      const own = this.queue.filter(entry => entry.conversationId === message.conversationId);
+      const target = own.find(entry => entry.id === message.id);
+      if (!target) return;
+      this.queue = this.queue.map(entry => entry === target ? { ...entry, steering: true as const } : entry);
+      this.postWorkflow(message.conversationId);
       return;
     }
     if (message.type === 'requestSettings') return void this.showSettings(false, message.section);
@@ -4152,6 +4156,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
 
       stage('done');
+      // Guidance for the run in progress is queued even when a slot is free: it
+      // belongs to the current task, so starting a run would make it a new one.
+      const steering = (message as { steering?: boolean }).steering === true;
+      if (steering && this.runs.has(conversationId)) {
+        this.log('info', 'message.steer.queued', `conversation=${conversationId}`);
+        this.enqueue(sendText, conversationId, composerContext, promptContext, true);
+        return;
+      }
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
         this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
         this.enqueue(sendText, conversationId, composerContext, promptContext);
@@ -4251,9 +4263,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string): void {
+  /**
+   * Take the guidance queued for this conversation, so the step about to run
+   * includes it. Posted as `steered` for each one: the webview shows the update
+   * inline in the work it changed, which is why it is not a new user turn.
+   */
+  private drainSteering(conversationId: string): string[] {
+    const { taken, rest } = takeSteering(this.queue, conversationId);
+    if (!taken.length) return [];
+    this.queue = rest;
+    for (const entry of taken) this.post({ type: 'steered', conversationId, text: entry.text });
+    this.postWorkflow(conversationId);
+    this.log('info', 'message.steer.applied', `conversation=${conversationId}; updates=${taken.length}`);
+    return taken.map(entry => entry.text);
+  }
+
+  private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string, steering = false): void {
     // Multiple follow-ups may be queued for the same conversation; they run in FIFO order.
-    this.queue.push({ id: `q${++this.queueSeq}`, text, conversationId, context, promptContext });
+    // `steering` marks guidance the run in progress will consume, so it never
+    // queues up as a turn of its own.
+    this.queue.push({ id: `q${++this.queueSeq}`, text, conversationId, context, promptContext, ...(steering ? { steering: true as const } : {}) });
     this.postWorkflow(conversationId);
   }
 
@@ -4276,7 +4305,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const queues: Record<string, { id: string; text: string }[]> = {};
-    for (const entry of this.queue) (queues[entry.conversationId] ??= []).push({ id: entry.id, text: entry.text });
+    for (const entry of this.queue) (queues[entry.conversationId] ??= []).push({ id: entry.id, text: entry.text, ...(entry.steering ? { steering: true } : {}) });
     const goals: Record<string, unknown> = {};
     for (const conversation of this.activeProject()?.conversations ?? []) {
       if (conversation.goal) goals[conversation.id] = conversation.goal;
@@ -4306,7 +4335,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const historyUserText = resume ? (resume.originalUserText || userText) : userText;
     const gitTracked = isGitTrackedWorkspace(root.fsPath);
-    const run: ActiveRun = { conversationId, controller: new AbortController(), steering: false };
+    const run: ActiveRun = { conversationId, controller: new AbortController() };
     this.runs.set(conversationId, run);
     this.log('info', 'run.registered', conversationId);
     // A pre-turn Git tree captures every workspace mutation, including files
@@ -4331,10 +4360,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           .catch(error => this.log('warn', 'run.checkpoint.unavailable', errorMessage(error)));
       }
     }
-    // Only steering carries this turn's original checkpoint into the replacement
-    // prompt. Ordinary queued follow-ups are new turns and must capture the
-    // workspace as it exists after this one.
-    let carriedGitTree: string | undefined;
     if (resume) {
       this.post({ type: 'resume', conversationId, partialText: resume.partialText ?? '' });
     } else if (!userAlreadyPersisted) {
@@ -5109,6 +5134,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Keep prior conversation history AND this turn's already-produced
             // tool calls/results. Resume/auto-continue used to drop that live
             // slice, which is how partial context disappeared mid-iteration.
+            // Guidance the user added while this step was being planned or worked.
+            // It goes AFTER the request (see the push below), because the request
+            // itself is the last message `iterationRequestMessages` produces: a
+            // guidance message placed before it reads as the original ask.
+            const steered = this.drainSteering(conversationId);
             const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
             let agentMessages: ModelMessage[] | undefined;
             if (history.length || runMessages.length) {
@@ -5118,6 +5148,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 const last = agentMessages[agentMessages.length - 1];
                 if (last) last.content = [{ type: 'text' as const, text: streamPrompt }, ...imageParts];
               }
+            }
+            if (steered.length) {
+              if (!agentMessages) agentMessages = [{ role: 'user', content: streamPrompt } as ModelMessage];
+              for (const guidance of steered) agentMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
             }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
             this.log('info', 'run.stream.start', `conversation=${conversationId}; model=${model}`);
@@ -5405,10 +5439,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (runMessages.length) this.appendConversationMessages(conversation, historyUserText, runMessages, Boolean(resume));
         conversation.pending = undefined;
         if (planState) { planState.interrupted = true; postPlan(); }
-        if (run.steering) {
-          carriedGitTree = runGitTree;
-          this.post({ type: 'steered', conversationId });
-        } else {
+        {
           if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
           // A stop is the same shape as an error: one retryable assistant item that
           // keeps the streamed partial, the work, and the workspace snapshot. The
@@ -5497,7 +5528,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (next && this.runs.size < MAX_CONCURRENT_RUNS) {
         this.queue = this.queue.filter(entry => entry !== next);
         this.postWorkflow(next.conversationId);
-        void this.run(next.text, next.conversationId, undefined, carriedGitTree, next.context, next.promptContext);
+        // Guidance that outlived its run corrects a task that has already ended,
+        // so it becomes the next turn instead of being dropped.
+        void this.run(next.text, next.conversationId, undefined, undefined, next.context, next.promptContext);
       } else if (own) {
         this.postWorkflow(conversationId);
       }
