@@ -140,6 +140,8 @@ export type InMessage =
   | { type: "questionAnswered"; convId: string; callId: string; answers: Record<string, string[]> }
   | { type: "approvalRequest"; convId: string; request: ApprovalRequestInfo }
   | { type: "approvalResolved"; convId: string; requestId: string; approved: boolean }
+  /** Account state, for the sign-in banner. */
+  | { type: "sleepyStatus"; loggedIn: boolean; busy: boolean; text: string }
   /** Project-index progress. The host has always sent this; nothing mapped it. */
   | { type: "projectIndex"; status: string; indexed: number; total: number; text: string }
   | { type: "fileIcon"; filename: string; icon?: FileIconInfo }
@@ -207,6 +209,7 @@ export type OutMessage =
   | { type: "fetchModels" }
   | { type: "selectModel"; model: string }
   | { type: "selectReasoningEffort"; effort: string }
+  | { type: "signIn" }
   | { type: "saveModelOptions"; modelId: string; options: ModelOption[] }
   | { type: "resetModelOptions"; modelId: string }
   | { type: "searchFiles"; query: string; requestId: number }

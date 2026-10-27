@@ -3038,6 +3038,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.syncConversations();
       return;
     }
+    if (message.type === 'signIn') {
+      // The chat's banner action. Without a handler the banner's button was the
+      // same class of dead control as everything else in the audit.
+      this.signIn();
+      return;
+    }
     if (message.type === 'openPanel') {
       // The drawer's own entry point. Without this handler the message the
       // webview posted had nowhere to land, so the panels were reachable only

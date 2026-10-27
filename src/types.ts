@@ -21,6 +21,9 @@ export type WebMessage =
   | { type: 'gitCommit'; conversationId: string; itemId: string }
   | { type: 'reindexProject' }
   | { type: 'copyText'; text: string }
+  // The chat's sign-in banner. Same entry point as the command and the settings
+  // window's button.
+  | { type: 'signIn' }
   | { type: 'steerQueued'; conversationId: string; id?: string }
   | { type: 'removeQueued'; conversationId: string; id?: string }
   | { type: 'promoteQueued'; conversationId: string; id?: string }

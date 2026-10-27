@@ -20,6 +20,7 @@ import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
 import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
 import { COMPOSER_HINTS, STARTERS, indexCard, recentConversations } from "../../src/empty-state.ts";
+import { signInBanner } from "../../src/webview-adapter.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -803,6 +804,9 @@ export function App() {
   // Project-index state arrives on its own message; it had no adapter case, so
   // the UI never showed it at all.
   const [indexStatus, setIndexStatus] = React.useState<{ status: string; indexed: number; total: number; text: string } | undefined>(undefined);
+  // The account state the sign-in banner reads. Signed out, the composer looks
+  // perfectly usable and a send cannot work, which is what the banner is for.
+  const [accountStatus, setAccountStatus] = React.useState<{ type: string; loggedIn: boolean; busy: boolean; text: string } | undefined>(undefined);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1321,6 +1325,9 @@ export function App() {
           break;
         case "projectIndex":
           setIndexStatus({ status: msg.status, indexed: msg.indexed, total: msg.total, text: msg.text });
+          break;
+        case "sleepyStatus":
+          setAccountStatus(msg);
           break;
         case "pendingChanges":
           setChangeTarget(msg.itemId);
@@ -1865,6 +1872,13 @@ export function App() {
           results={historyResults}
           onClose={() => setHistoryOpen(false)}
         />
+      )}
+      {signInBanner(accountStatus).visible && (
+        <div className="signin-banner" role="status">
+          <Icon name="shieldWarning" size={13} />
+          <span>{signInBanner(accountStatus).text}</span>
+          <button className="btn-ghost" onClick={() => post({ type: "signIn" })}>{signInBanner(accountStatus).actionLabel}</button>
+        </div>
       )}
       {activeId && goals[activeId] && <GoalBanner goal={goals[activeId]} onStatus={(status) => post({ type: "setGoalStatus", convId: activeId, status })} />}
       {workspaceRoot && <div className="worktree-banner" title={workspaceRoot}><Icon name="gitBranch" size={12} /><span>Isolated worktree · {workspaceRoot.split(/[\\/]/).pop()}</span><button className="btn-ghost" onClick={() => post({ type: "openMention", kind: "folder", path: workspaceRoot })}>Show folder</button></div>}

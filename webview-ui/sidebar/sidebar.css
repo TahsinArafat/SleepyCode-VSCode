@@ -4537,3 +4537,16 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 }
 .empty-recent-row:hover { background: var(--surface-2); }
 .empty-recent-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Signed-out banner: the composer looks usable, and a send cannot work. */
+.signin-banner {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	font-size: 11px;
+	color: var(--fg-dim);
+	border-bottom: 1px solid var(--line-soft, var(--line));
+	background: var(--surface-2);
+}
+.signin-banner span { flex: 1; min-width: 0; }

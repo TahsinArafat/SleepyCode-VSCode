@@ -1850,3 +1850,54 @@ test('the project-index status reaches the webview instead of being dropped', ()
   assert.equal(adapter.toReactMessage({ type: 'projectIndex', status: 'ready', indexed: 120 }).indexed, 120);
   assert.equal(adapter.toReactMessage({ type: 'projectIndex' }).status, '');
 });
+
+// ---------------------------------------------------------------- sign-in banner
+//
+// The host detects the signed-out case and pops a native notification, but the
+// chat itself said nothing — so a signed-out user saw a working-looking composer
+// and a send that could not work. The classic webview had a banner.
+
+test('a signed-out account produces a banner the chat can show', () => {
+  const banner = adapter.signInBanner({ type: 'sleepyStatus', loggedIn: false, busy: false, text: '' });
+  assert.equal(banner.visible, true);
+  assert.ok(banner.text.length > 10, 'the banner has to say what is wrong');
+  assert.ok(banner.actionLabel, 'and offer the action');
+});
+
+test('a signed-in account shows nothing', () => {
+  assert.equal(adapter.signInBanner({ type: 'sleepyStatus', loggedIn: true, busy: false, text: '' }).visible, false);
+});
+
+test('nothing is shown while the account is being checked', () => {
+  // `busy` means a sign-in is in flight; a banner would flicker mid-flow.
+  assert.equal(adapter.signInBanner({ type: 'sleepyStatus', loggedIn: false, busy: true, text: '' }).visible, false);
+});
+
+test('another message type never produces a banner', () => {
+  assert.equal(adapter.signInBanner({ type: 'config' }).visible, false);
+  assert.equal(adapter.signInBanner(undefined).visible, false);
+  assert.equal(adapter.signInBanner(null).visible, false);
+});
+
+test('the banner agrees with the native offer about when to appear', () => {
+  // `shouldOfferSignIn` drives the notification; the banner must not disagree
+  // with it, or one path prompts and the other stays silent.
+  const cases = [
+    { type: 'sleepyStatus', loggedIn: false, busy: false, text: '' },
+    { type: 'sleepyStatus', loggedIn: true, busy: false, text: '' },
+    { type: 'sleepyStatus', loggedIn: false, busy: true, text: '' },
+    { type: 'config' },
+    undefined,
+  ];
+  for (const message of cases) {
+    assert.equal(
+      adapter.signInBanner(message).visible,
+      adapter.shouldOfferSignIn(message),
+      `disagreement for ${JSON.stringify(message)}`,
+    );
+  }
+});
+
+test('the sign-in message reaches the host', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'signIn' }), { type: 'signIn' });
+});

@@ -186,6 +186,21 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'browseAttachments':
       return { type: 'requestFilePicker' };
 
+    case 'sleepyStatus':
+      // Falls through to the banner condition. `shouldOfferSignIn` reads this
+      // shape, so the fields it checks must survive translation.
+      return {
+        type: 'sleepyStatus',
+        loggedIn: message.loggedIn === true,
+        busy: message.busy === true,
+        text: typeof message.text === 'string' ? message.text : '',
+      };
+
+    case 'signIn':
+      // The banner's action. Same entry point as the command and the settings
+      // window's button.
+      return { type: 'signIn' };
+
     case 'openSettings':
       // The requested section travels with the request; dropping it landed every
       // jump on General, so "Get started" and "Add models" both opened the wrong
@@ -970,6 +985,23 @@ export function toReactMessageWhileStreaming(message: SleepyMsg, streaming: bool
  * base replaces. Rather than leave a signed-out user with no way to sign in,
  * the host offers it once when the account status comes back signed out.
  */
+/**
+ * The banner the chat shows when the account is signed out.
+ *
+ * `shouldOfferSignIn` drives the native notification; the banner must appear on
+ * exactly the same condition or one path prompts while the other stays silent.
+ * `busy` means a sign-in is in flight, and a banner appearing mid-flow would
+ * flicker on top of the flow itself.
+ */
+export function signInBanner(message: SleepyMsg | null | undefined): { visible: boolean; text: string; actionLabel: string } {
+  if (!shouldOfferSignIn(message)) return { visible: false, text: '', actionLabel: '' };
+  return {
+    visible: true,
+    text: 'Sign in to SleepyAI to use models and limits. Compatibility endpoints you added yourself still work without it.',
+    actionLabel: 'Sign in',
+  };
+}
+
 export function shouldOfferSignIn(message: SleepyMsg | null | undefined): boolean {
   if (!message || message.type !== 'sleepyStatus') return false;
   if (message.busy) return false;
