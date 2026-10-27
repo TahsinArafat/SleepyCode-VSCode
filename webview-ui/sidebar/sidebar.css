@@ -4550,3 +4550,28 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	background: var(--surface-2);
 }
 .signin-banner span { flex: 1; min-width: 0; }
+
+/* Context panel: a switch per source, the attachments, and reindex. */
+.context-dropdown { min-width: 260px; }
+.context-dropdown .mi-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.context-dropdown .mi-hint { font-size: 11px; color: var(--fg-dim); }
+.context-row {
+	display: flex; align-items: center; gap: var(--sp-4, 8px);
+	padding: 6px 8px; border: 0; border-radius: 6px;
+	background: transparent; color: var(--fg); font: inherit; font-size: 12px;
+	cursor: pointer; text-align: left; width: 100%;
+}
+.context-row:hover { background: var(--surface-2); }
+.context-check {
+	flex: 0 0 auto; width: 16px; text-align: center;
+	color: var(--accent, #6c7086); font-size: 12px;
+}
+.context-attachments { border-top: 1px solid var(--line-soft, var(--line)); margin-top: 4px; padding-top: 4px; }
+.context-attachment { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11px; }
+.context-attachment-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-attachment-remove {
+	flex: 0 0 auto; border: 0; border-radius: 4px; background: transparent;
+	color: var(--fg-dim); cursor: pointer; padding: 2px 4px; display: inline-flex;
+}
+.context-attachment-remove:hover { background: var(--surface-2); color: var(--fg); }
+.context-action { border-top: 1px solid var(--line-soft, var(--line)); margin-top: 4px; border-radius: 0 0 6px 6px; }

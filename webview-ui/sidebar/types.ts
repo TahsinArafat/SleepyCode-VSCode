@@ -174,7 +174,7 @@ export interface ApprovalRequestInfo {
 // webview -> extension
 export type OutMessage =
   | { type: "ready" }
-  | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean; requestId?: string }
+  | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean; requestId?: string; context?: Record<string, boolean> }
   | { type: "updateChatWorkspace"; state: Partial<ChatWorkspaceState> }
   | { type: "queueAction"; convId: string; id: string; action: "remove" | "run" | "steer" | "up" | "down" | "edit" }
   | { type: "steerMessage"; convId: string; text: string }

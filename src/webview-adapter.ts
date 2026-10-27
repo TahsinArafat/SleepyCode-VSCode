@@ -45,6 +45,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       // so the tags are lifted out here.
       const mentions = splitMentions(message.text ?? '');
       const out: SleepyMsg = { type: 'send', text: mentions.text };
+      // The composer's context switches. Only the ones that are OFF travel: the
+      // host reads an absent field as on, so sending `true` for every default
+      // would put a context block in every request the user never asked for.
+      const context = contextSwitches(message.context);
+      if (context) out.context = context;
       if (message.convId) out.conversationId = message.convId;
       if (message.model) out.model = message.model;
       // The composer's mode is what the user is looking at right now, so it
@@ -922,6 +927,25 @@ export function buildInitialState(input: {
     ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
     ...(input.uiPrefs ? { uiPrefs: input.uiPrefs } : {}),
   };
+}
+
+// ---------------------------------------------------------------- composer context
+
+/**
+ * The context switches worth sending, or undefined when there are none.
+ *
+ * `ComposerContext` fields are additive and default to on host-side, so only the
+ * off ones are stated. Booleans only: anything else would reach the prompt
+ * builder as a value it has to guess at.
+ */
+function contextSwitches(raw: unknown): Record<string, boolean> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const input = raw as Record<string, unknown>;
+  const out: Record<string, boolean> = {};
+  for (const field of ['includeProjectIndex', 'includeActiveFile', 'includeSelection'] as const) {
+    if (input[field] === false) out[field] = false;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 // ---------------------------------------------------------------- reasoning effort

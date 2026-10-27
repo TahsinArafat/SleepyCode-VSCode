@@ -21,6 +21,7 @@ import { changeActions, changeActionMessages } from "../../src/review-actions.ts
 import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
 import { COMPOSER_HINTS, STARTERS, indexCard, recentConversations } from "../../src/empty-state.ts";
 import { signInBanner } from "../../src/webview-adapter.ts";
+import { DEFAULT_CONTEXT, contextFor, normalizeContext, toggleContext } from "../../src/context-panel.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -807,6 +808,10 @@ export function App() {
   // The account state the sign-in banner reads. Signed out, the composer looks
   // perfectly usable and a send cannot work, which is what the banner is for.
   const [accountStatus, setAccountStatus] = React.useState<{ type: string; loggedIn: boolean; busy: boolean; text: string } | undefined>(undefined);
+  // Which sources go into the next request. Per session, like the classic
+  // composer: these are decisions about the message you are writing, not
+  // preferences about the workspace.
+  const [contextState, setContextState] = React.useState(DEFAULT_CONTEXT);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1501,7 +1506,7 @@ export function App() {
     };
   }, []);
 
-  const sendNow = React.useCallback((convId: string | undefined, text: string, attachments?: Attachment[], model?: string, mode2?: Mode) => {
+  const sendNow = React.useCallback((convId: string | undefined, text: string, attachments?: Attachment[], model?: string, mode2?: Mode, context?: Record<string, boolean>) => {
     const s = sessionFor(convId);
     if (!s.running && !(queueRef.current.get(convId ?? "") ?? []).some(item => item.status !== "running")) {
       s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2 }];
@@ -1510,12 +1515,15 @@ export function App() {
     }
     pinTopRef.current = true;
     force();
-    post({ ...sendMessageIntent(convId, text, attachments, model, mode2), requestId: crypto.randomUUID() });
+    post({ ...sendMessageIntent(convId, text, attachments, model, mode2), context, requestId: crypto.randomUUID() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onSubmit = (text: string, attachments: Attachment[]) => {
-    sendNow(activeIdRef.current, text, attachments.length ? attachments : undefined, selectedModel, mode);
+    // The switches travel with the message, like the mode does: sourcing them from
+    // stored state is how a control ends up disagreeing with the request.
+    const contextSwitches = contextFor(contextState);
+    sendNow(activeIdRef.current, text, attachments.length ? attachments : undefined, selectedModel, mode, contextSwitches);
   };
 
   // Queue item actions.
@@ -2238,6 +2246,9 @@ export function App() {
           onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
           draft={draft}
           prompts={promptsFromTurns(turns)}
+          context={{ ...contextState, attachments: draft?.attachments?.length ?? 0 }}
+          onToggleContext={(id, value) => setContextState((state) => toggleContext(state, id, value))}
+          onReindexProject={() => post({ type: "reindexProject" })}
           agentId={agentId}
           agentOptions={agentOptions}
           onSelectAgent={(id) => { setAgentId(id); post({ type: "selectAgent", agentId: id }); }}

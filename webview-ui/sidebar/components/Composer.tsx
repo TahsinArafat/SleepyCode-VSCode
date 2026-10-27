@@ -26,6 +26,7 @@ import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, Mention
 import { filterModes } from "../../shared/featureFlags";
 import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
 import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
+import { CONTEXT_TOGGLES, contextCount, contextCountLabel } from "../../../src/context-panel.ts";
 
 /** Top-level @ menu categories. */
 /**
@@ -400,6 +401,85 @@ function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetSta
     }
   };
   return { focused, setFocused, close, show, triggerKey, menuKey };
+}
+
+/** What goes into the next request: a switch per source, the attachments, and a
+ * reindex action. The count is a promise about the request, so it counts only what
+ * is actually sent. */
+function ContextPanel({
+  state,
+  onToggle,
+  attachments,
+  onRemoveAttachment,
+  onReindex,
+}: {
+  state: { project: boolean; activeFile: boolean; selection: boolean; attachments: number };
+  onToggle: (id: string, value: boolean) => void;
+  attachments: Attachment[];
+  onRemoveAttachment: (index: number) => void;
+  onReindex: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  useOutsideClose(open, () => setOpen(false));
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
+  const count = contextCount(state);
+  return (
+    <>
+      <button
+        type="button"
+        ref={triggerRef}
+        className="pill context-pill"
+        aria-label={contextCountLabel(count) + " — manage what the next message includes"}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-controls={open ? menuId : undefined}
+        onClick={(e) => { e.stopPropagation(); if (open) setOpen(false); else setOpen(true); }}
+      >
+        <Icon name="list" />
+        <span>{contextCountLabel(count)}</span>
+        <Icon name="chevD" className="cd" />
+      </button>
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="menu" aria-label="Request context" className="mode-dropdown context-dropdown"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }}
+          onClick={event => event.stopPropagation()}>
+          {CONTEXT_TOGGLES.map(toggle => (
+            <div className="context-row" key={toggle.id} role="menuitemcheckbox" aria-checked={state[toggle.id]} tabIndex={0}
+              onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); onToggle(toggle.id, !state[toggle.id]); } }}
+              onClick={() => onToggle(toggle.id, !state[toggle.id])}>
+              <span className="mi-main">
+                <span className="mi-label">{toggle.label}</span>
+                <span className="mi-hint">{toggle.hint}</span>
+              </span>
+              <span className={"context-check" + (state[toggle.id] ? " on" : "")} aria-hidden="true">{state[toggle.id] ? "✓" : ""}</span>
+            </div>
+          ))}
+          {attachments.length > 0 && (
+            <div className="context-attachments">
+              {attachments.map((attachment, index) => (
+                <div className="context-attachment" key={attachment.id ?? index}>
+                  <span className="context-attachment-name" title={attachment.name}>{attachment.name}</span>
+                  <button type="button" className="context-attachment-remove" aria-label={"Remove " + attachment.name} onClick={() => onRemoveAttachment(index)}>
+                    <Icon name="close" size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Reindex is a request to the host; the empty state lies about nothing. */}
+          <button type="button" className="context-row context-action" onClick={onReindex}>
+            <Icon name="reset" size={13} /> Reindex project
+          </button>
+        </div>,
+        document.body
+      )}
+    </>
+  );
 }
 
 /** Agent pill. The list and the selection both come from the host, so the menu
@@ -1069,6 +1149,9 @@ export function Composer({
   agentId = "",
   agentOptions = [],
   onSelectAgent,
+  context,
+  onToggleContext,
+  onReindexProject,
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -1125,6 +1208,10 @@ export function Composer({
   agentId?: string;
   agentOptions?: { id: string; name: string; role: string; description: string }[];
   onSelectAgent?: (id: string) => void;
+  /** Which sources go into the next request, and how to change them. */
+  context?: { project: boolean; activeFile: boolean; selection: boolean; attachments: number };
+  onToggleContext?: (id: string, value: boolean) => void;
+  onReindexProject?: () => void;
   /** Tokens consumed by the conversation so far (drives the context ring). */
   usedTokens?: number;
   /** Queued messages count; Enter on an empty editor fires the next one now. */
@@ -1922,6 +2009,15 @@ export function Composer({
           {/* Approval governs edits and commands, which only agent mode can
               perform. Showing the control in a read-only mode implied a gate
               that was never consulted. */}
+          {!editing && context && (
+            <ContextPanel
+              state={context}
+              onToggle={(id, value) => onToggleContext?.(id, value)}
+              attachments={attachments}
+              onRemoveAttachment={(index) => setAttachments((list) => list.filter((_, i) => i !== index))}
+              onReindex={() => onReindexProject?.()}
+            />
+          )}
           {!editing && agentOptions.length > 0 && (
             <AgentPicker value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
           )}

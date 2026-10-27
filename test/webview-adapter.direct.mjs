@@ -1901,3 +1901,32 @@ test('the banner agrees with the native offer about when to appear', () => {
 test('the sign-in message reaches the host', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'signIn' }), { type: 'signIn' });
 });
+
+// ---------------------------------------------------------------- composer context
+//
+// `ComposerContext` has supported project intelligence, the active file and the
+// selection since the classic composer, and the React composer has never set any
+// of them — it sent attachments and nothing else.
+
+test('sendMessage carries the context switches', () => {
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: { includeProjectIndex: false, includeActiveFile: false } });
+  assert.deepEqual(out.context, { includeProjectIndex: false, includeActiveFile: false });
+  // With no switches off, the field is absent rather than a body of `true`s — the
+  // host reads absent as on.
+  const bare = adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: {} });
+  assert.equal(bare.context, undefined);
+});
+
+test('a junk context is dropped rather than forwarded', () => {
+  // The host builds a prompt block from these; a non-object would be a crash or
+  // an unread block, not a preference.
+  assert.equal(adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: 'everything' }).context, undefined);
+  assert.equal(adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: null }).context, undefined);
+  assert.equal(adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi' }).context, undefined);
+});
+
+test('only boolean switches survive into the context', () => {
+  // Anything else would reach the prompt builder as a value it has to guess at.
+  const out = adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: { includeProjectIndex: false, includeActiveFile: 'yes', includeSelection: 0 } });
+  assert.deepEqual(out.context, { includeProjectIndex: false });
+});
