@@ -186,6 +186,84 @@ export function formatSpeed(tokensPerSecond: number | undefined): string | null 
   if (typeof tokensPerSecond !== 'number' || !Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return null;
   return `${Math.round(tokensPerSecond)} tok/s`;
 }
+
+// ---------------------------------------------------------------- the one readout
+
+/**
+ * A window size used only when the model does not advertise one. A zero limit
+ * means "not reported", not "no window": dividing by it would paint a full ring
+ * and claim Infinity%.
+ */
+export const DEFAULT_CONTEXT_LIMIT = 128_000;
+
+export interface RingRow {
+  label: string;
+  value: string;
+}
+
+export interface RingReadout {
+  used: number;
+  limit: number;
+  percent: number;
+  level: 'safe' | 'warn' | 'danger';
+  /** "45k / 200k · 23%", the context line the popover leads with. */
+  context: string;
+  /** One sentence with every fact a screen reader needs, for the arc itself. */
+  label: string;
+  /** The session figures, in a fixed order, omitting rows with nothing to say. */
+  rows: RingRow[];
+}
+
+/**
+ * Everything the composer's single session readout shows.
+ *
+ * The ring is the whole readout now: how full the window is, and what the
+ * session has spent. Keeping the arithmetic here rather than in the component is
+ * what makes the arc and the figures provably read the same numbers.
+ */
+export function ringReadout(input: {
+  usedTokens?: number;
+  contextLimit?: number;
+  tokens?: Partial<TokenCounts>;
+  cost?: { total?: number | null };
+  speed?: number;
+}): RingReadout {
+  const limit = typeof input.contextLimit === 'number' && Number.isFinite(input.contextLimit) && input.contextLimit > 0
+    ? input.contextLimit
+    : DEFAULT_CONTEXT_LIMIT;
+  const used = typeof input.usedTokens === 'number' && Number.isFinite(input.usedTokens) && input.usedTokens > 0
+    ? input.usedTokens
+    : 0;
+  const percent = contextPercent(used, limit);
+  const level = contextLevel(percent);
+  const context = `${formatTokens(used)} / ${formatTokens(limit)} · ${percent}%`;
+  const cost = formatCost(input.cost?.total);
+
+  const tokens = input.tokens ?? {};
+  const cacheRead = tokens.cacheRead ?? 0;
+  const cacheWrite = tokens.cacheWrite ?? 0;
+  const speed = formatSpeed(input.speed);
+
+  const rows: RingRow[] = [
+    { label: 'Input', value: formatTokens(tokens.input) + (cacheRead > 0 ? ` · ${formatTokens(cacheRead)} cached` : '') },
+    { label: 'Output', value: formatTokens(tokens.output) },
+    ...(cacheWrite > 0 ? [{ label: 'Cache write', value: formatTokens(cacheWrite) }] : []),
+    // Cost is always a row: an unpriced model must say so rather than omit what
+    // it could not measure.
+    { label: 'Cost', value: cost },
+    ...(speed ? [{ label: 'Speed', value: speed }] : []),
+  ];
+
+  return {
+    used,
+    limit,
+    percent,
+    level,
+    context,
+    label: `Session usage: ${percent}% of the context window used (${formatTokens(used)} / ${formatTokens(limit)} tokens), ${cost}`,
+    rows,
+  };
+}
 // ---------------------------------------------------------------- session records
 
 /** The conversation a stored usage record belongs to, or '' when unscoped. */

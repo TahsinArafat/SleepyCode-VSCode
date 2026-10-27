@@ -12,7 +12,6 @@ import { createPortal } from "react-dom";
 import { Icon, IconName, iconMarkup } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import { usePresence } from "../../shared/usePresence";
-import { AnimatedTooltip } from "../../shared/AnimatedTooltip";
 import { ImagePreview } from "../../shared/ImagePreview";
 import { TextSwap } from "../../shared/TextTransitions";
 import { AttachmentMenu } from "./AttachmentMenu";
@@ -27,7 +26,7 @@ import { filterModes } from "../../shared/featureFlags";
 import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
 import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
 import { CONTEXT_TOGGLES, contextCount, contextCountLabel } from "../../../src/context-panel.ts";
-import { contextLevel, contextPercent, formatCost, formatSpeed, formatTokens } from "../../../src/cost-core.ts";
+import { ringReadout } from "../../../src/cost-core.ts";
 import { isSlashCommand, matchSlashCommands, parseSlash, runSlashCommand, slashBlockedReason, slashOpen } from "../../../src/slash-commands.ts";
 
 /** Top-level @ menu categories. */
@@ -257,37 +256,87 @@ function parseContextSize(v: string | undefined): number {
   return Math.round(n * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1));
 }
 
-/** Context usage indicator at the trailing edge of the composer. */
-function ContextRing({ used, total }: { used: number; total: number }) {
+/**
+ * The session readout: the context ring, and everything this conversation has
+ * used behind it.
+ *
+ * The ring and the separate usage pill beside it were two controls reading the
+ * same session, and the pill was the only place cost ever appeared. One control
+ * answers both questions, so the bar has room and the numbers cannot disagree.
+ */
+function ContextRing({
+  used,
+  limit,
+  tokens,
+  cost,
+  speed,
+}: {
+  used: number;
+  limit?: number;
+  tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  cost?: { total: number | null };
+  speed?: number;
+}) {
   const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  useOutsideClose(open, () => setOpen(false));
   const triggerRef = React.useRef<HTMLButtonElement>(null);
-  const tooltipRef = React.useRef<HTMLDivElement>(null);
-  const tooltipId = React.useId();
-  const { style } = useAnchoredMenu(open, triggerRef, tooltipRef, [], "center");
-  const pct = Math.max(0, Math.min(1, used / total));
-  const percent = Math.round(pct * 100);
-  const tokens = (value: number) => value >= 1_000_000 ? `${+(value / 1_000_000).toFixed(1)}m` : `${+(value / 1000).toFixed(1)}k`;
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef, [], "center");
+  const ring = ringReadout({ usedTokens: used, contextLimit: limit, tokens, cost, speed });
   const r = 5.5;
   const c = 2 * Math.PI * r;
-  const label = `Context window: ${percent}% used (${100 - percent}% left), ${tokens(used)} / ${tokens(total)} tokens used`;
   return (
-    <button ref={triggerRef} type="button" className="ctx-ring" aria-label={label} aria-describedby={open ? tooltipId : undefined}
-      onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (document.activeElement !== triggerRef.current) setOpen(false); }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}
-      onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }}>
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
-        <circle
-          cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth="2"
-          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} strokeLinecap="round"
-          transform="rotate(-90 8 8)"
-        />
-      </svg>
-      <AnimatedTooltip open={open} elementRef={tooltipRef} id={tooltipId} style={style}>
-        <span>Context window:</span>
-        <span>{percent}% used ({100 - percent}% left)</span>
-        <span>{tokens(used)} / {tokens(total)} tokens used</span>
-      </AnimatedTooltip>
-    </button>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={"ctx-ring " + ring.level}
+        aria-label={ring.label}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls={open ? menuId : undefined}
+        title={ring.context}
+        onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
+        onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+          <circle
+            cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth="2"
+            strokeDasharray={c} strokeDashoffset={c * (1 - ring.percent / 100)} strokeLinecap="round"
+            transform="rotate(-90 8 8)"
+          />
+        </svg>
+      </button>
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="dialog" aria-label="Session usage" className="session-popover"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }}
+          onClick={(event) => event.stopPropagation()}>
+          <div className="session-info-head">This conversation</div>
+          <dl className="session-info-grid">
+            {ring.rows.map((row) => (
+              <React.Fragment key={row.label}>
+                <dt>{row.label}</dt>
+                <dd title={row.label === "Cost" && row.value === "—" ? "This model has no published price, so the cost cannot be worked out." : undefined}>{row.value}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+          <div className="session-info-context">
+            <div className="session-info-context-head">
+              <span>Context</span>
+              <span>{ring.context}</span>
+            </div>
+            <div className="limit-track">
+              <div className={"limit-fill " + ring.level} style={{ width: ring.percent + "%" }} />
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -403,85 +452,6 @@ function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetSta
     }
   };
   return { focused, setFocused, close, show, triggerKey, menuKey };
-}
-
-/** Session readout. A compact inline summary that opens the detail on click —
- * the bar is a narrow nowrap row, so a full grid inline would overflow it. */
-function SessionInfo({
-  tokens,
-  cost,
-  speed,
-  usedTokens,
-  contextLimit,
-}: {
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null };
-  speed?: number;
-  usedTokens: number;
-  contextLimit: number;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const { present, exiting } = usePresence(open);
-  useOutsideClose(open, () => setOpen(false));
-  const triggerRef = React.useRef<HTMLButtonElement>(null);
-  const menuRef = React.useRef<HTMLDivElement>(null);
-  const menuId = React.useId();
-  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
-  // A zero limit means "not reported", not "divided by zero": the readout would
-  // otherwise say Infinity% and paint a full bar.
-  const limit = contextLimit > 0 ? contextLimit : 128_000;
-  const percent = contextPercent(usedTokens, limit);
-  const level = contextLevel(percent);
-  const speedLabel = formatSpeed(speed);
-  const total = formatTokens(tokens.input + tokens.output);
-  return (
-    <>
-      <button
-        type="button"
-        ref={triggerRef}
-        className={"pill session-pill " + level}
-        aria-label={`Session usage: ${total} tokens, ${formatCost(cost.total)}, ${percent}% of the context window`}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-controls={open ? menuId : undefined}
-        title="What this conversation has used"
-        onClick={(e) => { e.stopPropagation(); if (open) setOpen(false); else setOpen(true); }}
-      >
-        {/* One compact figure plus the fill colour: enough to notice the window
-            getting full without crowding the bar. */}
-        <span className={"session-dot " + level} aria-hidden="true" />
-        <span className="session-total">{total}</span>
-        <span className="session-cost">{formatCost(cost.total)}</span>
-      </button>
-      {present && createPortal(
-        <div ref={menuRef} id={menuId} role="dialog" aria-label="Session usage" className="session-popover"
-          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
-          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }}
-          onClick={(event) => event.stopPropagation()}>
-          <div className="session-info-head">This conversation</div>
-          <dl className="session-info-grid">
-            <dt>Input</dt>
-            <dd>{formatTokens(tokens.input)}{tokens.cacheRead > 0 && <span className="session-cache"> · {formatTokens(tokens.cacheRead)} cached</span>}</dd>
-            <dt>Output</dt><dd>{formatTokens(tokens.output)}</dd>
-            {tokens.cacheWrite > 0 && (<><dt>Cache write</dt><dd>{formatTokens(tokens.cacheWrite)}</dd></>)}
-            <dt>Cost</dt>
-            <dd title={cost.total === null ? "This model has no published price, so the cost cannot be worked out." : undefined}>{formatCost(cost.total)}</dd>
-            {speedLabel && (<><dt>Speed</dt><dd>{speedLabel}</dd></>)}
-          </dl>
-          <div className="session-info-context">
-            <div className="session-info-context-head">
-              <span>Context</span>
-              <span>{formatTokens(usedTokens)} / {formatTokens(limit)} · {percent}%</span>
-            </div>
-            <div className="limit-track">
-              <div className={"limit-fill " + level} style={{ width: percent + "%" }} />
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-    </>
-  );
 }
 
 /** What goes into the next request: a switch per source, the attachments, and a
@@ -2012,6 +1982,23 @@ export function Composer({
           data-placeholder={isFirst ? "Ask SleepyCode anything, @ to add context" : "Add a follow-up"}
           suppressContentEditableWarning
           onDragOver={(e) => e.preventDefault()}
+          // The palette has to claim its keys in the CAPTURE phase. ProseMirror
+          // binds Enter directly on this element and submits the message, so a
+          // bubble-phase handler never saw it: typing `/compact` and pressing
+          // Enter sent the literal command to the model. Capture reaches the key
+          // first, and stopping propagation there keeps the editor out of it.
+          onKeyDownCapture={(e) => {
+            if (!slashOpenNowRef.current || mentionOpenRef.current) return;
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            const claim = () => { e.preventDefault(); e.stopPropagation(); };
+            if (e.key === "ArrowDown") { claim(); setSlashIndex((i) => (i + 1) % slashCountRef.current); return; }
+            if (e.key === "ArrowUp") { claim(); setSlashIndex((i) => (i - 1 + slashCountRef.current) % slashCountRef.current); return; }
+            if (e.key === "Enter" || e.key === "Tab") {
+              const command = slashCommandsRef.current[slashIndexRef.current];
+              if (command && runSlashRef.current(command.id)) { claim(); return; }
+            }
+            if (e.key === "Escape") { claim(); richEditor.current?.setText(""); setSlashText(""); }
+          }}
           onClick={(e) => {
             const t = e.target as HTMLElement;
             const el = t.closest(".mention") as HTMLElement | null;
@@ -2087,17 +2074,6 @@ export function Composer({
               // Tab keeps its normal focus traversal; other button keystrokes
               // cannot select a suggestion or accidentally submit the message.
               if (!((e.ctrlKey || e.metaKey) && ["z", "y"].includes(e.key.toLowerCase()))) return;
-            }
-            // The slash palette owns the arrow keys and Enter while it is open, and
-            // the @ menu gets first refusal because they share the popup slot.
-            if (slashOpenNowRef.current && !mentionOpenRef.current) {
-              if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); setSlashIndex((i) => (i + 1) % slashCountRef.current); return; }
-              if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); setSlashIndex((i) => (i - 1 + slashCountRef.current) % slashCountRef.current); return; }
-              if (e.key === "Enter" || e.key === "Tab") {
-                const command = slashCommandsRef.current[slashIndexRef.current];
-                if (command && runSlashRef.current(command.id)) { e.preventDefault(); e.stopPropagation(); return; }
-              }
-              if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); richEditor.current?.setText(""); setSlashText(""); return; }
             }
             // Mention controls forward history shortcuts to the document too.
             if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
@@ -2235,15 +2211,6 @@ export function Composer({
                 onReindex={() => onReindexProject?.()}
               />
             )}
-            {!editing && sessionStats && (sessionStats.tokens.input > 0 || sessionStats.cost.total !== null) && (
-              <SessionInfo
-                tokens={sessionStats.tokens}
-                cost={sessionStats.cost}
-                speed={sessionStats.speed}
-                usedTokens={usedTokens ?? 0}
-                contextLimit={sessionStats.contextLimit}
-              />
-            )}
           </div>
           <div className="right">
             {/* The model lives here with the send button: it is part of "what will
@@ -2253,11 +2220,18 @@ export function Composer({
               openSignal={openControl?.name === "model" ? openControl.token : undefined}
               models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions}
             />
-            {!editing && (() => {
-              const sel = modelList.find((m) => m.id === selectedModel);
-              const total = parseContextSize(sel?.options.find((o) => o.key === "max_context")?.value) || 128_000;
-              return <ContextRing used={usedTokens ?? 0} total={total} />;
-            })()}
+            {!editing && (
+              <ContextRing
+                used={usedTokens ?? 0}
+                // The host's reported window wins: it is what the request will
+                // actually be measured against. The model's own option is the
+                // fallback for a session the host has not measured yet.
+                limit={sessionStats?.contextLimit || parseContextSize(modelList.find((m) => m.id === selectedModel)?.options.find((o) => o.key === "max_context")?.value)}
+                tokens={sessionStats?.tokens}
+                cost={sessionStats?.cost}
+                speed={sessionStats?.speed}
+              />
+            )}
             {editing && (
               <button className="attach-btn" title="Cancel edit (Esc)" onClick={() => onCancelEdit?.()}>
                 <Icon name="close" size={15} />

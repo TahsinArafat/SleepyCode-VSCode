@@ -181,3 +181,54 @@ test('the newest record decides the speed shown for a session', () => {
   assert.equal(cost.latestSpeed([]), undefined);
   assert.equal(cost.latestSpeed([{ timestamp: 1 }]), undefined);
 });
+
+// ---------------------------------------------------------------- the one readout
+
+/*
+ * The ring is now the only session readout: it has to say how full the window is
+ * AND what the session has cost, because the separate usage pill beside it is
+ * gone. Both facts come from here so the arc and the numbers cannot disagree.
+ */
+
+test('the ring measures context occupancy against the window the model reports', () => {
+  const ring = cost.ringReadout({ usedTokens: 45_000, contextLimit: 200_000 });
+  assert.equal(ring.percent, 23);
+  assert.equal(ring.context, '45k / 200k · 23%');
+  assert.equal(ring.level, 'safe');
+  assert.match(ring.label, /23% of the context window/);
+  assert.match(ring.label, /45k \/ 200k/);
+});
+
+test('an unreported window falls back rather than dividing by zero', () => {
+  // A zero limit means "not reported", not "the window is empty".
+  const ring = cost.ringReadout({ usedTokens: 1_000 });
+  assert.equal(ring.limit, 128_000);
+  assert.equal(ring.percent, 1);
+  assert.ok(!/NaN|Infinity/.test(ring.label), ring.label);
+});
+
+test('the ring carries the session figures too', () => {
+  const ring = cost.ringReadout({
+    usedTokens: 170_000,
+    contextLimit: 200_000,
+    tokens: tokens(1_000, 500, 800, 200),
+    cost: { total: 0.42 },
+    speed: 61,
+  });
+  assert.equal(ring.level, 'danger');
+  const rows = Object.fromEntries(ring.rows.map(row => [row.label, row.value]));
+  assert.equal(rows.Input, '1k · 800 cached');
+  assert.equal(rows.Output, '500');
+  assert.equal(rows['Cache write'], '200');
+  assert.equal(rows.Cost, '$0.42');
+  assert.equal(rows.Speed, '61 tok/s');
+});
+
+test('a row with nothing to say is left out, and an unpriced cost says so', () => {
+  const ring = cost.ringReadout({ usedTokens: 10, contextLimit: 200_000, tokens: tokens(10, 0), cost: { total: null } });
+  const labels = ring.rows.map(row => row.label);
+  // Not "0" and not a row that reads as a measurement.
+  assert.ok(!labels.includes('Cache write'));
+  assert.ok(!labels.includes('Speed'));
+  assert.equal(ring.rows.find(row => row.label === 'Cost').value, '—');
+});

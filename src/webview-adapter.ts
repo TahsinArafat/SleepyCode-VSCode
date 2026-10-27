@@ -16,6 +16,7 @@
 
 import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
 import * as modelOptions from './model-options.ts';
+import * as reviewActions from './review-actions.ts';
 import * as panelCore from './panel-core.ts';
 import { agentOptions } from './agent-options.ts';
 import { REASONING_EFFORTS, REASONING_EFFORT_HINTS, REASONING_EFFORT_LABELS, normalizeReasoningEffort } from './reasoning-effort.ts';
@@ -118,13 +119,21 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'requestMarketplace' };
 
     case 'undoLastTurn':
-      return { type: 'undoLastTurn', conversationId: message.convId };
+      return { type: 'undoLastTurn', conversationId: message.conversationId ?? message.convId };
 
     case 'redoLastTurn':
-      return { type: 'redoLastTurn', conversationId: message.convId };
+      return { type: 'redoLastTurn', conversationId: message.conversationId ?? message.convId };
 
+    // The compaction controls and `/compact` name `conversationId`; reading only
+    // `convId` dropped it, so the host compacted whichever conversation it
+    // happened to consider active.
     case 'compact':
-      return { type: 'compact', conversationId: message.convId };
+      return { type: 'compact', conversationId: message.conversationId ?? message.convId };
+
+    case 'cancelCompact': {
+      const conversationId = message.conversationId ?? message.convId;
+      return conversationId ? { type: 'cancelCompact', conversationId } : null;
+    }
 
     case 'openMemory':
       return { type: 'openMemory' };
@@ -150,10 +159,16 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'notifyResponse', id: Number(message.requestId), choice: message.approve ? 'ok' : 'cancel' };
 
     case 'revertToMessage':
-      return { type: 'undoLastTurn', conversationId: message.convId };
+      return { type: 'undoLastTurn', conversationId: message.conversationId ?? message.convId };
 
-    case 'startReview':
-      return { type: 'reviewChanges', conversationId: message.target?.conversationId ?? '', itemId: message.target?.itemId ?? '' };
+    case 'startReview': {
+      // A review is a new read-only conversation about a SCOPE. It used to be
+      // translated into `reviewChanges`, which reveals the newest response's
+      // tracked files — so "Uncommitted changes" reported "no workspace file
+      // changes were recorded for this response" on a workspace that was dirty.
+      const start = reviewActions.reviewStart(message.target);
+      return start ? { type: 'startReview', title: start.title, prompt: start.prompt } : null;
+    }
 
     case 'steerMessage':
       // SleepyCode steers by queueing the text onto the running conversation.
@@ -449,16 +464,27 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'steered':
       return agentEvent(message.conversationId, { type: 'user-steering' });
 
-    case 'liveUsage':
+    case 'liveUsage': {
+      const prompt = message.inputTokens ?? 0;
+      const completion = message.outputTokens ?? 0;
+      // The latest step's prompt_tokens: the true size of the window in use.
+      const contextTokens = typeof message.contextTokens === 'number' && message.contextTokens > 0 ? message.contextTokens : 0;
+      // The host zeroes this message when a run ends, to clear its live readout.
+      // That is not "usage went to zero" — the conversation still holds what it
+      // holds — so carrying it through blanked the context ring after every
+      // completed response.
+      if (!prompt && !completion && !contextTokens) return null;
       return agentEvent(message.conversationId, {
         type: 'usage',
-        promptTokens: message.inputTokens ?? 0,
-        completionTokens: message.outputTokens ?? 0,
-        totalTokens: (message.inputTokens ?? 0) + (message.outputTokens ?? 0),
+        promptTokens: prompt,
+        completionTokens: completion,
+        totalTokens: prompt + completion,
+        contextTokens,
         model: message.model,
         cachedReadTokens: message.cacheReadTokens,
         cachedWriteTokens: message.cacheWriteTokens,
       });
+    }
 
     case 'workPhase':
       return agentEvent(message.conversationId, { type: 'shell-notify', message: message.first ?? '' });
@@ -815,8 +841,11 @@ export function pendingChangesOf(items: readonly any[] | undefined): { path: str
 /**
  * Context-window usage for the composer ring: SleepyCode records it on the
  * assistant item of each turn, so the last one that has it is current.
+ *
+ * Shared with the host's opening payload, so the ring shows the conversation's
+ * real occupancy from the first paint rather than zero until the next response.
  */
-function contextTokensOf(items: readonly any[] | undefined): number {
+export function contextTokensOf(items: readonly any[] | undefined): number {
   for (let i = (items?.length ?? 0) - 1; i >= 0; i--) {
     const value = items?.[i]?.contextTokens;
     if (typeof value === 'number' && value > 0) return value;

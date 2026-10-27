@@ -916,3 +916,33 @@ test('a CLI model mismatch is reported once, not on every send', () => {
     'the post must sit inside the has/add guard',
   );
 });
+
+test('a code review starts its own conversation instead of reading the newest turn changes', () => {
+  // "Review code" offers scopes — uncommitted, a branch, a commit, custom
+  // instructions — and none of them is "the last response". Routing it to
+  // `reviewChanges` resolved the newest assistant turn's tracked files, so
+  // choosing "Uncommitted changes" on a dirty workspace reported "No workspace
+  // file changes were recorded for this response" and reviewed nothing.
+  const adapter = read('src/webview-adapter.ts');
+  assert.doesNotMatch(adapter, /case 'startReview':\s*return \{ type: 'reviewChanges'/);
+  assert.match(adapter, /case 'startReview': \{[\s\S]{0,400}reviewActions\.reviewStart\(/);
+  assertSource(agent, /if \(message\.type === 'startReview'\) \{/);
+  // A review is read-only: it opens a new conversation in Ask mode and sends the
+  // prompt that names the scope.
+  assertSource(agent, /conversation\.mode = 'ask';/);
+  assert.match(agent, /type: 'send', text: message\.prompt, conversationId: conversation\.id, mode: 'ask'/);
+});
+
+test('the context ring is fed occupancy, and the session readout lives on it', () => {
+  const adapter = read('src/webview-adapter.ts');
+  const cost = read('src/cost-core.ts');
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  // The end-of-run `liveUsage` reset zeroed the ring after every response, and
+  // the field it used was the run total rather than the window in use.
+  assert.match(adapter, /if \(!prompt && !completion && !contextTokens\) return null;/);
+  assert.match(adapter, /contextTokens,/, 'the live usage event carries context occupancy');
+  assert.match(cost, /export function ringReadout/);
+  // One control answers both questions; the separate usage pill is gone.
+  assert.doesNotMatch(composer, /className=\{"pill session-pill/);
+  assert.match(composer, /<ContextRing[\s\S]{0,1400}cost=\{sessionStats\?\.cost\}/);
+});

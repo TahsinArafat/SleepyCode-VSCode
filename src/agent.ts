@@ -920,6 +920,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       workspaceRoot: this.workspaceRoot()?.fsPath,
       selectedModel: selection?.model ?? '',
       turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
+      // Without this the context ring started at zero on every reload, even
+      // though the conversation already had a measured window in use.
+      usedTokens: adapter.contextTokensOf(webviewTranscriptItems(active?.items)),
       approvalMode: this.config().approvalMode,
       mode: active?.mode ?? 'agent',
       // Drafts and open tabs live per workspace; without this they are lost on
@@ -3688,6 +3691,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'agents', agents: this.customAgents() });
       this.postConfig();
       void this.sendPanel('agents');
+      return;
+    }
+    if (message.type === 'startReview') {
+      // A review is its own read-only conversation scoped by the prompt, so the
+      // scope the menu offers is the scope the agent reads. It used to be routed
+      // to `reviewChanges`, which resolves the newest response's tracked files —
+      // so "Uncommitted changes" reported "no workspace file changes were
+      // recorded for this response" whenever the work came from an earlier chat.
+      const project = this.ensureProjectForRoot();
+      if (!project) {
+        void vscode.window.showInformationMessage(adapter.noWorkspaceMessage());
+        return;
+      }
+      const conversation = this.createConversation();
+      conversation.title = String(message.title || 'Code review').slice(0, 100);
+      // Ask mode is read-only, which is what the dialog promises.
+      conversation.mode = 'ask';
+      project.conversations.unshift(conversation);
+      project.activeConversationId = conversation.id;
+      project.updatedAt = Date.now();
+      void this.persistProjects();
+      this.syncConversations();
+      await this.ensureCliSelection(conversation);
+      await this.onMessage({ type: 'send', text: message.prompt, conversationId: conversation.id, mode: 'ask' } as WebMessage);
       return;
     }
     if (message.type === 'reviewChanges') {

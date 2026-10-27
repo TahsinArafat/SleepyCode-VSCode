@@ -394,11 +394,14 @@ function CompactionCard({
   block,
   undoable = false,
   redoable = false,
+  cancellable = false,
   onAction,
 }: {
   block: import("./types").AssistantBlock & { kind: "compaction" };
   undoable?: boolean;
   redoable?: boolean;
+  /** The summary is still running, so it can still be stopped. */
+  cancellable?: boolean;
   onAction?: (id: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -406,11 +409,24 @@ function CompactionCard({
     return (
       <div className="compaction-card running">
         <span className="spinner" /> Summarizing earlier conversation to free context…
+        {/* A summary hops between models and can take minutes, so it needs a way
+            out — this is the only place the running state is visible. */}
+        {cancellable && onAction && (
+          <div className="compaction-actions">
+            <button className="rv-link" onClick={() => onAction("cancel")}>Cancel compaction</button>
+          </div>
+        )}
       </div>
     );
   }
   if (block.status === "failed") {
-    return <div className="compaction-card failed">Context summarization failed — older messages were trimmed instead.</div>;
+    // The host says why (no model could summarize, nothing to compact, the CLI
+    // owns context). Replacing that with a fixed sentence hid every one of them.
+    return (
+      <div className="compaction-card failed">
+        Context compaction failed{block.summary ? ` — ${block.summary}` : ""}.
+      </div>
+    );
   }
   return (
     <div className={"compaction-card done" + (open ? " open" : "")}>
@@ -557,8 +573,8 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
   turn: AssistantTurn; running: boolean; phase?: string;
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
-  /** Undo/redo availability and the handler, for the compaction marker. */
-  compaction?: { undoable: boolean; redoable: boolean; onAction: (id: string) => void };
+  /** Undo/redo/cancel availability and the handler, for the compaction marker. */
+  compaction?: { undoable: boolean; redoable: boolean; cancellable: boolean; onAction: (id: string) => void };
   /** Records an approval decision so its prompt is replaced by the outcome. */
   onDecide?: (requestId: string, approved: boolean) => void;
 }) {
@@ -583,7 +599,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
       if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
       if (block.kind === "route") return <div className="block-group" key={index}><div className="route-note"><Icon name="brain" size={12} /><span>{block.text}</span></div></div>;
-      if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} undoable={compaction?.undoable} redoable={compaction?.redoable} onAction={compaction?.onAction} /></div>;
+      if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} undoable={compaction?.undoable} redoable={compaction?.redoable} cancellable={compaction?.cancellable} onAction={compaction?.onAction} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
       return <div className="block-group" key={index}>
@@ -860,6 +876,8 @@ export function App() {
   // be inferred from the transcript, so it is not guessed here.
   const [compactionUndoable, setCompactionUndoable] = React.useState(false);
   const [compactionRedoable, setCompactionRedoable] = React.useState(false);
+  /** The conversation a summary is running for, so Cancel knows it can act. */
+  const [compactingConv, setCompactingConv] = React.useState<string | null>(null);
   // Project-index state arrives on its own message; it had no adapter case, so
   // the UI never showed it at all.
   const [indexStatus, setIndexStatus] = React.useState<{ status: string; indexed: number; total: number; text: string } | undefined>(undefined);
@@ -1525,8 +1543,16 @@ export function App() {
             else if (ev.type === "tool-call-args") {/* keep current tool label while args stream */}
             else if (ev.type === "tool-call-completed") s.status = { text: "Planning next moves" };
             else if (ev.type === "retry") s.status = { text: `Retrying (${ev.attempt}/${ev.max})…` };
-            else if (ev.type === "usage" && (!ev.source || ev.source === "parent")) s.usedTokens = ev.totalTokens;
-            else if (ev.type === "compaction") s.status = { text: ev.status === "running" ? "Summarizing conversation" : "Planning next moves" };
+            // The ring shows how full the window is, so it reads the latest step's
+            // prompt size. `totalTokens` is the run's running total across every
+            // step — a different, much larger number.
+            else if (ev.type === "usage" && (!ev.source || ev.source === "parent") && ev.contextTokens) s.usedTokens = ev.contextTokens;
+            else if (ev.type === "compaction") {
+              s.status = { text: ev.status === "running" ? "Summarizing conversation" : "Planning next moves" };
+              // Cancel compaction is only offered while this is true. Hard-wiring
+              // it false made the control permanently unavailable.
+              setCompactingConv(ev.status === "running" ? msg.convId : null);
+            }
             else if (ev.type === "shell-notify") s.status = { text: ev.message };
             else if (ev.type === "error") {
               // Keep the rendered error block; persist so the chat survives reloads.
@@ -1769,16 +1795,17 @@ export function App() {
   // Compaction controls. Availability comes from the host's stack flags; the
   // messages come from `compaction-actions.ts`, which refuses anything it cannot
   // run — so a visible button always has a message.
-  const compactionContext = { conversationId: activeId, running: isRunning, compacting: false, undoable: compactionUndoable, redoable: compactionRedoable };
+  const compactionContext = { conversationId: activeId, running: isRunning, compacting: !!activeId && compactingConv === activeId, undoable: compactionUndoable, redoable: compactionRedoable };
   const compactionControls = React.useMemo(
     () => ({
       undoable: compactionUndoable,
       redoable: compactionRedoable,
+      cancellable: compactionContext.compacting,
       onAction: (id: string) => {
-        for (const message of compactionMessages(id, { ...compactionContext, running: isRunning })) post(message as any);
+        for (const message of compactionMessages(id, compactionContext)) post(message as any);
       },
     }),
-    [compactionUndoable, compactionRedoable, activeId, isRunning],
+    [compactionUndoable, compactionRedoable, compactionContext.compacting, activeId, isRunning],
   );
 
   /** Close the review bar after an action that ends the review for this turn. */

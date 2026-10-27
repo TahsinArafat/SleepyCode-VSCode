@@ -2046,3 +2046,90 @@ test('a reverted change still leaves the bar', () => {
   const items = [{ id: 'a1', role: 'assistant', changes: [{ path: 'gone.ts', reverted: true }, { path: 'live.ts' }] }];
   assert.deepEqual(adapter.pendingChangesOf(items).map(c => c.path), ['live.ts']);
 });
+
+// ---------------------------------------------------------------- the context ring
+
+/*
+ * The ring reads context occupancy. It was fed `inputTokens + outputTokens`,
+ * which is the running total across every step of a run rather than how full the
+ * window is — and the host zeroes `liveUsage` when a run ends to clear its live
+ * readout, which arrived here as "usage went to zero" and blanked the ring after
+ * every single response.
+ */
+
+test('live usage carries context occupancy, not the run accumulated total', () => {
+  const out = adapter.toReactMessage({
+    type: 'liveUsage', conversationId: 'c1',
+    inputTokens: 900, outputTokens: 100, contextTokens: 42_000,
+  });
+  assert.equal(out.type, 'agentEvent');
+  assert.equal(out.event.type, 'usage');
+  assert.equal(out.event.contextTokens, 42_000);
+  assert.equal(out.event.totalTokens, 1_000);
+});
+
+test('the end-of-run usage reset does not wipe the context ring', () => {
+  const out = adapter.toReactMessage({ type: 'liveUsage', conversationId: 'c1', inputTokens: 0, outputTokens: 0 });
+  assert.equal(out, null);
+});
+
+test('the opening payload carries the context usage already on screen', () => {
+  const items = [
+    { id: 'a', role: 'assistant', text: 'older', contextTokens: 1_000 },
+    { id: 'b', role: 'assistant', text: 'latest', contextTokens: 42_000 },
+  ];
+  assert.equal(adapter.contextTokensOf(items), 42_000);
+  assert.equal(adapter.contextTokensOf([]), 0);
+  assert.equal(adapter.contextTokensOf(undefined), 0);
+  // A measured zero is not a measurement: keep looking, then report none.
+  assert.equal(adapter.contextTokensOf([{ contextTokens: 0 }, { contextTokens: 5 }]), 5);
+});
+
+// ---------------------------------------------------------------- compaction
+
+test('compaction messages keep the conversation the UI named', () => {
+  // The builders in compaction-actions/slash-commands name the field
+  // `conversationId`; reading only `convId` dropped it and the host fell back to
+  // whichever conversation it considered active.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'compact', conversationId: 'c9' }),
+    { type: 'compact', conversationId: 'c9' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'undoLastTurn', conversationId: 'c9' }),
+    { type: 'undoLastTurn', conversationId: 'c9' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'redoLastTurn', conversationId: 'c9' }),
+    { type: 'redoLastTurn', conversationId: 'c9' },
+  );
+  // The legacy field still translates.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'compact', convId: 'c9' }),
+    { type: 'compact', conversationId: 'c9' },
+  );
+});
+
+test('cancelling a compaction reaches the host at all', () => {
+  // There was no case for it, so Cancel compaction could never do anything.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'cancelCompact', conversationId: 'c9' }),
+    { type: 'cancelCompact', conversationId: 'c9' },
+  );
+});
+
+// ---------------------------------------------------------------- code review
+
+test('starting a review is not a request to reveal a turn changes', () => {
+  // `reviewChanges` resolves the newest assistant turn's tracked files. A review
+  // is a new read-only conversation about a SCOPE, so borrowing that message
+  // reported "no changes recorded for this response" on a dirty workspace.
+  const out = adapter.toSleepyMessage({ type: 'startReview', target: { type: 'uncommitted' } });
+  assert.equal(out.type, 'startReview');
+  assert.equal(out.title, 'Review uncommitted changes');
+  assert.match(out.prompt, /unstaged/);
+  // A scope that names nothing reviewable resolves to null rather than a
+  // whole-workspace review the user did not ask for.
+  assert.equal(adapter.toSleepyMessage({ type: 'startReview', target: { type: 'commit', commit: '' } }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'startReview' }), null);
+});

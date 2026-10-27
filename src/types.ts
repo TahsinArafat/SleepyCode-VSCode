@@ -77,6 +77,10 @@ export type WebMessage =
   | { type: 'chooseContext' }
   | { type: 'compact'; conversationId?: string }
   | { type: 'cancelCompact'; conversationId?: string }
+  // A code review is its own read-only conversation, opened with the prompt that
+  // names the scope the user picked. It is not a request to reveal one turn's
+  // tracked files.
+  | { type: 'startReview'; title: string; prompt: string }
   | { type: 'compactProgress'; conversationId: string; phase: 'start' | 'summarizing' | 'done' | 'cancelled' | 'error'; auto?: boolean; text?: string; beforeTokens?: number; afterTokens?: number; contextWindow?: number; itemCount?: number }
   | { type: 'requestFilePicker' }
   | { type: 'pasteImage'; dataUrl: string; mimeType: string; name: string; size: number }

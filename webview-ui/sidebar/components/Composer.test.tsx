@@ -214,22 +214,27 @@ it("changes thinking, adaptive, toggle and choice options from the keyboard with
   expect(document.querySelector('.model-picker')).toBeNull(); expect(document.activeElement).toBe(trigger);
 });
 
-it("shows context usage separately from the compact model label and opens it with keyboard focus", () => {
+it("shows context usage separately from the compact model label and opens its figures on click", () => {
   const model: ModelDef = { id: "example", name: "Example model", kind: "openai", options: [
     { key: "reasoning_effort", label: "Reasoning effort", type: "select", value: "high", values: ["low", "high"] },
     { key: "max_context", label: "Context budget", type: "select", value: "200k", values: ["200k"] },
   ] };
-  act(() => root.render(<Composer {...props} modelList={[model]} selectedModel="example" usedTokens={50000} />));
+  const sessionStats = { tokens: { input: 40000, output: 9000, cacheRead: 1000, cacheWrite: 0 }, cost: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, total: 0.18 }, contextLimit: 200_000 };
+  act(() => root.render(<Composer {...props} modelList={[model]} selectedModel="example" usedTokens={50000} sessionStats={sessionStats} />));
   const modelTrigger = container.querySelector('.model-select')!;
   expect(modelTrigger.closest('.right')).not.toBeNull();
   expect(modelTrigger.textContent).toContain("High");
   expect(modelTrigger.textContent).not.toContain("200k");
+  // The ring is the whole session readout now: context AND what it cost.
   const context = container.querySelector('.ctx-ring') as HTMLButtonElement;
-  act(() => context.focus());
-  expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("25% used (75% left)");
-  expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("50k / 200k tokens used");
-  key(context, "Escape");
-  expect(document.querySelector('[role="tooltip"]')).toBeNull();
+  expect(context.getAttribute('aria-label')).toContain("25% of the context window");
+  act(() => context.click());
+  const popover = document.querySelector('[role="dialog"][aria-label="Session usage"]');
+  expect(popover?.textContent).toContain("50k / 200k · 25%");
+  expect(popover?.textContent).toContain("$0.18");
+  expect(popover?.textContent).toContain("40k · 1k cached");
+  act(() => document.body.click());
+  expect(document.querySelector('[role="dialog"][aria-label="Session usage"]')).toBeNull();
 });
 
 it("saves Speed choices with their cost hint and shows Fast in the compact model label", () => {

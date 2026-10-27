@@ -35,7 +35,7 @@ export type AgentEvent =
       outcome?: ToolOutcome;
     }
   | { type: "run-status"; status: "running" | "finished" | "error" | "cancelled" }
-  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number; model?: string; requestId?: string; source?: "parent" | "summary" | "subagent"; cachedReadTokens?: number; cachedWriteTokens?: number; cacheReadInputTokens?: number }
+  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number; /** The latest step's prompt size: how full the context window is. */ contextTokens?: number; model?: string; requestId?: string; source?: "parent" | "summary" | "subagent"; cachedReadTokens?: number; cachedWriteTokens?: number; cacheReadInputTokens?: number }
   | { type: "run-result"; text: string; durationMs: number }
   | { type: "subagent-event"; callId: string; event: AgentEvent }
   | { type: "mode-changed"; mode: Mode }

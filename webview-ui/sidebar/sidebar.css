@@ -4026,6 +4026,12 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .ctx-ring:hover {
 	color: var(--fg-dim);
 }
+/* The arc is the only warning that the window is filling, so the level has to
+   reach it — the same colours as the limit bar in its popover. */
+.ctx-ring.warn { color: var(--warn-line, #d7ba7d); }
+.ctx-ring.danger { color: var(--vscode-editorError-foreground, #f14c4c); }
+.ctx-ring.warn:hover,
+.ctx-ring.danger:hover { filter: brightness(1.15); }
 .context-tooltip {
 	position: fixed;
 	z-index: 90;
@@ -4253,8 +4259,8 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	.composer-approval-trigger > span, .composer-bar .model-summary { display: none; }
 	.composer-approval-trigger { padding-inline: 7px; }
 	/* The pills added alongside the older ones: keep the icon, drop the word. */
-	.context-pill > span, .agent-pill > span, .effort-pill > span, .session-pill .session-cost { display: none; }
-	.context-pill, .agent-pill, .effort-pill, .session-pill { padding-inline: 6px; }
+	.context-pill > span, .agent-pill > span, .effort-pill > span { display: none; }
+	.context-pill, .agent-pill, .effort-pill { padding-inline: 6px; }
 }
 .model-select:hover { background: var(--surface-2); }
 .model-select .label { min-width: 24px; }
@@ -4628,14 +4634,9 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .slash-label { font-size: 12px; }
 .slash-desc { grid-column: 2; font-size: 11px; color: var(--fg-dim); }
 
-/* Session readout: a compact pill in the composer bar (which is a narrow nowrap
-   row) with the detail in a popover. A full grid inline overflowed the bar. */
-.session-pill { flex: 0 1 auto; min-width: 0; max-width: 130px; }
-.session-pill .session-total { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-pill .session-cost { color: var(--fg-dim); flex: 0 0 auto; }
-.session-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent, #6c7086); }
-.session-dot.warn { background: var(--warn-line, #d7ba7d); }
-.session-dot.danger { background: var(--vscode-editorError-foreground, #f14c4c); }
+/* Session readout: the ring in the composer bar (a narrow nowrap row) with every
+   figure in the popover behind it. The separate usage pill it replaced is gone,
+   so the pill-only rules went with it. */
 .session-popover {
 	z-index: 40;
 	min-width: 210px;
@@ -4651,7 +4652,6 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .session-info-grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
 .session-info-grid dt { color: var(--fg-dim); }
 .session-info-grid dd { margin: 0; color: var(--fg); text-align: right; }
-.session-cache { color: var(--fg-dim); }
 .session-info-context { display: flex; flex-direction: column; gap: 3px; }
 .session-info-context-head { display: flex; justify-content: space-between; gap: 8px; }
 .limit-track { height: 4px; border-radius: 2px; overflow: hidden; background: var(--surface-2); }

@@ -97,3 +97,38 @@ test('the enabled flag and the message builders agree', () => {
     }
   }
 });
+
+// ---------------------------------------------------------------- starting a review
+
+/*
+ * "Review code" used to post `reviewChanges`, which resolves a turn's tracked
+ * files — so choosing the workspace-wide "Uncommitted changes" scope reported
+ * "No workspace file changes were recorded for this response" whenever the
+ * uncommitted work came from an earlier conversation. A review has to name its
+ * own scope, not borrow the newest response's.
+ */
+
+test('each review scope becomes a prompt that names it', () => {
+  const uncommitted = review.reviewStart({ type: 'uncommitted' });
+  assert.equal(uncommitted.title, 'Review uncommitted changes');
+  assert.match(uncommitted.prompt, /unstaged/);
+  assert.match(uncommitted.prompt, /read-only/i);
+
+  const branch = review.reviewStart({ type: 'baseBranch', branch: 'origin/main' });
+  assert.match(branch.title, /origin\/main/);
+  assert.match(branch.prompt, /origin\/main/);
+
+  const commit = review.reviewStart({ type: 'commit', commit: 'abc1234' });
+  assert.match(commit.prompt, /abc1234/);
+
+  const custom = review.reviewStart({ type: 'custom', instructions: 'Only the parser.' });
+  assert.match(custom.prompt, /Only the parser\./);
+});
+
+test('a scope with nothing to review is refused rather than started', () => {
+  // An empty branch or commit would send a review of everything.
+  assert.equal(review.reviewStart({ type: 'baseBranch', branch: '  ' }), null);
+  assert.equal(review.reviewStart({ type: 'commit', commit: '' }), null);
+  assert.equal(review.reviewStart({ type: 'custom', instructions: '' }), null);
+  assert.equal(review.reviewStart(undefined), null);
+});
