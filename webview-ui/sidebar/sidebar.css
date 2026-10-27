@@ -4664,3 +4664,13 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	font-size: 11px; color: var(--fg-dim);
 	padding: 2px 0;
 }
+
+/* Developer reference: a file path in prose, clickable at its line. */
+.dev-ref {
+	color: var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}
+.dev-ref:hover { color: var(--vscode-textLink-activeForeground, #3794ff); }
+.dev-ref:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }

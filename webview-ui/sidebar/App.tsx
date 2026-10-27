@@ -1981,6 +1981,16 @@ export function App() {
         data-running={isRunning}
         ref={scrollRef}
         onScroll={onScroll}
+        onKeyDown={(event) => {
+          // `role="link"` with a tabindex is only half a control without Enter.
+          const ref = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-open-path]");
+          if (!ref || (event.key !== "Enter" && event.key !== " ")) return;
+          const path = ref.dataset.openPath || "";
+          if (!path) return;
+          event.preventDefault();
+          const line = Number(ref.dataset.line || 0);
+          post({ type: "openFile", path, ...(line ? { startLine: line } : {}) } as any);
+        }}
         tabIndex={0}
         role="region"
         aria-label="Conversation"
@@ -2000,6 +2010,17 @@ export function App() {
               copy.textContent = ok ? "Copied" : "Copy failed";
               window.setTimeout(() => { if (copy.isConnected) copy.textContent = label || "Copy"; }, 1600);
             });
+            return;
+          }
+          // A developer reference: open the file, at that line when one was named.
+          const ref = target?.closest<HTMLElement>("[data-open-path]");
+          if (ref) {
+            const path = ref.dataset.openPath || "";
+            if (path) {
+              const line = Number(ref.dataset.line || 0);
+              event.preventDefault();
+              post({ type: "openFile", path, ...(line ? { startLine: line } : {}) } as any);
+            }
             return;
           }
           const expand = target?.closest<HTMLElement>("[data-expand-code]");

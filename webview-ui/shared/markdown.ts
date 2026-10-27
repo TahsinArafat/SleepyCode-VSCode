@@ -10,6 +10,7 @@
 import { Marked } from "marked";
 import { escapeCodeHtml, getCodeLanguage, highlightCode } from "./codeLanguages";
 import { codeBlockHtml } from "../../src/code-block-html.ts";
+import { linkifyDevRefs } from "../../src/dev-refs.ts";
 
 // GFM markdown (tables, task lists, fenced code, etc.). marked passes raw HTML
 // through, so we sanitize the output before injecting into the webview.
@@ -95,7 +96,9 @@ export function renderMarkdown(srcIn: string): string {
   return cached(src, () => {
     try {
       highlightRemaining = HIGHLIGHT_BUDGET;
-      return textDirections(sanitize(marked.parse(src, { async: false }) as string));
+      // References are linkified before sanitizing, so the anchors this creates go
+      // through the same filter as everything else rather than bypassing it.
+      return textDirections(sanitize(linkifyDevRefs(marked.parse(src, { async: false }) as string)));
     } catch {
       // Fallback: render as escaped plain text on parser failure.
       return '<p dir="auto">' + src.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</p>";
