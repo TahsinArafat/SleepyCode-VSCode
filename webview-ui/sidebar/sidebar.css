@@ -3443,14 +3443,16 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	gap: 5px;
 	margin: 4px 8px 0;
 	min-width: 0;
-	flex-wrap: nowrap;
+	/* Wraps rather than crushing: the actions row now holds five pills, and a
+	   nowrap bar simply squeezes them below their usable width. */
+	flex-wrap: wrap;
+	row-gap: 4px;
 }
 .composer-actions {
 	display: flex;
 	align-items: center;
 	gap: 4px;
 	min-width: 0;
-	max-width: 48%;
 	flex: 0 1 auto;
 }
 .pill {
@@ -4239,6 +4241,9 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 @container prompt (max-width: 300px) {
 	.composer-approval-trigger > span, .composer-bar .model-summary { display: none; }
 	.composer-approval-trigger { padding-inline: 7px; }
+	/* The pills added alongside the older ones: keep the icon, drop the word. */
+	.context-pill > span, .agent-pill > span, .effort-pill > span, .session-pill .session-cost { display: none; }
+	.context-pill, .agent-pill, .effort-pill, .session-pill { padding-inline: 6px; }
 }
 .model-select:hover { background: var(--surface-2); }
 .model-select .label { min-width: 24px; }
@@ -4612,65 +4617,33 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .slash-label { font-size: 12px; }
 .slash-desc { grid-column: 2; font-size: 11px; color: var(--fg-dim); }
 
-/* Session readout: tokens, cost, throughput, context fill. The classic had this
-   behind the context pill; the bar colour is the only warning of trimming. */
-.composer-stats { display: flex; align-items: center; }
-.session-info {
-	display: flex; flex-direction: column; gap: 4px;
-	padding: 6px 8px; font-size: 11px; color: var(--fg-dim);
-	border-left: 1px solid var(--line-soft, var(--line));
-	margin-left: 2px;
-	min-width: 190px;
+/* Session readout: a compact pill in the composer bar (which is a narrow nowrap
+   row) with the detail in a popover. A full grid inline overflowed the bar. */
+.session-pill { flex: 0 1 auto; min-width: 0; max-width: 130px; }
+.session-pill .session-total { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-pill .session-cost { color: var(--fg-dim); flex: 0 0 auto; }
+.session-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent, #6c7086); }
+.session-dot.warn { background: var(--warn-line, #d7ba7d); }
+.session-dot.danger { background: var(--vscode-editorError-foreground, #f14c4c); }
+.session-popover {
+	z-index: 40;
+	min-width: 210px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: var(--r-xl, 12px);
+	background: var(--dropdown-bg);
+	box-shadow: var(--el-3);
+	display: flex; flex-direction: column; gap: 6px;
+	font-size: 11px; color: var(--fg-dim);
 }
 .session-info-head { font-weight: 600; color: var(--fg); }
-.session-info-grid {
-	display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 0;
-}
+.session-info-grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
 .session-info-grid dt { color: var(--fg-dim); }
 .session-info-grid dd { margin: 0; color: var(--fg); text-align: right; }
 .session-cache { color: var(--fg-dim); }
 .session-info-context { display: flex; flex-direction: column; gap: 3px; }
 .session-info-context-head { display: flex; justify-content: space-between; gap: 8px; }
-.limit-track {
-	height: 4px; border-radius: 2px; overflow: hidden;
-	background: var(--surface-2);
-}
+.limit-track { height: 4px; border-radius: 2px; overflow: hidden; background: var(--surface-2); }
 .limit-fill { height: 100%; border-radius: 2px; background: var(--accent, #6c7086); }
 .limit-fill.warn { background: var(--warn-line, #d7ba7d); }
 .limit-fill.danger { background: var(--vscode-editorError-foreground, #f14c4c); }
-
-/* Message footer: which model produced this response, and when. */
-.message-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.message-footer-meta { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-dim); min-width: 0; }
-.message-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
-.message-time { flex: 0 0 auto; }
-
-/* A decided approval keeps its place and states the outcome. */
-.approval-card.decided { padding: 4px 0; }
-.approval-decided {
-	display: inline-flex; align-items: center; gap: 6px;
-	font-size: 11px; color: var(--fg-dim);
-}
-.approval-card.decided.approved .approval-decided { color: var(--vscode-charts-green, #14b8a6); }
-.approval-card.decided.rejected .approval-decided { color: var(--fg-dim); }
-.approval-decided-subject {
-	color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-	max-width: 46ch;
-}
-
-/* Route note: which model actually ran, and why. Quiet, but persistent. */
-.route-note {
-	display: inline-flex; align-items: center; gap: 6px;
-	font-size: 11px; color: var(--fg-dim);
-	padding: 2px 0;
-}
-
-/* Developer reference: a file path in prose, clickable at its line. */
-.dev-ref {
-	color: var(--vscode-textLink-foreground, #3794ff);
-	text-decoration: underline;
-	text-underline-offset: 2px;
-	cursor: pointer;
-}
-.dev-ref:hover { color: var(--vscode-textLink-activeForeground, #3794ff); }
-.dev-ref:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }

@@ -405,9 +405,8 @@ function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetSta
   return { focused, setFocused, close, show, triggerKey, menuKey };
 }
 
-/** Session readout: tokens, cost, throughput and how full the window is. The
- * classic composer had this as a popover behind the context pill; without it a
- * user cannot tell what a turn cost or how close the window is to trimming. */
+/** Session readout. A compact inline summary that opens the detail on click —
+ * the bar is a narrow nowrap row, so a full grid inline would overflow it. */
 function SessionInfo({
   tokens,
   cost,
@@ -421,33 +420,64 @@ function SessionInfo({
   usedTokens: number;
   contextLimit: number;
 }) {
+  const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  useOutsideClose(open, () => setOpen(false));
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
   const percent = contextPercent(usedTokens, contextLimit);
+  const level = contextLevel(percent);
   const speedLabel = formatSpeed(speed);
+  const total = formatTokens(tokens.input + tokens.output);
   return (
-    <div className="session-info" role="group" aria-label="Session usage">
-      <div className="session-info-head">
-        <span>This conversation</span>
-      </div>
-      <dl className="session-info-grid">
-        <dt>Input</dt><dd>{formatTokens(tokens.input)}{tokens.cacheRead > 0 && <span className="session-cache"> · {formatTokens(tokens.cacheRead)} cached</span>}</dd>
-        <dt>Output</dt><dd>{formatTokens(tokens.output)}</dd>
-        {tokens.cacheWrite > 0 && (<><dt>Cache write</dt><dd>{formatTokens(tokens.cacheWrite)}</dd></>)}
-        <dt>Cost</dt>
-        <dd title={cost.total === null ? "This model has no published price, so the cost cannot be worked out." : undefined}>
-          {formatCost(cost.total)}
-        </dd>
-        {speedLabel && (<><dt>Speed</dt><dd>{speedLabel}</dd></>)}
-      </dl>
-      <div className="session-info-context">
-        <div className="session-info-context-head">
-          <span>Context</span>
-          <span>{formatTokens(usedTokens)} / {formatTokens(contextLimit)} · {percent}%</span>
-        </div>
-        <div className="limit-track">
-          <div className={"limit-fill " + contextLevel(percent)} style={{ width: percent + "%" }} />
-        </div>
-      </div>
-    </div>
+    <>
+      <button
+        type="button"
+        ref={triggerRef}
+        className={"pill session-pill " + level}
+        aria-label={`Session usage: ${total} tokens, ${formatCost(cost.total)}, ${percent}% of the context window`}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls={open ? menuId : undefined}
+        title="What this conversation has used"
+        onClick={(e) => { e.stopPropagation(); if (open) setOpen(false); else setOpen(true); }}
+      >
+        {/* One compact figure plus the fill colour: enough to notice the window
+            getting full without crowding the bar. */}
+        <span className={"session-dot " + level} aria-hidden="true" />
+        <span className="session-total">{total}</span>
+        <span className="session-cost">{formatCost(cost.total)}</span>
+      </button>
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="dialog" aria-label="Session usage" className="session-popover"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }}
+          onClick={(event) => event.stopPropagation()}>
+          <div className="session-info-head">This conversation</div>
+          <dl className="session-info-grid">
+            <dt>Input</dt>
+            <dd>{formatTokens(tokens.input)}{tokens.cacheRead > 0 && <span className="session-cache"> · {formatTokens(tokens.cacheRead)} cached</span>}</dd>
+            <dt>Output</dt><dd>{formatTokens(tokens.output)}</dd>
+            {tokens.cacheWrite > 0 && (<><dt>Cache write</dt><dd>{formatTokens(tokens.cacheWrite)}</dd></>)}
+            <dt>Cost</dt>
+            <dd title={cost.total === null ? "This model has no published price, so the cost cannot be worked out." : undefined}>{formatCost(cost.total)}</dd>
+            {speedLabel && (<><dt>Speed</dt><dd>{speedLabel}</dd></>)}
+          </dl>
+          <div className="session-info-context">
+            <div className="session-info-context-head">
+              <span>Context</span>
+              <span>{formatTokens(usedTokens)} / {formatTokens(contextLimit)} · {percent}%</span>
+            </div>
+            <div className="limit-track">
+              <div className={"limit-fill " + level} style={{ width: percent + "%" }} />
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -2153,15 +2183,13 @@ export function Composer({
               perform. Showing the control in a read-only mode implied a gate
               that was never consulted. */}
           {!editing && sessionStats && (sessionStats.tokens.input > 0 || sessionStats.cost.total !== null) && (
-            <div className="composer-stats">
-              <SessionInfo
-                tokens={sessionStats.tokens}
-                cost={sessionStats.cost}
-                speed={sessionStats.speed}
-                usedTokens={usedTokens ?? 0}
-                contextLimit={sessionStats.contextLimit}
-              />
-            </div>
+            <SessionInfo
+              tokens={sessionStats.tokens}
+              cost={sessionStats.cost}
+              speed={sessionStats.speed}
+              usedTokens={usedTokens ?? 0}
+              contextLimit={sessionStats.contextLimit}
+            />
           )}
           {!editing && context && (
             <ContextPanel

@@ -637,3 +637,69 @@ body.vscode-high-contrast .msel-item.active, body.vscode-high-contrast-light .ms
 .provider-meta { font-size: 11px; color: var(--muted, var(--vscode-descriptionForeground)); }
 .provider-key-hint { opacity: .8; }
 .provider-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+/* Dialogs. `modal-overlay` existed here but the card inside it did not — the
+   provider add/edit and API-key dialogs rendered as an unstyled box. Mirrors the
+   chat's dialog styling so the two surfaces agree. */
+.modal-card {
+	background: var(--vscode-editorWidget-background, var(--panel, #252526));
+	border: 1px solid var(--line, var(--vscode-panel-border));
+	border-radius: 12px;
+	padding: 18px 20px;
+	max-width: 420px;
+	width: calc(100% - 48px);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+}
+.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+.modal-body { font-size: 12px; color: var(--muted, var(--vscode-descriptionForeground)); line-height: 1.5; margin-bottom: 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* Form fields inside a dialog. Bare inputs already get base styling; these give
+   the label/field pair a consistent block so a form is not a run of raw inputs. */
+.field-label {
+	display: block;
+	margin: 10px 0 4px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--muted, var(--vscode-descriptionForeground));
+}
+.field-input {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px 8px;
+	border-radius: 6px;
+	border: 1px solid var(--line, var(--vscode-input-border, rgba(128,128,128,.35)));
+	background: var(--vscode-input-background, rgba(128,128,128,.1));
+	color: var(--fg, var(--vscode-input-foreground, inherit));
+	font: inherit;
+	font-size: 12px;
+}
+.field-input:focus { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: -1px; }
+
+/* Skill Marketplace. `feature-card` was styled but the list wrapper, the
+   installed badge and the loading spinner were not, so results rendered as
+   stacked cards with no spacing and a badge with no shape. */
+.skill-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.skill-installed-badge {
+	flex: 0 0 auto;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--vscode-charts-green, #14b8a6);
+	border: 1px solid currentColor;
+	opacity: .85;
+}
+/* The chat's `.spinner` lives in sidebar.css, which this window does not load. */
+.spinner {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	margin-right: 6px;
+	border: 1.5px solid currentColor;
+	border-top-color: transparent;
+	border-radius: 50%;
+	animation: llama-spin .7s linear infinite;
+	vertical-align: -1px;
+}
