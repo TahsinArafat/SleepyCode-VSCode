@@ -21,6 +21,7 @@ import { setMotionPreference, type MotionPreference } from "../shared/motionPref
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
 import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
 import { AccountPanel } from "./panels/AccountPanel";
+import { SleepyQuota, useSleepyAccount } from "./panels/SleepyQuota";
 import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
@@ -337,6 +338,7 @@ function UsagePanel({
   const [pending, setPending] = React.useState<"refresh" | "reset">();
   const [notice, setNotice] = React.useState<{ text: string; error?: boolean }>();
   const [quotaRefresh, setQuotaRefresh] = React.useState(0);
+  const { account: sleepyAccount } = useSleepyAccount();
   const actionRef = React.useRef<{ requestId: string; action: "refresh" | "reset"; timer: number } | undefined>(undefined);
   React.useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -430,6 +432,10 @@ function UsagePanel({
           <Toggle checked={features.trackUsage !== false} onChange={(v) => setFeatures({ trackUsage: v })} />
         </Row>
       </Group>
+
+      {/* The first-party allowance. This page is where people look for "what is
+          left", and it only knew about local token spend. */}
+      <SleepyQuota account={sleepyAccount} />
 
       {/*
         Hidden unless there is an account to show. SleepyCode has one first-party

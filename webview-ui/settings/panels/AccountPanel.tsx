@@ -12,25 +12,13 @@
 
 import * as React from "react";
 import { vscode } from "../../shared/vscode";
-import { accountSummary, type AccountView } from "../../../src/account-core.ts";
+import { accountSummary } from "../../../src/account-core.ts";
 import { Icon } from "../../shared/icons";
+import { QuotaRows, useSleepyAccount } from "./SleepyQuota";
 
 export function AccountPanel() {
-  const [account, setAccount] = React.useState<AccountView | undefined>(undefined);
+  const { account, refresh } = useSleepyAccount();
   const [busy, setBusy] = React.useState(false);
-
-  React.useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      const msg = event.data;
-      if (msg?.type === "account") {
-        setAccount(msg.account ?? { loggedIn: false });
-        setBusy(false);
-      }
-    };
-    window.addEventListener("message", handler);
-    vscode.postMessage({ type: "getAccount" });
-    return () => window.removeEventListener("message", handler);
-  }, []);
 
   const summary = accountSummary(account);
 
@@ -59,7 +47,7 @@ export function AccountPanel() {
               // Sign-in happens in the browser, so the answer arrives as a new
               // `account` message rather than a reply to this click. Re-ask once
               // either way, so a cancelled flow does not leave the button stuck.
-              window.setTimeout(() => vscode.postMessage({ type: "getAccount" }), 1500);
+              window.setTimeout(() => { refresh(); setBusy(false); }, 1500);
             }}
           >
             {busy ? "Working…" : summary.signedIn ? "Sign out" : "Sign in"}
@@ -76,19 +64,7 @@ export function AccountPanel() {
         <>
           <div className="section-label" style={{ marginTop: 24 }}>Limits and usage</div>
           <div className="feature-card">
-            {summary.rows.map((row) => (
-              <div key={row.label} style={{ padding: "6px 0" }}>
-                <div className="fc-head" style={{ alignItems: "baseline" }}>
-                  <span>{row.label}</span>
-                  <span className="panel-hint" style={{ margin: 0 }}>{row.value}</span>
-                </div>
-                {typeof row.percent === "number" && (
-                  <div className="limit-track" style={{ marginTop: 4 }}>
-                    <div className={"limit-fill " + (row.level ?? "safe")} style={{ width: `${row.percent}%` }} />
-                  </div>
-                )}
-              </div>
-            ))}
+            <QuotaRows rows={summary.rows} />
           </div>
         </>
       )}
