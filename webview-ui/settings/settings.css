@@ -622,3 +622,18 @@ body.vscode-high-contrast .msel-item.active, body.vscode-high-contrast-light .ms
 	word-break: break-word;
 }
 .btn-secondary.danger.armed { border-color: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* Provider rows: name and status, the endpoint, then its actions. */
+.provider-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 14px; }
+.provider-row {
+	display: flex; align-items: center; gap: 12px;
+	padding: 10px 12px;
+	border: 1px solid var(--line, var(--vscode-panel-border));
+	border-radius: 9px;
+}
+.provider-main { flex: 1; min-width: 0; }
+.provider-name { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13px; }
+.provider-url { font-size: 11px; color: var(--muted, var(--vscode-descriptionForeground)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-meta { font-size: 11px; color: var(--muted, var(--vscode-descriptionForeground)); }
+.provider-key-hint { opacity: .8; }
+.provider-actions { display: flex; gap: 6px; flex: 0 0 auto; }

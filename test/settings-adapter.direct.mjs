@@ -400,11 +400,13 @@ test('a hidden section resolves to a visible one instead of a blank page', () =>
   // The rail never offers a hidden section, but a jump or a host `navigate` can
   // still name one — and the window renders nothing for it, which reads as a
   // broken settings page rather than an absent one.
-  assert.equal(adapter.visibleSection('providers'), 'general');
+  // `providers` is SERVED now — it gained a real surface (endpoints and keys), so
+  // it routes to itself. The rest still resolve away.
+  assert.equal(adapter.visibleSection('providers'), 'providers');
   assert.equal(adapter.visibleSection('models'), 'general');
   assert.equal(adapter.visibleSection('personas'), 'general');
   // A visible section is returned unchanged, so no jump is ever redirected.
-  for (const id of ['general', 'usage', 'behavior', 'rules', 'mcp', 'marketplace', 'advanced', 'about']) {
+  for (const id of ['general', 'providers', 'usage', 'behavior', 'rules', 'mcp', 'marketplace', 'advanced', 'about']) {
     assert.equal(adapter.visibleSection(id), id, `${id} must not be redirected`);
   }
 });
@@ -413,7 +415,8 @@ test('no section, or an unknown one, falls back to the fallback', () => {
   assert.equal(adapter.visibleSection(undefined), 'general');
   assert.equal(adapter.visibleSection(''), 'general');
   assert.equal(adapter.visibleSection('not-a-section'), 'general');
-  assert.equal(adapter.visibleSection('providers', 'about'), 'about');
+  // A hidden section still honours a caller's own fallback.
+  assert.equal(adapter.visibleSection('ollama', 'about'), 'about');
   assert.equal(adapter.visibleSection('mcp', 'about'), 'mcp');
 });
 

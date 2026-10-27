@@ -38,6 +38,7 @@ import * as worktreeNaming from './worktree-naming';
 import * as queueCore from './queue-core';
 import * as featurePrefs from './feature-prefs';
 import * as costCore from './cost-core';
+import * as providersCore from './providers-core';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -1387,6 +1388,56 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         } catch (error) {
           return { ok: false, text: `Could not delete the skill: ${errorMessage(error)}` };
         }
+      },
+      readProviders: async () => {
+        const rows = providersCore.providerRows({
+          providers: this.getProviders(),
+          keys: this.apiKeys,
+          activeId: this.context.globalState.get<string>('sleepycode.activeProvider', ''),
+        });
+        return rows;
+      },
+      writeProvider: async (draft) => {
+        const input = (draft ?? {}) as providersCore.ProviderDraft;
+        const error = providersCore.validateProviderDraft(input);
+        if (error) throw new Error(error);
+        const providers = this.getProviders();
+        const built = providersCore.providerFromDraft(input);
+        const existing = providers.find(provider => provider.id === built.id);
+        // The canonical provider keeps its identity and its base URL: the product
+        // is built around it, so an edit must not be able to repoint it.
+        const next = existing
+          ? providers.map(provider => (provider.id === built.id
+            ? { ...provider, name: built.isSleepy ? provider.name : built.name, baseURL: provider.isSleepy ? provider.baseURL : built.baseURL, ...(built.modelList ? { modelList: built.modelList } : {}) }
+            : provider))
+          : [...providers, built];
+        await this.context.globalState.update('sleepycode.providers', next);
+        this.log('info', 'provider.saved', built.id);
+        await this.refreshModels();
+      },
+      removeProvider: async (id) => {
+        const providers = this.getProviders();
+        const target = providers.find(provider => provider.id === id);
+        if (!target || target.isSleepy) return;
+        await this.context.globalState.update('sleepycode.providers', providers.filter(provider => provider.id !== id));
+        await this.context.secrets.delete(`sleepycode.apiKey.${id}`).then(undefined, () => undefined);
+        delete this.apiKeys[id];
+        this.log('info', 'provider.removed', id);
+        await this.refreshModels();
+      },
+      setProviderKey: async (id, key) => {
+        const provider = this.getProviders().find(entry => entry.id === id);
+        if (!provider) return;
+        const trimmed = typeof key === 'string' ? key.trim() : '';
+        if (trimmed) {
+          await this.context.secrets.store(`sleepycode.apiKey.${id}`, trimmed);
+          this.apiKeys[id] = trimmed;
+        } else {
+          await this.context.secrets.delete(`sleepycode.apiKey.${id}`);
+          delete this.apiKeys[id];
+        }
+        this.log('info', 'provider.key', `${id}: ${trimmed ? 'set' : 'cleared'}`);
+        await this.refreshModels();
       },
       readLogs: async () => this.context.globalState.get<unknown[]>(AgentViewProvider.LOG_KEY, []),
       clearLogs: async () => {

@@ -4,14 +4,16 @@ import assert from 'node:assert/strict';
 const flags = await import('../webview-ui/shared/featureFlags.ts');
 
 test('OpenCursor-only settings sections are hidden', () => {
-  for (const id of ['providers', 'llamacpp', 'ollama', 'personas', 'subagents', 'indexing', 'hooks']) {
+  for (const id of ['llamacpp', 'ollama', 'personas', 'subagents', 'indexing', 'hooks']) {
     assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
 });
 
 test('sections SleepyCode actually backs stay visible', () => {
   // These are the surfaces the settings window serves real SleepyCode data for.
-  for (const id of ['general', 'usage', 'behavior', 'rules', 'mcp', 'advanced', 'about']) {
+  // `providers` is here on purpose: it gained a real surface, so it is no longer
+  // an OpenCursor-only page.
+  for (const id of ['general', 'providers', 'usage', 'behavior', 'rules', 'mcp', 'advanced', 'about']) {
     assert.equal(flags.isSectionHidden(id), false, `${id} should stay visible`);
   }
 });
@@ -27,11 +29,11 @@ test('sections backed only by OpenCursor stores are hidden', () => {
 test('filterSections drops hidden entries and keeps order', () => {
   const input = [
     { id: 'general' },
-    { id: 'providers' },
     { id: 'ollama' },
+    { id: 'providers' },
     { id: 'mcp' },
   ];
-  assert.deepEqual(flags.filterSections(input).map(s => s.id), ['general', 'mcp']);
+  assert.deepEqual(flags.filterSections(input).map(s => s.id), ['general', 'providers', 'mcp']);
 });
 
 test('hidden list is exported so it can be re-enabled later', () => {

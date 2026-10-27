@@ -356,6 +356,12 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'openEditorSettings',
   'openKeyboardShortcuts',
   'openExternal',
+  // Providers: the surface that was missing entirely, so no compatibility
+  // endpoint could be added or given a key.
+  'getProviders',
+  'saveProvider',
+  'deleteProvider',
+  'setProviderKey',
   // The three settings surfaces the window gained alongside the classic ones.
   'getLogs',
   'clearLogs',
@@ -522,7 +528,6 @@ export { approvalAppliesInMode } from './webview-adapter.ts';
  * Nothing is deleted — re-enabling a section is one line here.
  */
 export const HIDDEN_SETTINGS_SECTIONS = [
-  'providers',
   'llamacpp',
   'ollama',
   'personas',
@@ -544,6 +549,8 @@ const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
  */
 export const VISIBLE_SETTINGS_SECTIONS = [
   'general',
+  // Served now: adding a compatibility endpoint and setting its key.
+  'providers',
   'usage',
   'behavior',
   'rules',

@@ -20,6 +20,7 @@ import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
 import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
+import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
   FIRST_RUN_BODY,
@@ -635,6 +636,9 @@ export function App() {
   const [resetClicks, setResetClicks] = React.useState(0);
   const [resetArmed, setResetArmed] = React.useState(false);
   const [logs, setLogs] = React.useState<unknown[]>([]);
+  // Provider rows from the host. Keys are never included: only whether one is set
+  // and its tail.
+  const [providers, setProviders] = React.useState<{ id: string; name: string; baseUrl: string; models: string[]; isSleepy: boolean; active: boolean; hasKey: boolean; keyHint: string }[]>([]);
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
@@ -716,6 +720,8 @@ export function App() {
         setOllamaStatus(msg.status);
       } else if (msg.type === "ollamaModels") {
         setOllamaModels(msg.models || []);
+      } else if (msg.type === "providers") {
+        setProviders(msg.providers || []);
       } else if (msg.type === "firstRun") {
         setFirstRun(true);
       } else if (msg.type === "logs") {
@@ -746,6 +752,7 @@ export function App() {
     if (section === "usage") vscode.postMessage({ type: "getUsage" });
     // Logs are only useful fresh; read them when the page is opened.
     if (section === "advanced") vscode.postMessage({ type: "getLogs" });
+    if (section === "providers") vscode.postMessage({ type: "getProviders" });
   }, [section]);
 
   // Fetch models across every enabled provider (grouped). Disabled providers are skipped.
@@ -998,7 +1005,11 @@ export function App() {
             <UsagePanel usage={usage} oauthStatus={oauthStatus} features={features} setFeatures={setFeatures} />
           )}
 
-          {section === "providers" && !isSectionHidden("providers") && <ProvidersPanel features={features} setFeatures={setFeatures} oauthStatus={oauthStatus} />}
+          {/* SleepyCode's own provider surface. The ported OpenCursor panel needs
+              its own provider store (accounts, OAuth, balances), none of which
+              exists here, so this section renders the panel that matches what
+              SleepyCode actually supports. */}
+          {section === "providers" && <ProviderKeysPanel providers={providers} />}
 
           {section === "models" && (
             <ModelsPanel

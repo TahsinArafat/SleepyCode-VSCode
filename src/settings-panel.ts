@@ -53,6 +53,14 @@ export interface SettingsPanelHost {
   createSkill(): Promise<{ ok: boolean; text: string }>;
   /** Remove an installed skill, named by its SKILL.md path. */
   deleteSkill(path: unknown): Promise<{ ok: boolean; text: string }>;
+  /** The user's providers, with key presence — never the keys themselves. */
+  readProviders(): Promise<unknown[]>;
+  /** Save one provider, returning the ids now stored. */
+  writeProvider(draft: unknown): Promise<void>;
+  /** Remove a compatibility endpoint. The first-party provider is refused. */
+  removeProvider(id: string): Promise<void>;
+  /** Store (or clear) an endpoint's API key. */
+  setProviderKey(id: string, key: string): Promise<void>;
   /** Recent extension log entries, newest last. */
   readLogs(): Promise<unknown[]>;
   /** Clear the recorded extension log. */
@@ -352,6 +360,21 @@ export class SettingsPanel {
         if (result.ok) await this.pushFeatures();
         return;
       }
+      case 'getProviders':
+        this.post({ type: 'providers', providers: await this.host.readProviders() });
+        return;
+      case 'saveProvider':
+        await this.host.writeProvider(message.draft);
+        this.post({ type: 'providers', providers: await this.host.readProviders() });
+        return;
+      case 'deleteProvider':
+        await this.host.removeProvider(String(message.id ?? ''));
+        this.post({ type: 'providers', providers: await this.host.readProviders() });
+        return;
+      case 'setProviderKey':
+        await this.host.setProviderKey(String(message.id ?? ''), String(message.apiKey ?? ''));
+        this.post({ type: 'providers', providers: await this.host.readProviders() });
+        return;
       case 'getLogs':
         // The host has always kept these; nothing could read them from the window.
         this.post({ type: 'logs', entries: await this.host.readLogs().catch(() => []) });
