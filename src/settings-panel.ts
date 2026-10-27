@@ -57,6 +57,12 @@ export interface SettingsPanelHost {
   writeHooks(rules: unknown): Promise<void>;
   /** The model catalog, with each model's configurable options. */
   readModels(): Promise<unknown>;
+  /** Built-in agents and the user's own, as the Agents page lists them. */
+  readAgents(): Promise<unknown>;
+  /** Create or update one agent. */
+  saveAgent(agent: unknown): Promise<void>;
+  /** Remove one agent. Built-ins are refused host-side. */
+  deleteAgent(id: string): Promise<void>;
   /** Save one model's options, in the shape the chat's model menu posts. */
   saveModelOptions(modelId: string, options: unknown): Promise<void>;
   /** Return one model's options to the discovered values. */
@@ -340,6 +346,17 @@ export class SettingsPanel {
         // stops the window waiting on a reply it never got, and the Account Quota
         // section is hidden while the list is empty.
         this.post(settingsAdapter.panelOAuthStatusMessage());
+        return;
+      case 'getAgents':
+        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
+        return;
+      case 'saveAgent':
+        await this.host.saveAgent(message.agent).catch(() => undefined);
+        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
+        return;
+      case 'deleteAgent':
+        await this.host.deleteAgent(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
         return;
       case 'fetchAllModels':
         await this.postModels();

@@ -1341,6 +1341,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return {
       signIn: () => this.signIn(),
       readModels: async () => adapter.modelOptionsPayload(this.lastModelGroups, this.storedModelOptions()),
+      readAgents: async () => ({ builtIn: AGENT_DEFINITIONS, custom: this.customAgents() }),
+      saveAgent: async (agent) => {
+        // The chat's own handler: one validation path and one upsert rule.
+        await this.onMessage({ type: 'saveAgent', agent } as unknown as WebMessage);
+      },
+      deleteAgent: async (id) => {
+        await this.onMessage({ type: 'deleteAgent', id } as WebMessage);
+      },
       saveModelOptions: async (modelId, options) => {
         // Straight through the chat's own handler: one store, one validation path.
         await this.onMessage({ type: 'saveModelOptions', modelId, options } as unknown as WebMessage);

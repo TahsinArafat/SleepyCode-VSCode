@@ -388,6 +388,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // Models: the same option store the chat's own model menu writes.
   'saveModelOptions',
   'resetModelOptions',
+  // Agents: the same store the agent picker reads.
+  'getAgents',
+  'saveAgent',
+  'deleteAgent',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -553,9 +557,8 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'ollama',
   'personas',
   'subagents',
-  // Backed by the base UI's own stores, which SleepyCode does not have: showing
-  // them would present controls that write nowhere.
-  'agents',
+  // Backed by a feature store SleepyCode does not have: showing it would present
+  // controls that write nowhere.
 ] as const;
 
 const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
@@ -580,6 +583,8 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'indexing',
   // Backed now: it edits the per-model options SleepyCode actually budgets with.
   'models',
+  // Backed now: it manages the agents the host already resolves.
+  'agents',
   'marketplace',
   'mcp',
   'advanced',

@@ -23,6 +23,7 @@ import { AccountPanel } from "./panels/AccountPanel";
 import { SleepyQuota, useSleepyAccount } from "./panels/SleepyQuota";
 import { IndexPanel } from "./panels/IndexPanel";
 import { ModelOptionsPanel } from "./panels/ModelOptionsPanel";
+import { AgentsPanel } from "./panels/AgentsPanel";
 import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
@@ -723,86 +724,7 @@ export function App() {
             </>
           )}
 
-          {section === "agents" && (
-            <>
-              <h1 className="page-title">Agents</h1>
-
-              <Group>
-                <Row title="Text Size" desc="Adjust the conversation text size.">
-                  <Select
-                    aria-label="Text size"
-                    value={features.chatTextSize || "default"}
-                    onChange={(e) => setFeatures({ chatTextSize: e.target.value as FeatureConfig["chatTextSize"] })}
-                  >
-                    <option value="compact">Compact</option>
-                    <option value="default">Default</option>
-                    <option value="large">Large</option>
-                  </Select>
-                </Row>
-                <Row title="Submit with Ctrl + Enter" desc="When enabled, Ctrl + Enter submits chat and Enter inserts a newline.">
-                  <Toggle checked={features.submitWithCtrlEnter === true} onChange={(v) => setFeatures({ submitWithCtrlEnter: v })} />
-                </Row>
-                <Row title="Max Tab Count" desc="Limit how many chat tabs can be open at once (0 = unlimited).">
-                  <NumInput value={features.maxTabCount || null} step="1" min="0" placeholder="unlimited" onChange={(v) => setFeatures({ maxTabCount: v ?? 0 })} />
-                </Row>
-              </Group>
-
-              <div className="section-label">Run Limits</div>
-              <Group>
-                <Row title="Max Agent Steps" desc="Pause the agent after this many steps in a single run (0 = default 50).">
-                  <NumInput value={features.maxAgentSteps || null} step="1" min="0" placeholder="50" onChange={(v) => setFeatures({ maxAgentSteps: v ?? 0 })} />
-                </Row>
-                <Row title="Auto Continue" desc="Automatically continue when the step limit is reached instead of pausing.">
-                  <Toggle checked={features.autoContinue === true} onChange={(v) => setFeatures({ autoContinue: v })} />
-                </Row>
-              </Group>
-
-              <div className="section-label">Tool Timeouts</div>
-              <p className="panel-hint">Hard timeout per tool (seconds). Empty = built-in default. Prevents a hung tool from blocking the agent forever.</p>
-              <Group>
-                {TOOL_TIMEOUT_DEFAULTS.map(({ name, sec }) => {
-                  const overrides = features.toolTimeoutsSec || {};
-                  const val = overrides[name];
-                  return (
-                    <Row key={name} title={name} desc={`Default ${sec}s`}>
-                      <NumInput
-                        value={val != null && val > 0 ? val : null}
-                        step="1"
-                        min="1"
-                        placeholder={String(sec)}
-                        onChange={(v) => {
-                          const next = { ...(features.toolTimeoutsSec || {}) };
-                          if (v == null || v <= 0) delete next[name];
-                          else next[name] = Math.floor(v);
-                          setFeatures({ toolTimeoutsSec: next });
-                        }}
-                      />
-                    </Row>
-                  );
-                })}
-              </Group>
-
-              <div className="section-label">Subagents</div>
-              <p className="panel-hint">
-                Subagents, teams and the default subagent model live in the <button className="link-btn" onClick={() => setSection("subagents")}>Subagents &amp; Teams</button> tab.
-              </p>
-
-              <div className="section-label">Context</div>
-              <Group>
-                <Row title="Web Search Tool" desc="Allow the agent to search the web for relevant information.">
-                  <Toggle checked={features.webSearchEnabled !== false} onChange={(v) => setFeatures({ webSearchEnabled: v })} />
-                </Row>
-                <Row title="Web Fetch Tool" desc="Allow the agent to fetch content from URLs.">
-                  <Toggle checked={features.webFetchEnabled !== false} onChange={(v) => setFeatures({ webFetchEnabled: v })} />
-                </Row>
-              </Group>
-
-              <div className="section-label">Approvals &amp; Execution</div>
-              <p className="panel-hint">
-                Tool capabilities and approval gates live in the <button className="link-btn" onClick={() => setSection("behavior")}>Behavior</button> tab.
-              </p>
-            </>
-          )}
+          {section === "agents" && <AgentsPanel />}
 
           {section === "account" && <AccountPanel />}
 
