@@ -16,7 +16,6 @@ import { contextLevel, formatTokens } from './cost-core.ts';
 export interface AccountLimits {
   usedTokensToday?: number;
   tokensPerDay?: number;
-  requestsPerDay?: number;
   cost5h?: number;
   limit5h?: number;
   cost24h?: number;
@@ -42,6 +41,12 @@ export interface AccountRow {
   /** 0–100, only when the figure is a share of a known limit. */
   percent?: number;
   level?: 'safe' | 'warn' | 'danger';
+  /**
+   * Which page shows it. Usage & Quota answers "what is left", the account page
+   * answers "who am I and what do I owe" — showing the same rows on both is how a
+   * readout starts looking duplicated.
+   */
+  group: 'limits' | 'billing';
 }
 
 export interface AccountSummary {
@@ -69,7 +74,7 @@ function spendRow(label: string, spent: number | undefined, limit: number | unde
   const left = money(spent, currency);
   const right = money(limit, currency);
   if (!left || !right) return null;
-  return { label, value: `${left} / ${right}`, ...share(spent, limit) };
+  return { label, value: `${left} / ${right}`, group: 'limits', ...share(spent, limit) };
 }
 
 /**
@@ -96,12 +101,13 @@ export function accountSummary(account: AccountView | undefined): AccountSummary
     rows.push({
       label: 'Free tokens today',
       value: `${formatTokens(limits.usedTokensToday)} / ${formatTokens(limits.tokensPerDay)}`,
+      group: 'limits',
       ...share(limits.usedTokensToday, limits.tokensPerDay),
     });
   }
-  if (typeof limits.requestsPerDay === 'number') {
-    rows.push({ label: 'Requests per day', value: String(limits.requestsPerDay) });
-  }
+  // There is no requests-per-day figure. The provider's `limit24h` is a COST
+  // ceiling, and reporting it as a request count invented a number the account
+  // does not have.
 
   for (const [label, spent, limit] of [
     ['Spend, last 5 hours', limits.cost5h, limits.limit5h],
@@ -114,11 +120,12 @@ export function accountSummary(account: AccountView | undefined): AccountSummary
   }
 
   const credits = money(account.balances?.credits, account.balances?.currency);
-  if (credits) rows.push({ label: 'Credits', value: credits });
+  if (credits) rows.push({ label: 'Credits', value: credits, group: 'billing' });
 
   const subscription = account.subscription;
   const subscriptionRow = spendRow('Plan usage this month', subscription?.monthlySpend, subscription?.monthlyLimit);
-  if (subscriptionRow) rows.push(subscriptionRow);
+  // Billing, not a limit you are about to hit.
+  if (subscriptionRow) rows.push({ ...subscriptionRow, group: 'billing' });
 
   return {
     signedIn: true,

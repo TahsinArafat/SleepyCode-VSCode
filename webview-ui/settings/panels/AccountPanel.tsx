@@ -21,6 +21,7 @@ export function AccountPanel() {
   const [busy, setBusy] = React.useState(false);
 
   const summary = accountSummary(account);
+  const billing = summary.rows.filter((row) => row.group === "billing");
 
   return (
     <>
@@ -60,11 +61,13 @@ export function AccountPanel() {
         )}
       </div>
 
-      {summary.rows.length > 0 && (
+      {/* Billing only. What is left of the allowance belongs to Usage & Quota, and
+          rendering it on both pages is what made the two look duplicated. */}
+      {billing.length > 0 && (
         <>
-          <div className="section-label" style={{ marginTop: 24 }}>Limits and usage</div>
+          <div className="section-label" style={{ marginTop: 24 }}>Billing</div>
           <div className="feature-card">
-            <QuotaRows rows={summary.rows} />
+            <QuotaRows rows={billing} />
           </div>
         </>
       )}

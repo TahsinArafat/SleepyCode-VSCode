@@ -5324,6 +5324,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runRetries, max: retryBudget.max });
           this.reportMemory();
           this.post({ type: 'done', conversationId, item: assistantItem });
+          // The review bar reads a message of its own, and nothing published one at
+          // the end of a turn: the transcript snapshot is withheld while streaming
+          // and the run-end sync skips the active conversation, so the bar only
+          // showed up on the next unrelated republish — in practice, a restart.
+          this.publishPendingChanges(conversationId);
           systemNotify(this.context, {
             subtitle: paused ? 'Iteration paused' : truncated ? 'Response truncated' : 'Task complete',
             message: paused ? `Reached the ${maxSteps}-step limit. Continue when ready.` : truncated ? 'The model hit its output limit, so the answer is incomplete. Continue when ready.' : (notificationSummary(finalAnswer) || conversation.title),
@@ -5884,18 +5889,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Re-send the pending changes for a conversation.
+   * Publish a conversation's pending changes to the review bar.
    *
    * Posted directly rather than through `post()`: `pendingChanges` is built by the
    * adapter, not translated by it, so routing it through the translator would drop
-   * it. Used when an action is refused, so the review bar the user just closed
-   * comes back and they can see what is still outstanding.
+   * it.
+   *
+   * Only for the conversation on screen: the message names no conversation, so a
+   * background run's files would appear over whichever chat the user is reading.
+   *
+   * The turn that made them is recorded here too, because every action on the bar
+   * resolves its files through a conversation AND a turn.
    */
-  private resyncPendingChanges(conversationId: string): void {
+  private publishPendingChanges(conversationId: string): void {
     if (!this.reactMode) return;
-    const conversation = this.activeProject()?.conversations.find(item => item.id === conversationId);
-    if (!conversation) return;
+    const project = this.activeProject();
+    const conversation = project?.conversations.find(item => item.id === conversationId);
+    if (!project || !conversation || project.activeConversationId !== conversationId) return;
     void this.view?.webview.postMessage(adapter.pendingChangesMessage(conversation.items));
+    const target = adapter.latestAssistantItemId(conversation.items);
+    if (target) this.reactChangeTarget.set(conversationId, target);
+    this.reactPendingPaths.set(conversationId, adapter.pendingChangesOf(conversation.items).map((change) => change.path));
+  }
+
+  /** Re-send the bar after an action it refused, so none of it disappears. */
+  private resyncPendingChanges(conversationId: string): void {
+    this.publishPendingChanges(conversationId);
   }
 
   private async stageTaskChanges(conversationId: string, itemId: string, requestedPaths?: string[]): Promise<void> {

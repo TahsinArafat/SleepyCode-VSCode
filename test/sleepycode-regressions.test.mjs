@@ -981,3 +981,20 @@ test('a conversation whose transcript was never received can be filled', () => {
   assert.match(agentSource, /const streaming = Boolean\(streamId && this\.reactStreaming\.has\(streamId\)\) && !this\.reactSnapshotOnce;/);
   assertSource(agentSource, /if \(message\.type === 'requestTranscript'\) \{/);
 });
+
+test('a turn that changed files publishes its review bar when it ends', () => {
+  const agentSource = read('src/agent.ts');
+  // The transcript snapshot is withheld mid-run, and the run-end sync skips the
+  // active conversation — so with nothing published at the end of a turn the bar
+  // only appeared on the next unrelated republish, in practice a restart.
+  assertSource(agentSource, /this\.post\(\{ type: 'done', conversationId, item: assistantItem \}\);/);
+  // The bar reads a message of its own, so the turn that produced the files has to
+  // publish one; nothing did.
+  assertSource(agentSource, /this\.publishPendingChanges\(conversationId\);/);
+  // It must only publish for the conversation on screen: the message names none,
+  // so a background run's files would appear over whichever chat is open.
+  assertSource(agentSource, /project\.activeConversationId !== conversationId\) return;/);
+  // And it records the turn, because every action on the bar resolves its files
+  // through a conversation AND a turn.
+  assertSource(agentSource, /this\.reactChangeTarget\.set\(conversationId, target\)/);
+});

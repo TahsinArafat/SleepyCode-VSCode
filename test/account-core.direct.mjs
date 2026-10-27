@@ -60,3 +60,28 @@ test('spend windows and credits read as money', () => {
   assert.equal(byLabel['Plan usage this month'], '$4.00 / $10.00');
   assert.equal(summary.rows.find(row => row.label === 'Spend, last 24 hours').percent, 30);
 });
+test('there is no requests-per-day figure, because the account has none', () => {
+  // The provider's `limit24h` is a COST ceiling. Reporting it as a request count
+  // invented a number that looked authoritative and was not a count at all.
+  const summary = accountSummary({ loggedIn: true, limits: { cost24h: 3, limit24h: 5 } });
+  assert.equal(summary.rows.some(row => /request/i.test(row.label)), false);
+});
+
+test('each row belongs to exactly one of the two pages', () => {
+  const summary = accountSummary({
+    loggedIn: true,
+    limits: { usedTokensToday: 10, tokensPerDay: 100, cost24h: 1, limit24h: 5 },
+    balances: { credits: 2, currency: 'USD' },
+    subscription: { monthlySpend: 4, monthlyLimit: 10 },
+  });
+  const limits = summary.rows.filter(row => row.group === 'limits').map(row => row.label);
+  const billing = summary.rows.filter(row => row.group === 'billing').map(row => row.label);
+  // Usage & Quota answers "what is left"; the account page answers "what do I owe".
+  assert.ok(limits.includes('Free tokens today'));
+  assert.ok(limits.includes('Spend, last 24 hours'));
+  assert.ok(billing.includes('Credits'));
+  assert.ok(billing.includes('Plan usage this month'));
+  // No row appears on both pages, which is what made the two look duplicated.
+  assert.equal(limits.filter(label => billing.includes(label)).length, 0);
+  assert.equal(limits.length + billing.length, summary.rows.length);
+});

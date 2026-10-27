@@ -45,8 +45,11 @@ export function QuotaRows({ rows }: { rows: readonly AccountRow[] }) {
             <span className="panel-hint" style={{ margin: 0 }}>{row.value}</span>
           </div>
           {typeof row.percent === "number" && (
-            <div className="limit-track" style={{ marginTop: 4 }}>
-              <div className={"limit-fill " + (row.level ?? "safe")} style={{ width: `${row.percent}%` }} />
+            // The settings window's own bar. `limit-track`/`limit-fill` are the
+            // sidebar's names and do not exist in this bundle, so they rendered as
+            // nothing at all.
+            <div className="index-bar" style={{ marginTop: 6 }}>
+              <div className={"index-bar-fill " + (row.level ?? "safe")} style={{ width: `${row.percent}%` }} />
             </div>
           )}
         </div>
@@ -59,14 +62,24 @@ export function QuotaRows({ rows }: { rows: readonly AccountRow[] }) {
  * The quota block. Renders nothing when there is no account: an empty block reads
  * as broken, absent reads as absent.
  */
-export function SleepyQuota({ account, title = "SleepyAI Quota" }: { account: AccountView | undefined; title?: string }) {
+export function SleepyQuota({
+  account,
+  group = "limits",
+  title = "SleepyAI Quota",
+}: {
+  account: AccountView | undefined;
+  /** Which half of the readout this page owns. */
+  group?: "limits" | "billing";
+  title?: string;
+}) {
   const summary = accountSummary(account);
-  if (!summary.signedIn || summary.rows.length === 0) return null;
+  const rows = summary.rows.filter((row) => row.group === group);
+  if (!summary.signedIn || rows.length === 0) return null;
   return (
     <>
       <div className="section-label">{title}</div>
       <div className="feature-card">
-        <QuotaRows rows={summary.rows} />
+        <QuotaRows rows={rows} />
       </div>
     </>
   );

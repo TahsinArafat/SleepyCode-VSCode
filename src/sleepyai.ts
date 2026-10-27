@@ -152,7 +152,6 @@ export async function refreshSleepyToken(): Promise<string | null> {
 
 export interface SleepyLimits {
   requestsPerMinute?: number;
-  requestsPerDay?: number;
   tokensPerMinute?: number;
   tokensPerDay?: number;
   usedTokensToday?: number;
@@ -220,7 +219,6 @@ export async function fetchSleepyDashboardUsage(token: string): Promise<{ limits
 
     const limits: SleepyLimits = {
       requestsPerMinute: typeof data.limits?.rpmLimit === 'number' ? data.limits.rpmLimit : undefined,
-      requestsPerDay: typeof data.limits?.limit24h === 'number' ? data.limits.limit24h : undefined,
       usedTokensToday: typeof data.freeTokensToday === 'number' ? data.freeTokensToday : undefined,
       tokensPerDay: typeof data.freeTokenLimit === 'number' ? data.freeTokenLimit : undefined,
       cost5h: typeof data.usageByWindow?.cost5h === 'number' ? data.usageByWindow.cost5h : undefined,
