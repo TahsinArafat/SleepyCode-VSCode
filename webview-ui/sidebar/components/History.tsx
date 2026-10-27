@@ -55,12 +55,17 @@ export function History({
   searchRef.current = onSearch;
   const inputRef = React.useRef<HTMLInputElement>(null);
 
+  // Keyed on the list's CONTENT, not its identity: the host re-posts the same
+  // conversations on every render, and a new array each time restarted the search
+  // — bumping the request id and dropping the results still on screen, which read
+  // as the list flickering while nothing had changed.
+  const listKey = list.map((c) => `${c.id}:${c.title}`).join('\u0000');
   React.useEffect(() => {
     const id = Date.now() + Math.random();
     setRequestId(id);
     const timer = setTimeout(() => searchRef.current?.(query, archived, id), 120);
     return () => clearTimeout(timer);
-  }, [query, archived, list]);
+  }, [query, archived, listKey]);
 
   React.useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null;

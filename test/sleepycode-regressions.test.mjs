@@ -1252,3 +1252,29 @@ test('the @-mention menu claims its keys before ProseMirror does', () => {
     assert.ok(composer.includes(key), `the menu must claim ${key}`);
   }
 });
+
+test('the small ones: a re-used toast, a re-posted list, a queued edit', () => {
+  // A notice replaced under the same id (an approval result reusing the row) is
+  // new reading; with only the id in the dependency list the old timer kept
+  // running and dismissed it mid-sentence.
+  const toast = read('webview-ui/sidebar/components/Toast.tsx');
+  assertSource(toast, /}, \[paused, toast\.id, toast\.kind, toast\.title, toast\.message, onDismiss\]\);/);
+
+  // The host re-posts the same conversations on every render. Depending on the
+  // array's identity restarted the debounced search each time, bumping the
+  // request id and dropping the results on screen — the list flickered while
+  // nothing had changed.
+  const history = read('webview-ui/sidebar/components/History.tsx');
+  assert.match(history, /const listKey = list\.map\(\(c\) => `\$\{c\.id\}:\$\{c\.title\}`\)\.join\('\\u0000'\);/);
+  assertSource(history, /}, \[query, archived, listKey\]\);/);
+  assert.doesNotMatch(history, /\[query, archived, list\]/);
+
+  // Editing a queued message pulls it back into the composer through
+  // `setTabDraft`, which owns the workspace-ready guard and the New Chat tab
+  // pinning. Going around it skipped both.
+  const app = read('webview-ui/sidebar/App.tsx');
+  assert.match(app, /setDraft\(draft\);/);
+  assert.match(app, /setTabDraft\(draftKey, draft\);/);
+  // The bypass is gone: no direct write to the draft map in this path.
+  assert.doesNotMatch(app, /draftsRef\.current\.set\(draftKey, draft\);/);
+});

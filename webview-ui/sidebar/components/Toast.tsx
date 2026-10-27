@@ -39,11 +39,14 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastItem[]; onDismi
 
 function ToastRow({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: number) => void }) {
   const [paused, setPaused] = React.useState(false);
+  // Title and message are dependencies, not just the id: a notice whose text is
+  // replaced under the same id (an approval result reusing the row) is new
+  // reading, and the old timer would dismiss it mid-sentence.
   React.useEffect(() => {
     if (paused) return;
     const timer = window.setTimeout(() => onDismiss(toast.id), DURATION[toast.kind] ?? DURATION.info);
     return () => window.clearTimeout(timer);
-  }, [paused, toast.id, toast.kind, onDismiss]);
+  }, [paused, toast.id, toast.kind, toast.title, toast.message, onDismiss]);
 
   return (
     <div

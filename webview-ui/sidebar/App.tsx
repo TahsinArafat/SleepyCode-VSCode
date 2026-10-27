@@ -1777,10 +1777,11 @@ export function App() {
     // attachments (the host's queue entry keeps neither), so the text and any
     // attached files come back intact; the host only has to drop its copy.
     const draft = { text: item.text, attachments: item.attachments ?? [] };
-    draftsRef.current.set(draftKey, draft);
     setDraft(draft);
-    setDraftTick();
-    post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
+    // Through `setTabDraft`, not around it: it owns the workspace-ready guard (a
+    // draft saved before the host has restored the workspace was overwritten) and
+    // the New Chat tab pinning, and this path used to skip both.
+    setTabDraft(draftKey, draft);
     post({ type: "queueAction", convId: activeId, id: item.id, action: "remove" });
   };
   const runQueuedNow = (i: number) => {
