@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { COMPACTION_OUTPUT_BUDGET } from '../src/compaction-core.ts';
 
 import { assertSource } from './source-assert.mjs';
@@ -1167,4 +1167,37 @@ test('a team narrows the roster, and assigns nothing by default', () => {
   assertSource(panel, /vscode\.postMessage\(\{ type: "setActiveTeams", ids: next \}\)/);
   assertSource(panel, /vscode\.postMessage\(\{ type: "saveSubagent", draft: subDraft\.value \}\)/);
   assertSource(panel, /vscode\.postMessage\(\{ type: "saveTeam", draft: teamDraft\.value \}\)/);
+});
+
+test('a panel nothing renders is deleted, not kept behind a barrel', () => {
+  // `ProvidersPanel` and `ModelsPanel` were exported from the settings barrel and
+  // never rendered: this build serves those screens from `ProviderKeysPanel` and
+  // `ModelOptionsPanel`. A barrel export is enough to keep a dead screen, its
+  // tests and its CSS alive for years while reading as live code.
+  const barrel = read('webview-ui/settings/FeaturePanels.tsx');
+  // The comment above the exports explains what left and why; what matters is
+  // that nothing re-exports them.
+  assert.doesNotMatch(barrel, /export \{[^}]*ProvidersPanel/);
+  assert.doesNotMatch(barrel, /export \{[^}]*ModelsPanel/);
+  // The one live component that lived in ProvidersPanel moved out with it.
+  assert.match(barrel, /export \{ OAuthAccountCard \} from "\.\/panels\/OAuthAccountCard";/);
+  for (const dead of [
+    'webview-ui/settings/panels/ProvidersPanel.tsx',
+    'webview-ui/settings/panels/ApiProviderCard.tsx',
+    'webview-ui/settings/panels/ApiKeyDialog.tsx',
+    'webview-ui/settings/panels/ProviderPickerDialog.tsx',
+    'webview-ui/settings/panels/ModelsPanel.tsx',
+    'webview-ui/settings/DocsSection.tsx',
+  ]) {
+    assert.equal(existsSync(new URL(`../${dead}`, import.meta.url)), false, `${dead} should be gone`);
+  }
+  // The classes those panels were styled by are gone from the stylesheet too.
+  // A global orphan sweep is tempting here and was tried: it flags ancestor
+  // selectors (`thead.cfg-table th`) whose rules can never match either, and
+  // proving each one harmless is more judgement than a test should encode. What
+  // is checkable is that the deleted screens' own class names left with them.
+  const css = read('webview-ui/settings/settings.css');
+  for (const name of ['doc-row', 'doc-form', 'docs-card', 'provider-picker', 'api-provider-card', 'api-key-row', 'model-card', 'model-opt-row', 'provider-connection']) {
+    assert.doesNotMatch(css, new RegExp(`\\.${name}(?![A-Za-z0-9_-])`), `.${name} belonged to a deleted panel`);
+  }
 });

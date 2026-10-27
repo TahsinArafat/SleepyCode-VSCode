@@ -12,7 +12,7 @@ import * as React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { OAuthAccountCard } from "./ProvidersPanel";
+import { OAuthAccountCard } from "./OAuthAccountCard";
 import { vscode } from "../../shared/vscode";
 
 vi.mock("../../shared/vscode", () => ({ vscode: { postMessage: vi.fn() } }));

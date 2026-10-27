@@ -12,7 +12,7 @@ import { Select } from "../shared/Select";
 import { Icon, IconName } from "../shared/icons";
 import { vscode } from "../shared/vscode";
 import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMPTY_FEATURES, FeatureConfig, LlamacppStatus, McpStatus, ModelDef, ModelUsage, OAUTH_LABEL, OAuthStatus, OllamaModel, OllamaStatus, Persona, RuleInfo, SkillInfo, uid } from "./features";
-import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
+import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
 import { PersonasPanel } from "./panels/PersonasPanel";
