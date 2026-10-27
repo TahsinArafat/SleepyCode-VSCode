@@ -105,3 +105,13 @@ test('setup is only considered complete once something actually happened', () =>
   assert.equal(extras.completesSetup(''), false);
   assert.equal(extras.completesSetup(undefined), false);
 });
+test('an arm decays on its own, so it cannot be left primed', () => {
+  // Disarming on mouseleave made the gesture unreachable: the label changes on
+  // every press, so the button re-renders between mousedown and mouseup and a
+  // stray leave fires. A timeout is forgiving and still cannot stay armed.
+  assert.equal(extras.RESET_ARM_TIMEOUT_MS, 4000);
+  assert.equal(extras.resetExpired(0), false);
+  assert.equal(extras.resetExpired(3999), false);
+  assert.equal(extras.resetExpired(4000), true);
+  assert.equal(extras.resetExpired(9000), true);
+});

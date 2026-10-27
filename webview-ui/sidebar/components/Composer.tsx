@@ -2171,50 +2171,59 @@ export function Composer({
             e.target.value = "";
           }}
         />
+        {/* Two deliberate rows. One dense nowrap row plus one orphan was what the
+            bar did before; each row now holds the things that belong together and
+            divides the width evenly, so nothing overlaps. */}
         <div className="composer-bar">
-          <div className="composer-actions">
-          <AttachmentMenu onFiles={(imagesOnly) => {
-            const input = fileRef.current;
-            if (!input) return;
-            input.accept = imagesOnly ? "image/*" : "image/*,text/*,.md,.json,.ts,.tsx,.js,.jsx,.py,.css,.html,.yaml,.yml,.toml,.csv,.log";
-            input.click();
-          }} />
-          {/* Approval governs edits and commands, which only agent mode can
-              perform. Showing the control in a read-only mode implied a gate
-              that was never consulted. */}
-          {!editing && sessionStats && (sessionStats.tokens.input > 0 || sessionStats.cost.total !== null) && (
-            <SessionInfo
-              tokens={sessionStats.tokens}
-              cost={sessionStats.cost}
-              speed={sessionStats.speed}
-              usedTokens={usedTokens ?? 0}
-              contextLimit={sessionStats.contextLimit}
-            />
-          )}
-          {!editing && context && (
-            <ContextPanel
-              state={context}
-              onToggle={(id, value) => onToggleContext?.(id, value)}
-              attachments={attachments}
-              onRemoveAttachment={(index) => setAttachments((list) => list.filter((_, i) => i !== index))}
-              onReindex={() => onReindexProject?.()}
-            />
-          )}
-          {!editing && agentOptions.length > 0 && (
-            <AgentPicker value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
-          )}
-          {!editing && reasoningEfforts.length > 0 && (
-            <EffortPicker value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
-          )}
-          {!editing && approvalAppliesInMode(mode) && <ApprovalPicker policy={approvalPolicy} />}
+          {/* Row 1 — what will run. */}
+          <div className="composer-row">
+            <ModePicker mode={mode} onMode={onMode} />
+            {!editing && agentOptions.length > 0 && (
+              <AgentPicker value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
+            )}
+            {!editing && reasoningEfforts.length > 0 && (
+              <EffortPicker value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
+            )}
+            {!editing && approvalAppliesInMode(mode) && <ApprovalPicker policy={approvalPolicy} />}
+            <span className="composer-spacer" />
+            <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
           </div>
-          <div className="right">
+
+          {/* Row 2 — what goes in, and the action. */}
+          <div className="composer-row">
+            <AttachmentMenu onFiles={(imagesOnly) => {
+              const input = fileRef.current;
+              if (!input) return;
+              input.accept = imagesOnly ? "image/*" : "image/*,text/*,.md,.json,.ts,.tsx,.js,.jsx,.py,.css,.html,.yaml,.yml,.toml,.csv,.log";
+              input.click();
+            }} />
+            {!editing && context && (
+              <ContextPanel
+                state={context}
+                onToggle={(id, value) => onToggleContext?.(id, value)}
+                attachments={attachments}
+                onRemoveAttachment={(index) => setAttachments((list) => list.filter((_, i) => i !== index))}
+                onReindex={() => onReindexProject?.()}
+              />
+            )}
+            {!editing && sessionStats && (sessionStats.tokens.input > 0 || sessionStats.cost.total !== null) && (
+              <SessionInfo
+                tokens={sessionStats.tokens}
+                cost={sessionStats.cost}
+                speed={sessionStats.speed}
+                usedTokens={usedTokens ?? 0}
+                contextLimit={sessionStats.contextLimit}
+              />
+            )}
+            {persona && persona.id !== "default" && (
+              <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>
+            )}
+            <span className="composer-spacer" />
             {!editing && (() => {
               const sel = modelList.find((m) => m.id === selectedModel);
               const total = parseContextSize(sel?.options.find((o) => o.key === "max_context")?.value) || 128_000;
               return <ContextRing used={usedTokens ?? 0} total={total} />;
             })()}
-            <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
             {editing && (
               <button className="attach-btn" title="Cancel edit (Esc)" onClick={() => onCancelEdit?.()}>
                 <Icon name="close" size={15} />
@@ -2237,13 +2246,6 @@ export function Composer({
             </button>
           </div>
         </div>
-      </div>
-      <div className="composer-footer">
-        <div className="composer-footer-options">
-          <ModePicker mode={mode} onMode={onMode} />
-          {mode === "project" && <TeamPicker teams={teams ?? []} selected={activeTeamIds ?? []} onChange={(ids) => onTeams?.(ids)} />}
-        </div>
-        {persona && persona.id !== "default" && <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>}
       </div>
       <ImagePreview images={previewImages} activeId={previewImageId} onClose={() => setPreviewImageId(null)} />
     </div>

@@ -31,6 +31,21 @@ export function resetLabel(clicks: number): string {
 }
 
 /**
+ * How long a partly-armed reset stays armed.
+ *
+ * Disarming on `mouseleave` looks safer and is not: the label changes on every
+ * press, so the button re-renders between mousedown and mouseup and a stray leave
+ * zeroes the count — the three-click gesture became unreachable. A timeout decays
+ * it instead, which is forgiving and still cannot be left primed.
+ */
+export const RESET_ARM_TIMEOUT_MS = 4000;
+
+/** Whether a partly-armed reset has gone stale. */
+export function resetExpired(elapsedMs: number): boolean {
+  return elapsedMs >= RESET_ARM_TIMEOUT_MS;
+}
+
+/**
  * The next click count.
  *
  * Leaving the button disarms, so the gesture cannot be completed later by

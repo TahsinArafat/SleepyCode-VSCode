@@ -2255,7 +2255,7 @@ export function App() {
                 </span>
               </div>
               <div className="review-actions">
-                {changeActions({ conversationId: activeId, itemId: changeTarget, paths: pendingChanges.map(c => c.path), running: isRunning })
+                {changeActions({ conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning })
                   .filter(action => action.id !== "stageAll")
                   .map(action => (
                     <button
@@ -2267,7 +2267,7 @@ export function App() {
                         event.stopPropagation();
                         // `changeActionMessages` already refused anything it cannot
                         // run, so an enabled button always has a message here.
-                        for (const message of changeActionMessages(action.id, { conversationId: activeId, itemId: changeTarget, paths: pendingChanges.map(c => c.path), running: isRunning })) {
+                        for (const message of changeActionMessages(action.id, { conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning })) {
                           post(message as any);
                         }
                       }}

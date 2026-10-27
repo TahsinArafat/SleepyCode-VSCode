@@ -293,12 +293,6 @@ input.fc-title-input { padding: 6px 8px; }
 .llama-log-pre { margin: 6px 0 0; max-height: 220px; overflow: auto; background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.2)); border: 1px solid var(--vscode-panel-border, rgba(255,255,255,.08)); border-radius: 4px; padding: 6px 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 
 /* Provider list (collapsed rows + edit modal) */
-.provider-row { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: transparent; margin-bottom: 10px; }
-.provider-row.active { border-color: var(--line-strong); background: var(--surface-1); }
-.provider-row input[type="radio"] { flex: 0 0 auto; margin: 0; accent-color: var(--accent, var(--vscode-focusBorder)); }
-.provider-row .pr-text { flex: 1; min-width: 0; cursor: pointer; }
-.pr-name { font-size: 13px; font-weight: 600; }
-.pr-sub { font-size: 11.5px; color: var(--fg-dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .btn-ghost.sm { padding: 4px 9px; font-size: 11.5px; }
 
 .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--primary-bg); color: var(--primary-fg); border: 1px solid transparent; padding: 8px 16px; border-radius: var(--r-full); font-size: 12px; font-weight: 500; cursor: pointer; }
@@ -703,3 +697,22 @@ body.vscode-high-contrast .msel-item.active, body.vscode-high-contrast-light .ms
 	animation: llama-spin .7s linear infinite;
 	vertical-align: -1px;
 }
+
+/* Build version on the About page — the one thing an About page must say. */
+.about-version { opacity: .75; font-variant-numeric: tabular-nums; }
+
+/* The skill delete action in Rules & Skills had no styling: it rendered as a
+   generic icon button that wrapped below the description on narrow widths. */
+.rss-del {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3px;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--muted, var(--vscode-descriptionForeground));
+	cursor: pointer;
+}
+.rss-del:hover { background: var(--surface-2, rgba(128,128,128,.16)); color: var(--fg, inherit); }

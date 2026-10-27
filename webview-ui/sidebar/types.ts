@@ -229,6 +229,11 @@ export type OutMessage =
   | { type: "acceptAllChanges" }
   | { type: "rejectAllChanges" }
   | { type: "diffChange"; path: string }
+  // Review-bar intents. The host resolves which turn they refer to, so these carry
+  // no turn id — requiring one left the buttons permanently disabled.
+  | { type: "commitChanges" }
+  | { type: "openSourceControl" }
+  | { type: "stageAllChanges"; paths: string[] }
   | { type: "logError"; message: string; info?: string }
   | { type: "openLog" }
   | { type: "getFileIcon"; filename: string }

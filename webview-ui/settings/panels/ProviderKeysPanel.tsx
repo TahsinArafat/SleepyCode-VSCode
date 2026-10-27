@@ -14,13 +14,16 @@
 import * as React from "react";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
-import type { ProviderDraft, ProviderRow } from "../../../src/providers-core";
+import { validateProviderDraft, type ProviderDraft, type ProviderRow } from "../../../src/providers-core";
+import { SettingsDialog } from "./SettingsDialog";
 
 export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
   const [editing, setEditing] = React.useState<ProviderDraft | null>(null);
   const [keyFor, setKeyFor] = React.useState<string | null>(null);
   const [keyValue, setKeyValue] = React.useState("");
   const [error, setError] = React.useState("");
+  // Two-step remove: a misclick deleted the endpoint and its secret outright.
+  const [confirmRemove, setConfirmRemove] = React.useState<string | null>(null);
 
   const openNew = () => { setError(""); setEditing({ name: "", baseURL: "", models: "" }); };
   const openEdit = (row: ProviderRow) => {
@@ -30,6 +33,14 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
 
   const save = () => {
     if (!editing) return;
+    // Validate here as well as host-side: the host's refusal arrives as a notice
+    // after the dialog has closed, which reads as "nothing happened".
+    const problem = validateProviderDraft(editing);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setError("");
     vscode.postMessage({ type: "saveProvider", draft: editing });
     setEditing(null);
   };
@@ -68,7 +79,21 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
                     {row.hasKey ? "Replace key" : "Set key"}
                   </button>
                   <button className="btn-ghost" onClick={() => openEdit(row)}>Edit</button>
-                  <button className="btn-ghost" onClick={() => vscode.postMessage({ type: "deleteProvider", id: row.id })}>Remove</button>
+                  <button
+                    className={"btn-ghost" + (confirmRemove === row.id ? " danger" : "")}
+                    title={confirmRemove === row.id ? "Click again to remove this endpoint and its stored key" : "Remove this endpoint"}
+                    onClick={() => {
+                      if (confirmRemove === row.id) {
+                        vscode.postMessage({ type: "deleteProvider", id: row.id });
+                        setConfirmRemove(null);
+                      } else {
+                        setConfirmRemove(row.id);
+                      }
+                    }}
+                    onMouseLeave={() => setConfirmRemove(null)}
+                  >
+                    {confirmRemove === row.id ? "Remove?" : "Remove"}
+                  </button>
                 </>
               )}
             </div>
@@ -81,44 +106,39 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
       </button>
 
       {keyFor && (
-        <div className="modal-overlay" onClick={() => setKeyFor(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">API key</div>
-            <p className="panel-hint">Stored in the OS secret store, never in settings or sync. Leave empty to remove it.</p>
-            <input
-              className="field-input"
-              type="password"
-              autoFocus
-              value={keyValue}
-              onChange={(event) => setKeyValue(event.target.value)}
-              aria-label="API key"
-              placeholder="sk-…"
-            />
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setKeyFor(null)}>Cancel</button>
-              <button className="btn-primary" onClick={() => { vscode.postMessage({ type: "setProviderKey", id: keyFor, apiKey: keyValue }); setKeyFor(null); }}>Save key</button>
-            </div>
+        <SettingsDialog title="API key" onClose={() => setKeyFor(null)}>
+          <p className="panel-hint">Stored in the OS secret store, never in settings or sync. Leave empty to remove it.</p>
+          <input
+            className="field-input"
+            type="password"
+            data-dialog-autofocus
+            value={keyValue}
+            onChange={(event) => setKeyValue(event.target.value)}
+            aria-label="API key"
+            placeholder="sk-…"
+          />
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setKeyFor(null)}>Cancel</button>
+            <button className="btn-primary" onClick={() => { vscode.postMessage({ type: "setProviderKey", id: keyFor, apiKey: keyValue }); setKeyFor(null); }}>Save key</button>
           </div>
-        </div>
+        </SettingsDialog>
       )}
 
       {editing && (
-        <div className="modal-overlay" onClick={() => setEditing(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{editing.id ? "Edit endpoint" : "Add endpoint"}</div>
+        <SettingsDialog title={editing.id ? "Edit endpoint" : "Add endpoint"} onClose={() => setEditing(null)}>
             <label className="field-label">Name</label>
-            <input className="field-input" value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="My endpoint" />
+            <input className="field-input" data-dialog-autofocus value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="My endpoint" />
             <label className="field-label">Base URL</label>
             <input className="field-input" value={editing.baseURL ?? ""} onChange={(e) => setEditing({ ...editing, baseURL: e.target.value })} placeholder="https://example.com/v1" />
             <label className="field-label">Models (optional)</label>
             <input className="field-input" value={editing.models ?? ""} onChange={(e) => setEditing({ ...editing, models: e.target.value })} placeholder="gpt-4o-mini, llama-3.1-8b" />
             <p className="panel-hint">Separate model ids with commas. Leave empty to discover them from the endpoint.</p>
+            {error && <div className="fc-error" role="alert">{error}</div>}
             <div className="modal-actions">
               <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
               <button className="btn-primary" onClick={save}>Save</button>
             </div>
-          </div>
-        </div>
+        </SettingsDialog>
       )}
     </>
   );

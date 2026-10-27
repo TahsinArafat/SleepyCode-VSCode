@@ -367,6 +367,9 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'clearLogs',
   'resetAllSettings',
   'completeSetup',
+  // The window's only sign-in control, and the first-run CTA. The host had a case
+  // for it but it was never listed, so every click was dropped.
+  'signIn',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -763,4 +766,15 @@ export function resolvePanelPath(rawPath: unknown, workspaceRoot: string | undef
   const joined = `${normalizePath(workspaceRoot)}/${rawPath.replace(/\\/g, '/')}`;
   const resolved = normalizePath(joined);
   return isInside(workspaceRoot, resolved) ? resolved : null;
+}
+
+/**
+ * The OAuth status message, in the shape the window reads.
+ *
+ * The window does `setOauthStatus(msg.status)`, so posting the status flat left it
+ * undefined — harmless while there are no accounts, and a crash the moment there
+ * are. One builder so the sender cannot disagree with the reader.
+ */
+export function panelOAuthStatusMessage(): { type: 'oauthStatus'; status: { accounts: unknown[]; errors: Record<string, string> } } {
+  return { type: 'oauthStatus', status: emptyOAuthStatus() };
 }

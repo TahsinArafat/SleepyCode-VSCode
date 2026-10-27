@@ -26,37 +26,32 @@ test('the card offers the four actions the classic one had', () => {
   }
 });
 
-test('stage all sends the paths the host stages', () => {
+test('stage all posts the paths, without naming the turn', () => {
+  // React-level intent: the host resolves the turn, so the button works whether or
+  // not the webview knows the id.
   assert.deepEqual(review.changeActionMessages('stageAll', ctx), [
-    { type: 'gitStageChanges', conversationId: 'c1', itemId: 'i1', paths: ['a.ts', 'b.ts'] },
+    { type: 'stageAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
   ]);
 });
 
-test('commit names the conversation and the turn', () => {
-  // The host commits the task's changes, which it resolves from both ids.
-  assert.deepEqual(review.changeActionMessages('commit', ctx), [
-    { type: 'gitCommit', conversationId: 'c1', itemId: 'i1' },
-  ]);
+test('commit and source control post intents the adapter can translate', () => {
+  // Posting host names (`gitCommit`, `reviewChanges`) from the webview was silently
+  // dropped — `toSleepyMessage` has no case for them — so both buttons did nothing.
+  assert.deepEqual(review.changeActionMessages('commit', ctx), [{ type: 'commitChanges', conversationId: 'c1' }]);
+  assert.deepEqual(review.changeActionMessages('sourceControl', ctx), [{ type: 'openSourceControl', conversationId: 'c1' }]);
+  assert.deepEqual(review.changeActionMessages('restore', ctx), [{ type: 'restoreCheckpoint', conversationId: 'c1' }]);
 });
 
-test('source control asks the host to open the review, not a diff', () => {
-  assert.deepEqual(review.changeActionMessages('sourceControl', ctx), [
-    { type: 'reviewChanges', conversationId: 'c1', itemId: 'i1' },
-  ]);
-});
-
-test('restore checkpoint targets the turn that made the changes', () => {
-  assert.deepEqual(review.changeActionMessages('restore', ctx), [
-    { type: 'restoreCheckpoint', conversationId: 'c1', itemId: 'i1' },
-  ]);
-});
-
-test('no action fires without a conversation and a turn', () => {
-  // Without both, the host cannot resolve which files to act on — staging or
-  // committing the wrong turn's files is worse than doing nothing.
+test('the turn id is optional, because the host tracks it', () => {
+  // Requiring it left every one of these permanently disabled: turns carry no id
+  // in the webview.
   for (const action of ['stageAll', 'commit', 'sourceControl', 'restore']) {
-    assert.deepEqual(review.changeActionMessages(action, { ...ctx, conversationId: undefined }), [], `${action} with no conversation`);
-    assert.deepEqual(review.changeActionMessages(action, { ...ctx, itemId: undefined }), [], `${action} with no turn`);
+    assert.equal(review.changeActionMessages(action, { ...ctx, itemId: undefined }).length, 1, `${action} without a turn id`);
+  }
+});
+
+test('nothing fires with no conversation and no changes at all', () => {
+  for (const action of ['stageAll', 'commit', 'sourceControl', 'restore']) {
     assert.deepEqual(review.changeActionMessages(action, {}), [], `${action} with nothing`);
   }
 });

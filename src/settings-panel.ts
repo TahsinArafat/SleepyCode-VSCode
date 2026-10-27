@@ -53,6 +53,8 @@ export interface SettingsPanelHost {
   createSkill(): Promise<{ ok: boolean; text: string }>;
   /** Remove an installed skill, named by its SKILL.md path. */
   deleteSkill(path: unknown): Promise<{ ok: boolean; text: string }>;
+  /** The installed build's version, for the About page. */
+  version(): string;
   /** The user's providers, with key presence — never the keys themselves. */
   readProviders(): Promise<unknown[]>;
   /** Save one provider, returning the ids now stored. */
@@ -159,6 +161,8 @@ export class SettingsPanel {
   /** Everything the window asks for on load, and after any change. */
   private async pushAll(): Promise<void> {
     this.post({ type: 'loadSettings', settings: toPanelSettings(this.host.readSettings()) });
+    // Which build this is. An About page that cannot say is not an About page.
+    this.post({ type: 'appInfo', version: this.host.version() });
     this.post({ type: 'usageData', usage: toPanelUsage(this.host.usage()) });
     // Paint the stored servers immediately (so the list is never blank), then
     // sync. Without the sync every row rendered as bare "idle" until the user
@@ -315,7 +319,7 @@ export class SettingsPanel {
         // This build has no OAuth provider accounts. Answering with the truth
         // stops the window waiting on a reply it never got, and the Account Quota
         // section is hidden while the list is empty.
-        this.post({ type: 'oauthStatus', ...settingsAdapter.emptyOAuthStatus() });
+        this.post(settingsAdapter.panelOAuthStatusMessage());
         return;
       case 'fetchAllModels':
         this.post({ type: 'modelsFetched', models: await this.host.refreshModels().catch(() => []) });
@@ -364,16 +368,18 @@ export class SettingsPanel {
         this.post({ type: 'providers', providers: await this.host.readProviders() });
         return;
       case 'saveProvider':
-        await this.host.writeProvider(message.draft);
-        this.post({ type: 'providers', providers: await this.host.readProviders() });
-        return;
       case 'deleteProvider':
-        await this.host.removeProvider(String(message.id ?? ''));
-        this.post({ type: 'providers', providers: await this.host.readProviders() });
-        return;
       case 'setProviderKey':
-        await this.host.setProviderKey(String(message.id ?? ''), String(message.apiKey ?? ''));
-        this.post({ type: 'providers', providers: await this.host.readProviders() });
+        // One guard for all three: a refusal has to be visible, or the button
+        // reads as broken.
+        try {
+          if (message.type === 'saveProvider') await this.host.writeProvider(message.draft);
+          else if (message.type === 'deleteProvider') await this.host.removeProvider(String(message.id ?? ''));
+          else await this.host.setProviderKey(String(message.id ?? ''), String(message.apiKey ?? ''));
+          this.post({ type: 'providers', providers: await this.host.readProviders() });
+        } catch (error) {
+          this.post({ type: 'panelNotice', text: error instanceof Error ? error.message : String(error), error: true });
+        }
         return;
       case 'getLogs':
         // The host has always kept these; nothing could read them from the window.
@@ -384,7 +390,12 @@ export class SettingsPanel {
         this.post({ type: 'logs', entries: [] });
         return;
       case 'resetAllSettings':
-        await this.host.resetAll();
+        try {
+          await this.host.resetAll();
+        } catch (error) {
+          this.post({ type: 'panelNotice', text: `Could not reset: ${error instanceof Error ? error.message : String(error)}`, error: true });
+          return;
+        }
         // Re-read everything: the window is now showing values that were just
         // replaced, and leaving them on screen would be a lie.
         await this.pushAll();

@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 
 const adapter = await import('../src/settings-adapter.ts');
 
+/**
+ * Messages posted only by the hidden `indexing` page. Listed so the guard above
+ * can be exact: a reachable page posting an unsupported type is a defect, and a
+ * page this build does not render is not.
+ */
+const HIDDEN_PANEL_POSTS = new Set(['setEmbedModel', 'syncIndex', 'deleteIndex', 'openCursorignore', 'getIndexStatus']);
+
 // The settings window is OpenCursor's, so its MCP page speaks OpenCursor's
 // config shape. SleepyCode stores its own. These tests pin both directions,
 // including the stdio support SleepyCode's saved connections never had.
@@ -597,4 +604,59 @@ test('a resolved relative path then clears the containment check', () => {
   assert.equal(adapter.openableFile(resolved, roots), '/work/project/.sleepycode/memory.md');
   const escaped = adapter.resolvePanelPath('../../etc/passwd', '/work/project');
   assert.equal(adapter.openableFile(escaped, roots), null);
+});
+
+// ---------------------------------------------------------------- allow-list guard
+//
+// Every message the settings window posts must be in the allow-list, or the host
+// silently drops it and the button does nothing. `signIn` was added to the host's
+// switch but not to the list, so the only sign-in control in the window — and the
+// primary first-run CTA — was dead. This test reads the real source so the two
+// cannot drift again.
+
+test('every message the settings window posts is allowed through', async () => {
+  const fs = await import('node:fs/promises');
+  const root = new URL('..', import.meta.url);
+  const sources = [
+    'webview-ui/settings/App.tsx',
+    'webview-ui/settings/panels/ProviderKeysPanel.tsx',
+    'webview-ui/settings/panels/MarketplacePanel.tsx',
+    'webview-ui/settings/panels/McpPanel.tsx',
+    'webview-ui/settings/panels/RulesPanel.tsx',
+  ];
+  const offenders = [];
+  for (const file of sources) {
+    const text = await fs.readFile(new URL(file, root), 'utf8');
+    for (const match of text.matchAll(/postMessage\(\s*\{\s*type:\s*"([a-zA-Z]+)"/g)) {
+      const type = match[1];
+      // The hidden `indexing` page posts types this build does not serve; it is
+      // unreachable, so those are listed separately rather than pretended.
+      if (HIDDEN_PANEL_POSTS.has(type)) continue;
+      if (!adapter.isPanelMessage({ type })) offenders.push(`${file}: ${type}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `posted but dropped by the allow-list:\n${offenders.join('\n')}`);
+});
+
+test('the hidden indexing page is the only source of unsupported posts', () => {
+  // If this set ever grows, a reachable page is posting something the host drops.
+  assert.deepEqual([...HIDDEN_PANEL_POSTS].sort(), [
+    'deleteIndex', 'getIndexStatus', 'openCursorignore', 'setEmbedModel', 'syncIndex',
+  ]);
+  for (const type of HIDDEN_PANEL_POSTS) {
+    assert.equal(adapter.isPanelMessage({ type }), false, `${type} should still be unsupported`);
+  }
+});
+
+test('signIn reaches the host, because it is the only sign-in control in the window', () => {
+  assert.equal(adapter.isPanelMessage({ type: 'signIn' }), true);
+});
+
+test('the OAuth status is posted in the shape the window reads', () => {
+  // The window reads `msg.status`; posting the status flat left `oauthStatus`
+  // undefined, and the quota section would crash the moment accounts exist.
+  const payload = adapter.panelOAuthStatusMessage();
+  assert.equal(payload.type, 'oauthStatus');
+  assert.ok(payload.status, 'the status must be nested under `status`');
+  assert.deepEqual(payload.status.accounts, []);
 });

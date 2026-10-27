@@ -4647,3 +4647,180 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .limit-fill { height: 100%; border-radius: 2px; background: var(--accent, #6c7086); }
 .limit-fill.warn { background: var(--warn-line, #d7ba7d); }
 .limit-fill.danger { background: var(--vscode-editorError-foreground, #f14c4c); }
+/* Message footer: which model produced this response, and when. */
+.message-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.message-footer-meta { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-dim); min-width: 0; }
+.message-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.message-time { flex: 0 0 auto; }
+
+/* A decided approval keeps its place and states the outcome. */
+
+.approval-card.decided { padding: 4px 0; }
+.approval-decided {
+	display: inline-flex; align-items: center; gap: 6px;
+	font-size: 11px; color: var(--fg-dim);
+}
+
+.approval-card.decided.approved .approval-decided { color: var(--vscode-charts-green, #14b8a6); }
+
+.approval-card.decided.rejected .approval-decided { color: var(--fg-dim); }
+.approval-decided-subject {
+	color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	max-width: 46ch;
+}
+
+/* Route note: which model actually ran, and why. Quiet, but persistent. */
+.route-note {
+	display: inline-flex; align-items: center; gap: 6px;
+	font-size: 11px; color: var(--fg-dim);
+	padding: 2px 0;
+}
+
+/* Developer reference: a file path in prose, clickable at its line. */
+.dev-ref {
+	color: var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}
+.dev-ref:hover { color: var(--vscode-textLink-activeForeground, #3794ff); }
+.dev-ref:focus-visible { outline: 1px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
+/* ============================================================ composer rows
+ * Two deliberate rows instead of one dense nowrap row plus an orphan. Row 1 is
+ * "what will run", row 2 is "what goes in, and the action". Additions stay
+ * balanced because each row keeps its own spacer.
+ */
+.composer-bar {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 4px 8px 0;
+	min-width: 0;
+}
+.composer-row {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	/* Never wrap mid-row: a wrapped pill is what made the old bar look broken. */
+	flex-wrap: nowrap;
+}
+.composer-row > * { min-width: 0; }
+.composer-spacer { flex: 1 1 auto; min-width: 4px; }
+/* Labels may ellipsize; icons never shrink. The bar is narrow and a long model
+   or agent name must not push the send button off the row. */
+.composer-row .pill { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.composer-row .pill > span:not([aria-hidden]) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-row .pill > svg { flex: 0 0 auto; }
+/* Row 2's context + session pills carry numbers, so they stay compact. */
+.composer-row .agent-pill, .composer-row .effort-pill, .composer-row .context-pill { max-width: 9.5rem; }
+.composer-row .model-select { min-width: 0; flex: 0 1 auto; }
+.composer-footer { display: none; }
+
+/* ============================================================ menus
+ * One visual language for every dropdown, following the pattern the reference
+ * tools use: a grouped list, each row a label over a muted one-line description,
+ * a check on the selected row, and generous hit areas.
+ */
+.mode-dropdown,
+.model-picker,
+.approval-menu,
+.session-popover,
+.context-dropdown,
+.effort-dropdown,
+.agent-dropdown,
+.attachment-menu-surface,
+.queue-menu {
+	padding: 5px;
+	border: 1px solid var(--line-strong, var(--line));
+	border-radius: 10px;
+	background: var(--dropdown-bg);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, .38), 0 1px 0 rgba(255, 255, 255, .04) inset;
+}
+/* Rows: label + description stacked, check pinned right. */
+.mode-item,
+.agent-item,
+.effort-item,
+.approval-menu-option,
+.queue-menu-item,
+.attachment-menu-item,
+.session-info-head {
+	border-radius: 7px;
+}
+.mode-item,
+.agent-item,
+.effort-item {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 7px 9px;
+	min-height: 34px;
+	cursor: pointer;
+}
+.mode-item:hover,
+.agent-item:hover,
+.effort-item:hover,
+.approval-menu-option:hover,
+.queue-menu-item:hover,
+.attachment-menu-item:hover {
+	background: var(--surface-2);
+}
+.mode-item.active,
+.agent-item.active,
+.effort-item.active,
+.approval-menu-option.is-selected {
+	background: color-mix(in srgb, var(--accent, #6c7086) 16%, transparent);
+}
+/* A row's main column: the label, then the muted hint under it. */
+.mode-item .mi-main,
+.agent-item .mi-main,
+.effort-item .mi-main {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+.mode-item .mi-label,
+.agent-item .mi-label,
+.effort-item .mi-label {
+	font-size: 12.5px;
+	color: var(--fg);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.mode-item .mi-hint,
+.agent-item .mi-hint,
+.effort-item .mi-hint {
+	font-size: 11px;
+	line-height: 1.35;
+	color: var(--fg-dim);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+/* Check is a fixed slot so labels align whether or not a row is selected. */
+.mode-item .mi-check,
+.agent-item .mi-check,
+.effort-item .mi-check {
+	flex: 0 0 auto;
+	display: inline-flex;
+	width: 16px;
+	justify-content: flex-end;
+	color: var(--accent, var(--vscode-focusBorder, #3794ff));
+}
+.mode-item .mi-icon,
+.mode-item > svg:first-child { flex: 0 0 auto; color: var(--fg-dim); }
+.mode-item.active .mi-icon,
+.mode-item.active > svg:first-child { color: var(--fg); }
+/* Section labels inside a menu, as the reference tools do. */
+.slash-group,
+.menu-group-label {
+	padding: 7px 9px 3px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: .05em;
+	text-transform: uppercase;
+	color: var(--fg-faint, var(--fg-dim));
+}

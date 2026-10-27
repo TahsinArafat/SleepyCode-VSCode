@@ -27,6 +27,7 @@ import {
   FIRST_RUN_DISMISS,
   FIRST_RUN_TITLE,
   RESET_CONSEQUENCE,
+  RESET_ARM_TIMEOUT_MS,
   isResetArmed,
   logEmptyText,
   logLines,
@@ -634,10 +635,12 @@ export function App() {
   // First-run setup, the danger-zone counter, and the log viewer.
   const [firstRun, setFirstRun] = React.useState(false);
   const [resetClicks, setResetClicks] = React.useState(0);
-  const [resetArmed, setResetArmed] = React.useState(false);
+  // Derived, not tracked: two sources for "is it armed" is how they disagree.
+  const resetArmed = isResetArmed(resetClicks);
   const [logs, setLogs] = React.useState<unknown[]>([]);
   // Provider rows from the host. Keys are never included: only whether one is set
   // and its tail.
+  const [version, setVersion] = React.useState("");
   const [providers, setProviders] = React.useState<{ id: string; name: string; baseUrl: string; models: string[]; isSleepy: boolean; active: boolean; hasKey: boolean; keyHint: string }[]>([]);
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
@@ -720,6 +723,8 @@ export function App() {
         setOllamaStatus(msg.status);
       } else if (msg.type === "ollamaModels") {
         setOllamaModels(msg.models || []);
+      } else if (msg.type === "appInfo") {
+        setVersion(String(msg.version || ""));
       } else if (msg.type === "providers") {
         setProviders(msg.providers || []);
       } else if (msg.type === "firstRun") {
@@ -727,7 +732,6 @@ export function App() {
       } else if (msg.type === "logs") {
         setLogs(msg.entries || []);
       } else if (msg.type === "resetDone") {
-        setResetArmed(false);
         setResetClicks(0);
         setPanelNotice({ text: "Every setting is back to its default.", error: false });
       } else if (msg.type === "panelNotice") {
@@ -748,6 +752,13 @@ export function App() {
   }, []);
 
   // Refresh usage numbers whenever the Usage & Quota page is opened.
+  // A partly-armed reset decays on its own.
+  React.useEffect(() => {
+    if (resetClicks === 0) return;
+    const timer = window.setTimeout(() => setResetClicks(0), RESET_ARM_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [resetClicks]);
+
   React.useEffect(() => {
     if (section === "usage") vscode.postMessage({ type: "getUsage" });
     // Logs are only useful fresh; read them when the page is opened.
@@ -831,15 +842,10 @@ export function App() {
               <h1 className="page-title">General</h1>
 
               <Group>
-                {/*
-                  This opened the hidden `providers` section and rendered a blank
-                  page. That section is not part of this build (its data lives in
-                  OpenCursor's feature store), so the row now states what is true
-                  and offers the one provider action that exists: signing in to
-                  SleepyAI, the first-party provider.
-                */}
-                <Row title="Providers & API Keys" desc="SleepyAI is the built-in provider. Compatibility endpoints and their API keys are not editable in this window yet.">
-                  <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "signIn" })}>Sign in to SleepyAI</button>
+                {/* The Providers section is served now, so this row links to it
+                    instead of apologising for its absence. */}
+                <Row title="Providers & API Keys" desc="SleepyAI is the built-in provider. Add a compatibility endpoint and its key on the Providers page.">
+                  <button className="btn-secondary" onClick={() => { setSectionNotice(""); setSection("providers"); }}>Open</button>
                 </Row>
               </Group>
 
@@ -865,9 +871,9 @@ export function App() {
 
               <div className="section-label">Chat</div>
               <Group>
-                <Row title="Auto-Generate Chat Titles" desc="Generate a short AI title for new conversations after the first message.">
-                  <Toggle checked={features.autoGenerateTitles !== false} onChange={(v) => setFeatures({ autoGenerateTitles: v })} />
-                </Row>
+                {/* Removed: "Auto-Generate Chat Titles". The host generates a title
+                    from the conversation with no gate to toggle, so the row saved
+                    nowhere and snapped back on the next open. */}
                 <Row title="Per-Tab Composer Drafts" desc="Keep a separate unsent message per chat tab. When off, the composer text follows you between tabs.">
                   <Toggle checked={features.perTabDrafts === true} onChange={(v) => setFeatures({ perTabDrafts: v })} />
                 </Row>
@@ -1056,12 +1062,9 @@ export function App() {
                 <Row title="Workspace Context" desc="Include workspace info in the agent's context.">
                   <Toggle checked={s.enableWorkspaceContext} onChange={(v) => set("enableWorkspaceContext", v)} />
                 </Row>
-                <Row title="File Reading Tools" desc="Allow reading, searching and listing files.">
-                  <Toggle checked={s.enableFileReading} onChange={(v) => set("enableFileReading", v)} />
-                </Row>
-                <Row title="Terminal Tools" desc="Allow running terminal commands.">
-                  <Toggle checked={s.enableTerminalSuggestions} onChange={(v) => set("enableTerminalSuggestions", v)} />
-                </Row>
+                {/* Removed: "Terminal Tools". Tool availability is gated by the
+                    agent mode, not by a setting, so the toggle could never
+                    take effect. */}
               </Group>
 
               <div className="section-label">Approvals &amp; Execution</div>
@@ -1129,11 +1132,10 @@ export function App() {
                   const next = nextResetClicks(resetClicks, "click");
                   setResetClicks(next);
                   if (isResetArmed(next)) {
-                    setResetArmed(true);
                     vscode.postMessage({ type: "resetAllSettings" });
+                    setResetClicks(0);
                   }
                 }}
-                onMouseLeave={() => setResetClicks(0)}
                 onBlur={() => setResetClicks(0)}
               >
                 {resetLabel(resetClicks)}
@@ -1147,7 +1149,10 @@ export function App() {
                 <img src={document.getElementById("root")?.dataset.icon} alt="" style={{ width: 48, height: 48, borderRadius: 10 }} />
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 600 }}>SleepyCode</div>
-                  <div className="row-desc" style={{ margin: 0 }}>AI coding agent chat inside VS Code — local, open source.</div>
+                  <div className="row-desc" style={{ margin: 0 }}>
+                    AI coding agent chat inside VS Code — local, open source.
+                    {version && <span className="about-version"> · v{version}</span>}
+                  </div>
                 </div>
               </div>
               <Group>

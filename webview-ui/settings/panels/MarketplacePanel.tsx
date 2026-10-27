@@ -89,7 +89,10 @@ export function MarketplacePanel() {
     vscode.postMessage({ type: "marketplaceUninstall", folder: row.folder });
   };
 
-  const installedNames = new Set(installed.map((skill) => skill.name.toLowerCase()));
+  // Slugged the same way the host keys them (`[^a-z0-9]+ -> -`), or a skill whose
+  // display name differs from its folder shows "Install" while it is installed.
+  const skillKey = (name: string) => String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const installedNames = new Set(installed.map((skill) => skillKey(skill.name)));
 
   return (
     <>
@@ -127,7 +130,7 @@ export function MarketplacePanel() {
       ) : (
         <div className="skill-list">
           {rows.map((row) => {
-            const already = row.installed || installedNames.has(row.name.toLowerCase());
+            const already = row.installed || installedNames.has(skillKey(row.name));
             return (
               <div className="feature-card" key={row.source ? `${row.source}#${row.name}` : row.name}>
                 <div className="fc-head">

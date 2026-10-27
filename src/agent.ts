@@ -1389,6 +1389,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           return { ok: false, text: `Could not delete the skill: ${errorMessage(error)}` };
         }
       },
+      version: () => String(this.context.extension.packageJSON.version ?? ''),
       readProviders: async () => {
         const rows = providersCore.providerRows({
           providers: this.getProviders(),
@@ -1654,6 +1655,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'rejectChange') {
       void this.onMessage({ type: 'gitRevertFile', conversationId, itemId, path: message.path } as WebMessage);
+      return true;
+    }
+    // Commit / Source Control / Restore, from the review bar. Handled here for the
+    // same reason Keep All is: the turn is resolved host-side, so the webview does
+    // not have to know it — and posting host names from the webview was dropped by
+    // the adapter, which made all three do nothing.
+    if (message.type === 'commitChanges') {
+      void this.onMessage({ type: 'gitCommit', conversationId, itemId } as WebMessage);
+      return true;
+    }
+    if (message.type === 'openSourceControl') {
+      void this.onMessage({ type: 'reviewChanges', conversationId, itemId } as WebMessage);
+      return true;
+    }
+    if (message.type === 'stageAllChanges') {
+      const paths = Array.isArray(message.paths) ? message.paths.filter((path: unknown) => typeof path === 'string') : [];
+      if (!paths.length) return true;
+      void this.onMessage({ type: 'gitStageChanges', conversationId, itemId, paths } as WebMessage);
       return true;
     }
     return false;
