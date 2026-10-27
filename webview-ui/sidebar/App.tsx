@@ -14,6 +14,7 @@ import { Icon } from "../shared/icons";
 import { Select } from "../shared/Select";
 import { ImagePreview } from "../shared/ImagePreview";
 import { renderMarkdown } from "../shared/markdown";
+import { copyText } from "../shared/clipboard";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -1770,7 +1771,42 @@ export function App() {
         onReview={(target) => post({ type: "startReview", target })}
         onSteer={(text) => { if (activeId) post({ type: "steerMessage", convId: activeId, text }); }} />}
 
-      <div className={"chat-messages" + (!subBlock && hasProviders && turns.length === 0 ? " is-empty" : "")} data-running={isRunning} ref={scrollRef} onScroll={onScroll} tabIndex={0} role="region" aria-label="Conversation">
+      <div
+        className={"chat-messages" + (!subBlock && hasProviders && turns.length === 0 ? " is-empty" : "")}
+        data-running={isRunning}
+        ref={scrollRef}
+        onScroll={onScroll}
+        tabIndex={0}
+        role="region"
+        aria-label="Conversation"
+        onClick={(event) => {
+          // Code-block chrome is sanitized HTML from `marked`, so a button in it
+          // cannot carry a React handler. One delegated listener covers every
+          // block in the transcript, including ones that stream in later.
+          const target = event.target as HTMLElement | null;
+          const copy = target?.closest<HTMLElement>("[data-copy-code]");
+          if (copy) {
+            const block = copy.closest(".code-block");
+            const code = block?.querySelector("code");
+            if (!code) return;
+            const label = copy.textContent;
+            void copyText(code.textContent ?? "").then((ok) => {
+              if (!copy.isConnected) return;
+              copy.textContent = ok ? "Copied" : "Copy failed";
+              window.setTimeout(() => { if (copy.isConnected) copy.textContent = label || "Copy"; }, 1600);
+            });
+            return;
+          }
+          const expand = target?.closest<HTMLElement>("[data-expand-code]");
+          if (expand) {
+            const block = expand.closest(".code-block");
+            if (!block) return;
+            const collapsed = block.classList.toggle("collapsed");
+            expand.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            expand.textContent = collapsed ? `Show all ${(block.querySelector("code")?.textContent ?? "").replace(/\n$/, "").split("\n").length} lines` : "Show less";
+          }
+        }}
+      >
         <TaskActivityContext.Provider value={isRunning}>
         {subBlock ? (
           <SubagentChat block={subBlock} approvals={approvalsByCall} />

@@ -9,6 +9,7 @@
 
 import { Marked } from "marked";
 import { escapeCodeHtml, getCodeLanguage, highlightCode } from "./codeLanguages";
+import { codeBlockHtml } from "../../src/code-block-html.ts";
 
 // GFM markdown (tables, task lists, fenced code, etc.). marked passes raw HTML
 // through, so we sanitize the output before injecting into the webview.
@@ -23,9 +24,12 @@ const marked = new Marked({
       const code = text.replace(/\n$/, "") + "\n";
       const prefix = code.slice(0, Math.min(64_000, highlightRemaining));
       highlightRemaining -= prefix.length;
-      const language = getCodeLanguage(prefix, lang?.trim().split(/\s+/, 1)[0]).id;
-      const content = highlightCode(prefix, language) + escapeCodeHtml(code.slice(prefix.length));
-      return `<pre><code class="language-${language}">${content}</code></pre>\n`;
+      const resolved = getCodeLanguage(prefix, lang?.trim().split(/\s+/, 1)[0]);
+      const content = highlightCode(prefix, resolved.id) + escapeCodeHtml(code.slice(prefix.length));
+      // Language chip, copy control and collapse live in `src/code-block-html.ts`
+      // so the markup is assertable without a DOM. The transcript delegates the
+      // clicks, since raw HTML cannot carry a React handler.
+      return codeBlockHtml({ language: resolved.id, label: resolved.label, content });
     },
   },
 });

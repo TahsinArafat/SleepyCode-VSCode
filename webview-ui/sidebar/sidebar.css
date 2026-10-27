@@ -4415,3 +4415,60 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	color: var(--fg-dim);
 	border-top: 1px solid var(--line-soft);
 }
+
+/* ---------------------------------------------------------------- code blocks
+ * Language chip, copy control, and a collapse for long dumps. The markup comes
+ * from src/code-block-html.ts; the transcript delegates the clicks.
+ */
+.code-block {
+	position: relative;
+	margin: var(--sp-4, 8px) 0;
+	border: 1px solid var(--line-soft, var(--line));
+	border-radius: var(--r-md, 6px);
+	background: var(--code-bg, var(--surface-2));
+	overflow: hidden;
+}
+.code-block-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--sp-4, 8px);
+	padding: 3px 4px 3px 10px;
+	border-bottom: 1px solid var(--line-soft, var(--line));
+}
+.code-block-lang {
+	font-size: 11px;
+	color: var(--fg-dim);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.code-block-copy,
+.code-block-expand {
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+	padding: 3px 7px;
+}
+.code-block-copy { flex: 0 0 auto; }
+.code-block-copy:hover,
+.code-block-expand:hover { background: var(--surface-2); color: var(--fg); }
+.code-block pre { margin: 0; }
+/* Collapsed: the block is clamped, and the expand control sits under it. */
+.code-block.collapsed pre {
+	max-height: 22em;
+	overflow: hidden;
+}
+.code-block-expand {
+	display: block;
+	width: 100%;
+	border-radius: 0;
+	border-top: 1px solid var(--line-soft, var(--line));
+	text-align: center;
+}
+.code-block:not(.collapsed) .code-block-expand { display: block; }

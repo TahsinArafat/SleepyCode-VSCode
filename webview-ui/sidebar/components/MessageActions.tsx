@@ -9,6 +9,7 @@
 
 import * as React from "react";
 import { Icon } from "../../shared/icons";
+import { copyText } from "../../shared/clipboard";
 import "./message-actions.css";
 
 export interface MessageActionsProps {
@@ -18,39 +19,6 @@ export interface MessageActionsProps {
   onRetry?: () => void;
   onRevert?: () => void;
   disabled?: boolean;
-}
-
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* A webview may deny clipboard access; try its document command. */ }
-
-  const previousFocus = document.activeElement;
-  const selection = window.getSelection();
-  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
-  const field = document.createElement("textarea");
-  field.value = text;
-  field.tabIndex = -1;
-  field.setAttribute("aria-hidden", "true");
-  Object.assign(field.style, { position: "fixed", top: "0", left: "0", opacity: "0", pointerEvents: "none" });
-  try {
-    document.body.appendChild(field);
-    field.focus({ preventScroll: true });
-    field.select();
-    return document.execCommand?.("copy") === true;
-  } catch {
-    return false;
-  } finally {
-    field.remove();
-    if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
-    if (selection) {
-      selection.removeAllRanges();
-      for (const range of ranges) selection.addRange(range);
-    }
-  }
 }
 
 export function MessageActions({ variant, text, onEdit, onRetry, onRevert, disabled = false }: MessageActionsProps) {
