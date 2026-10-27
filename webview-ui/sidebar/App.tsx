@@ -18,6 +18,7 @@ import { copyText } from "../shared/clipboard";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
+import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -371,7 +372,17 @@ function MaxStepsCard({ block, running }: { block: import("./types").AssistantBl
 }
 
 /** In-chat marker: earlier conversation auto-summarized to free context. */
-function CompactionCard({ block }: { block: import("./types").AssistantBlock & { kind: "compaction" } }) {
+function CompactionCard({
+  block,
+  undoable = false,
+  redoable = false,
+  onAction,
+}: {
+  block: import("./types").AssistantBlock & { kind: "compaction" };
+  undoable?: boolean;
+  redoable?: boolean;
+  onAction?: (id: string) => void;
+}) {
   const [open, setOpen] = React.useState(false);
   if (block.status === "running") {
     return (
@@ -390,6 +401,14 @@ function CompactionCard({ block }: { block: import("./types").AssistantBlock & {
         <span>Earlier conversation summarized to free context</span>
       </div>
       {open && block.summary && <div className="compaction-body"><Markdown text={block.summary} /></div>}
+      {/* Undo/redo sit on the card itself: this is where the user is looking when
+          they notice their history was summarized. */}
+      {(undoable || redoable) && onAction && (
+        <div className="compaction-actions">
+          {undoable && <button className="rv-link" onClick={() => onAction("undo")}>Undo compaction</button>}
+          {redoable && <button className="rv-link" onClick={() => onAction("redo")}>Redo compaction</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -498,10 +517,12 @@ function parentTaskCallId(turns: Turn[], nestedCallId: string): string | undefin
   return undefined;
 }
 
-const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
+const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, compaction }: {
   turn: AssistantTurn; running: boolean; phase?: string;
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
+  /** Undo/redo availability and the handler, for the compaction marker. */
+  compaction?: { undoable: boolean; redoable: boolean; onAction: (id: string) => void };
 }) {
   // Collapse duplicate plan cards before anything is rendered: SleepyCode's
   // stateful plan tool is re-called for progress, and the plan file is a second
@@ -523,7 +544,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
       if (block.kind === "text") return <div className="block-group" key={index}><Markdown text={block.text} /></div>;
       if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
-      if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} /></div>;
+      if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} undoable={compaction?.undoable} redoable={compaction?.redoable} onAction={compaction?.onAction} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
       return <div className="block-group" key={index}>
@@ -774,6 +795,10 @@ export function App() {
   // The assistant turn the pending changes belong to. The host tracks it, because
   // turns carry no id in the webview.
   const [changeTarget, setChangeTarget] = React.useState<string | undefined>(undefined);
+  // Compaction stack state, reported by the host. Undo/redo availability cannot
+  // be inferred from the transcript, so it is not guessed here.
+  const [compactionUndoable, setCompactionUndoable] = React.useState(false);
+  const [compactionRedoable, setCompactionRedoable] = React.useState(false);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1306,6 +1331,8 @@ export function App() {
           break;
         case "loadConversation":
           setWorkspaceRoot(msg.workspaceRoot);
+          setCompactionUndoable(msg.compactionUndoable === true);
+          setCompactionRedoable(msg.compactionRedoable === true);
           if (!msg.activeId) sessionsRef.current.set("", { turns: [], running: false, status: { text: "" } });
           else seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.running === true);
           setActiveId(msg.activeId);
@@ -1643,6 +1670,21 @@ export function App() {
     if (subTab && !subBlock) setSubTab(null);
   }, [subTab, subBlock]);
 
+  // Compaction controls. Availability comes from the host's stack flags; the
+  // messages come from `compaction-actions.ts`, which refuses anything it cannot
+  // run — so a visible button always has a message.
+  const compactionContext = { conversationId: activeId, running: isRunning, compacting: false, undoable: compactionUndoable, redoable: compactionRedoable };
+  const compactionControls = React.useMemo(
+    () => ({
+      undoable: compactionUndoable,
+      redoable: compactionRedoable,
+      onAction: (id: string) => {
+        for (const message of compactionMessages(id, { ...compactionContext, running: isRunning })) post(message as any);
+      },
+    }),
+    [compactionUndoable, compactionRedoable, activeId, isRunning],
+  );
+
   const closeTab = (id: string) => {
     if (uiPrefsRef.current.perTabDrafts) draftsRef.current.delete(id);
     setOpenTabs((tabs) => {
@@ -1748,6 +1790,18 @@ export function App() {
               <div className="more-menu">
                 <button title="Create an isolated checkout from committed HEAD. Uncommitted changes stay in this checkout." onClick={() => { setMoreOpen(false); post({ type: "createWorktreeConversation" }); }}><Icon name="gitBranch" size={13} /> New worktree chat</button>
                 <button onClick={() => { setMoreOpen(false); setWorkflowDialog("review"); }}><Icon name="code" size={13} /> Review code</button>
+                {/* Manual compaction. `compactionMessages` decides whether it can
+                    run (not while a turn is in flight), so the button reflects
+                    that rather than posting a request the host refuses. */}
+                {(() => {
+                  const compact = compactionActions(compactionContext).find(a => a.id === "compact");
+                  if (!compact) return null;
+                  return (
+                    <button disabled={!compact.enabled} title={compact.hint} onClick={() => { setMoreOpen(false); for (const message of compactionMessages("compact", compactionContext)) post(message as any); }}>
+                      <Icon name="infinity" size={13} /> {compact.label}
+                    </button>
+                  );
+                })()}
                 {/* The five host panels. They used to open only when a VS Code
                     command pushed one, so nothing in them was reachable here. */}
                 {panelMenuEntries().map((entry) => (
@@ -1985,7 +2039,8 @@ export function App() {
                     <div className="bubble">
                       <AssistantContent turn={turn} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
                         phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
-                        onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask} />
+                        onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
+                        compaction={compactionControls} />
                     </div>
                     <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
                       onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />

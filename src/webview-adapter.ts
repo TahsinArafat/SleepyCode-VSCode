@@ -714,6 +714,10 @@ function conversationPayload(message: SleepyMsg): ReactMsg {
     running: message.running === true,
     workspaceRoot: message.workspaceRoot,
     changes: pendingChangesOf(message.items),
+    // Stack state for the compaction controls. `false` rather than undefined:
+    // the buttons render from one shape.
+    compactionUndoable: message.compactionUndoable === true,
+    compactionRedoable: message.compactionRedoable === true,
   };
 }
 

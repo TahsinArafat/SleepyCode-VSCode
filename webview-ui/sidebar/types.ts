@@ -122,7 +122,7 @@ export type InMessage =
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
-  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string }
+  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string; compactionUndoable?: boolean; compactionRedoable?: boolean }
   | { type: "error"; convId?: string; message: string }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
   | { type: "fileSearchResults"; requestId: number; items: MentionItem[] }

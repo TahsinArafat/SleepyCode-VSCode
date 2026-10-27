@@ -4485,3 +4485,6 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 /* Agent menu: name and role on one line, the description under it. */
 .agent-dropdown .mi-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .agent-dropdown .mi-hint { font-size: 11px; color: var(--fg-dim); }
+
+/* Compaction undo/redo, on the marker that reports the summary. */
+.compaction-actions { display: flex; gap: 10px; padding: 2px 10px 6px; }

@@ -1823,3 +1823,15 @@ test('pendingChanges names the turn that made them', () => {
   // No changes means no target either, so the buttons stay disabled.
   assert.equal(adapter.pendingChangesMessage([{ id: 'u1', role: 'user', text: 'hi' }]).itemId, undefined);
 });
+
+test('the compaction stacks reach the webview', () => {
+  // Undo/redo availability is host stack state; the webview cannot infer it, and
+  // guessing from a visible divider would offer Undo with nothing to undo.
+  const out = adapter.toReactMessage({ type: 'conversation', id: 'c1', items: [], compactionUndoable: true, compactionRedoable: false });
+  assert.equal(out.compactionUndoable, true);
+  assert.equal(out.compactionRedoable, false);
+  // Absent must read as false, so the buttons have one shape.
+  const bare = adapter.toReactMessage({ type: 'conversation', id: 'c2', items: [] });
+  assert.equal(bare.compactionUndoable, false);
+  assert.equal(bare.compactionRedoable, false);
+});
