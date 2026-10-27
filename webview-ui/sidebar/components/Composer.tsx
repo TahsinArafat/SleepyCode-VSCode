@@ -668,11 +668,11 @@ function PersonaPicker({ value, options, onSelect }: {
               onFocus={() => nav.setFocused(index)}
               onClick={() => pick(option.id)}
             >
-              <div className="agent-item-body">
-                <span className="agent-item-name">{option.name}</span>
-                <span className="agent-item-desc">{option.description}</span>
-              </div>
-              {option.id === value && <Icon name="check" size={13} />}
+              <span className="mi-main">
+                <span className="mi-label">{option.name}</span>
+                <span className="mi-hint">{option.description}</span>
+              </span>
+              <span className="mi-check">{option.id === value && <Icon name="check" size={13} />}</span>
             </div>
           ))}
         </div>,

@@ -49,7 +49,11 @@ export async function openSidebar({ width = 460, height = 820, headless = true, 
 
   const css = readFileSync(path.join(root, `dist/webview/${entry}.css`), 'utf8');
   const js = readFileSync(path.join(root, `dist/webview/${entry}.js`), 'utf8');
-  await page.setContent(`<!doctype html><html data-theme="dark" class="vscode-dark" style="--vscode-font-family: system-ui"><head><style>${css}</style></head><body class="vscode-dark"><div id="root"></div></body></html>`);
+  // The real host puts the extension icon on `#root[data-icon]` as a webview URI.
+  // Without it the logo is a broken image showing its alt text, which looks like a
+  // layout bug in every screenshot.
+  const icon = `data:image/png;base64,${readFileSync(path.join(root, 'media/icon.png')).toString('base64')}`;
+  await page.setContent(`<!doctype html><html data-theme="dark" class="vscode-dark" style="--vscode-font-family: system-ui"><head><style>${css}</style></head><body class="vscode-dark"><div id="root" data-icon="${icon}"></div></body></html>`);
   // The three things the webview needs from its host. Injected as a script tag
   // rather than an init script: `setContent` reuses the document, so an init
   // script never runs and the bundle dies on `acquireVsCodeApi is not defined`.
