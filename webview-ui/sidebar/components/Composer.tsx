@@ -1484,6 +1484,52 @@ export function Composer({
     setMentionIndex(i);
   };
 
+  /**
+   * Keys the @-mention menu claims while it is open.
+   *
+   * This runs in the editor's CAPTURE phase. ProseMirror binds Enter and the
+   * arrows directly on the contenteditable element, so a bubble-phase handler —
+   * which is what this used to be — never saw them: pressing Enter to choose a
+   * mention submitted the message instead, exactly as `/compact` used to be sent
+   * literally before the slash palette moved to capture.
+   *
+   * Returns true when the key was consumed here.
+   */
+  const handleMentionKeys = (e: React.KeyboardEvent): boolean => {
+    if (!mentionOpenRef.current) return false;
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return false;
+    // Top-level: quick file hits (max 3) then category rows.
+    const quick = mentionCat === null ? Math.min(3, mentionItems.length) : 0;
+    const count = mentionCat === null ? quick + filteredCats.length : mentionItems.length;
+    if (count) {
+      if (e.key === "ArrowDown") { setIndex((mentionIndexRef.current + 1) % count); return true; }
+      if (e.key === "ArrowUp") { setIndex((mentionIndexRef.current - 1 + count) % count); return true; }
+      if (e.key === "Enter" || e.key === "Tab") {
+        const i = mentionIndexRef.current;
+        if (mentionCat === null) {
+          if (i < quick) pickMention(mentionItems[i]);
+          else pickCategory(filteredCats[i - quick].id);
+        } else {
+          pickMention(mentionItems[i]);
+        }
+        return true;
+      }
+    }
+    if (e.key === "Escape" || (e.key === "Backspace" && mentionCat !== null && !mentionQuery)) {
+      if (mentionCat !== null) {
+        // Back out to the category menu.
+        setCat(null);
+        setMentionItems([]);
+        setIndex(0);
+        if (mentionQueryRef.current) queryFiles(mentionQueryRef.current);
+      } else {
+        setMentionOpen(false);
+      }
+      return true;
+    }
+    return false;
+  };
+
   const refreshEmpty = React.useCallback(() => {
     const ed = edRef.current;
     setEmpty(richEditor.current ? richEditor.current.isEmpty() : !ed || (ed.textContent || "").trim() === "" && ed.querySelectorAll(".mention").length === 0);
@@ -2058,7 +2104,9 @@ export function Composer({
           // Enter sent the literal command to the model. Capture reaches the key
           // first, and stopping propagation there keeps the editor out of it.
           onKeyDownCapture={(e) => {
-            if (!slashOpenNowRef.current || mentionOpenRef.current) return;
+            // The mention menu claims its keys before ProseMirror sees them.
+            if (handleMentionKeys(e)) { e.preventDefault(); e.stopPropagation(); return; }
+            if (!slashOpenNowRef.current) return;
             if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             const claim = () => { e.preventDefault(); e.stopPropagation(); };
             if (e.key === "ArrowDown") { claim(); setSlashIndex((i) => (i + 1) % slashCountRef.current); return; }
@@ -2177,47 +2225,9 @@ export function Composer({
                 });
               return;
             }
-            if (mentionOpen) {
-              // Top-level: quick file hits (max 3) then category rows.
-              const quick = mentionCat === null ? Math.min(3, mentionItems.length) : 0;
-              const count = mentionCat === null ? quick + filteredCats.length : mentionItems.length;
-              if (count) {
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setIndex((mentionIndexRef.current + 1) % count);
-                  return;
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setIndex((mentionIndexRef.current - 1 + count) % count);
-                  return;
-                }
-                if (e.key === "Enter" || e.key === "Tab") {
-                  e.preventDefault();
-                  const i = mentionIndexRef.current;
-                  if (mentionCat === null) {
-                    if (i < quick) pickMention(mentionItems[i]);
-                    else pickCategory(filteredCats[i - quick].id);
-                  } else {
-                    pickMention(mentionItems[i]);
-                  }
-                  return;
-                }
-              }
-              if (e.key === "Escape" || (e.key === "Backspace" && mentionCat !== null && !mentionQuery)) {
-                e.preventDefault();
-                if (mentionCat !== null) {
-                  // Back out to the category menu.
-                  setCat(null);
-                  setMentionItems([]);
-                  setIndex(0);
-                  if (mentionQueryRef.current) queryFiles(mentionQueryRef.current);
-                } else {
-                  setMentionOpen(false);
-                }
-                return;
-              }
-            }
+            // Mention keys were already offered the key in the capture phase above;
+            // this is the fallback for anything it declined.
+            if (handleMentionKeys(e)) { e.preventDefault(); return; }
             if (e.key === "Enter" && (submitWithCtrlEnter ? e.ctrlKey || e.metaKey : !e.shiftKey)) {
               e.preventDefault();
               submit();

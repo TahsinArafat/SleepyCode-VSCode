@@ -1232,3 +1232,23 @@ test('state that belongs to one conversation is not applied to another', () => {
   // cleared rather than re-inserted on every workflow update.
   assert.match(agent, /this\.post\(\{ type: 'steered', conversationId, requestId: entry\.id, text: entry\.text \}\)/);
 });
+
+test('the @-mention menu claims its keys before ProseMirror does', () => {
+  // ProseMirror binds Enter and the arrows directly on the contenteditable, so a
+  // bubble-phase handler never sees them. Choosing a mention with Enter therefore
+  // submitted the message instead — the same defect the slash palette had.
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  // One owner for the decision, called from the capture phase…
+  assertSource(composer, /onKeyDownCapture=\{\(e\) => \{/);
+  assertSource(composer, /if \(handleMentionKeys\(e\)\) \{ e\.preventDefault\(\); e\.stopPropagation\(\); return; \}/);
+  // …and the capture handler no longer bails out while the mention menu is open.
+  assert.doesNotMatch(composer, /if \(!slashOpenNowRef\.current \|\| mentionOpenRef\.current\) return;/);
+  // The bubble path stays as a fallback for what capture declines, and it still
+  // cannot run the submit branch for a key the menu took.
+  assertSource(composer, /if \(handleMentionKeys\(e\)\) \{ e\.preventDefault\(\); return; \}\s*if \(e\.key === "Enter" && \(submitWithCtrlEnter/);
+  // Enter, Tab and the arrows are all in the claimed set.
+  assert.match(composer, /const handleMentionKeys = \(e: React\.KeyboardEvent\): boolean => \{/);
+  for (const key of ['"ArrowDown"', '"ArrowUp"', '"Enter"', '"Tab"', '"Escape"']) {
+    assert.ok(composer.includes(key), `the menu must claim ${key}`);
+  }
+});
