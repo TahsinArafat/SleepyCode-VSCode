@@ -36,6 +36,7 @@ import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interru
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
+import { isLegacyPersonaAgent } from './agent-options';
 import * as modeRules from './agent-mode';
 import * as planFile from './plan-file';
 import * as fileIcons from './file-icons';
@@ -127,14 +128,13 @@ function readWorkspaceText(rootPath: string, relative: string): string {
 }
 
 export const AGENT_DEFINITIONS: { id: string; name: string; color: string; prompt?: string }[] = [
+  // Only "no special agent". Apex, Phantom, Pivot, Forge and Stack were shipped
+  // here as prompts with no model and no tool policy — personas wearing an agent's
+  // name, which is why the composer listed the same idea twice. They live in
+  // `src/personas.ts` now; `selectionFor`/`personaIdFor` map a saved `agentId`
+  // that names one of them onto that persona.
   { id: 'default', name: 'SleepyCode', color: '#6c7086' },
-  { id: 'apex', name: 'Apex (Builder)', color: '#f43f5e', prompt: 'Act as an implementation-focused builder. Prefer complete, working vertical slices over speculative discussion. Trace dependencies before editing, keep changes cohesive, and verify the user-visible path end to end.' },
-  { id: 'phantom', name: 'Phantom (Debugger)', color: '#9333ea', prompt: 'Act as a debugger. Reproduce failures, form falsifiable hypotheses, inspect state transitions and edge cases, then make the smallest fix that addresses the root cause. Add regression coverage for every confirmed bug.' },
-  { id: 'pivot', name: 'Pivot (Prototyper)', color: '#eab308', prompt: 'Act as a pragmatic prototyper. Optimize for fast validated learning while keeping the code reversible and understandable. Build the smallest useful implementation, verify it, then harden only the parts proven necessary.' },
-  { id: 'forge', name: 'Forge (Reviewer)', color: '#14b8a6', prompt: 'Act as a rigorous reviewer and implementer. Look for correctness, security, regressions, maintainability, and missing tests. Prioritize concrete findings by severity and fix high-confidence issues without unrelated refactors.' },
-  { id: 'stack', name: 'Stack (Architect)', color: '#3b82f6', prompt: 'Act as a software architect who still ships code. Preserve clear boundaries, data ownership, and failure semantics. Prefer simple interfaces and migration-safe changes, then verify architecture decisions against real runtime paths.' },
 ];
-
 /** Tools that stay available regardless of an agent's allow/deny policy so the UI can still report progress. */
 /**
  * Thrown when the loop stops itself before the next step would overflow the
@@ -997,7 +997,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       agentId: selection?.agentId,
       agents: this.allAgents(),
       personas: this.allPersonas(),
-      activePersonaId: this.defaultPersonaId(),
+      // The chat on screen, not the global default: the composer's chip names the
+      // persona this conversation is actually using.
+      activePersonaId: this.personaIdFor(active),
     }));
     // Queued prompts and goals are host state the webview holds a copy of. They
     // must be re-sent here or a reload shows an empty queue while the host still
@@ -1521,7 +1523,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const saved = personas.personaFromDraft({ id: String(draft.id), name: String(draft.name), description: String(draft.description ?? ''), prompt: String(draft.prompt) });
         const next = existing ? custom.map(item => item.id === saved.id ? saved : item) : [...custom, saved];
         await this.context.globalState.update('sleepycode.personas', next);
-        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() });
+        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.personaIdFor(this.activeConversation()) });
       },
       deletePersona: async (id) => {
         const next = this.customPersonas().filter(item => item.id !== id);
@@ -1538,7 +1540,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (touched) project.updatedAt = Date.now();
         }
         await this.persistProjects();
-        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() });
+        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.personaIdFor(this.activeConversation()) });
       },
       setDefaultPersona: async (id) => {
         const personaId = personas.personaById(this.allPersonas(), id).id;
@@ -6661,7 +6663,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return {
       model: conversation.model ?? base.model,
       provider: conversation.provider ?? base.activeProvider,
-      agentId: conversation.agentId ?? base.agentId,
+      // A saved `agentId` naming one of the five retired tone agents is not an
+      // agent any more: it resolves to a persona, and the agent falls back.
+      agentId: isLegacyPersonaAgent(conversation.agentId) ? 'default' : conversation.agentId ?? base.agentId,
       reasoningEffort: conversation.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
       mode: conversation.mode,
     };
@@ -6719,9 +6723,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Built-ins then user agents, in the order the Agents panel shows them.
       agents: this.allAgents(),
       // The composer shows the persona in force, so a Settings change has to
-      // reach it without a reload.
+      // reach it without a reload — and it is this chat's persona, not the default.
       personas: this.allPersonas(),
-      activePersonaId: this.defaultPersonaId(),
+      activePersonaId: this.personaIdFor(active),
       reasoningEffort: selection.reasoningEffort,
       // Lets the composer say a folder is needed before the user types, rather
       // than after a message silently goes nowhere.
@@ -7053,8 +7057,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** The persona a specific chat runs on: its own choice, else the default. */
-  private personaIdFor(conversation: { personaId?: string } | undefined): string {
-    return conversation?.personaId ? personas.personaById(this.allPersonas(), conversation.personaId).id : this.defaultPersonaId();
+  private personaIdFor(conversation: { personaId?: string; agentId?: string } | undefined): string {
+    if (conversation?.personaId) return personas.personaById(this.allPersonas(), conversation.personaId).id;
+    // A chat saved while Apex/Phantom/… were "agents" keeps the tone it was using.
+    if (isLegacyPersonaAgent(conversation?.agentId)) return personas.personaById(this.allPersonas(), conversation!.agentId).id;
+    return this.defaultPersonaId();
   }
 
   /** Whether the project index is switched on, for the Indexing page and the readout. */

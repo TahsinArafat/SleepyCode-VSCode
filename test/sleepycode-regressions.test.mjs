@@ -1339,3 +1339,40 @@ test('the turn in flight is budgeted for the request but never lost from the tra
   assert.match(read('src/util.ts'), /if \(!text\) return !options\.nearLimit;/);
   assert.match(agent, /shouldAutoContinue\(answer, finishReason, continuationCount, \{ nearLimit \}\)/);
 });
+
+test('tone is a persona, capability is an agent — one list each', () => {
+  // Apex, Phantom, Pivot, Forge and Stack shipped as built-in "agents" while being
+  // id + name + a paragraph about how to work: no model, no tool policy. That is a
+  // persona, and keeping them in the agent list meant the composer offered the same
+  // idea twice, with `default` appearing in both.
+  const personaCore = read('src/personas.ts');
+  for (const id of ['apex', 'phantom', 'pivot', 'forge', 'stack']) {
+    assert.match(personaCore, new RegExp(`id: '${id}'`), `${id} belongs to the persona catalogue`);
+  }
+  // The agent list keeps only "nothing special"; the rest are user agents, which
+  // really do carry a model and a tool allow/deny list.
+  const definitions = agent.match(/export const AGENT_DEFINITIONS[\s\S]*?\n\];/)?.[0] ?? '';
+  assert.deepEqual([...definitions.matchAll(/\{\s*id: '([a-z0-9-]+)'/g)].map(m => m[1]), ['default']);
+  // A chat saved while those ids were agents keeps the tone it was using…
+  assert.match(agent, /agentId: isLegacyPersonaAgent\(conversation\.agentId\) \? 'default' : conversation\.agentId \?\? base\.agentId,/);
+  assert.match(agent, /if \(isLegacyPersonaAgent\(conversation\?\.agentId\)\) return personas\.personaById\(this\.allPersonas\(\), conversation!\.agentId\)\.id;/);
+  // …and a custom agent may not take a persona's name back.
+  assert.match(read('src/agent-editor.ts'), /if \(RESERVED_PERSONA_IDS\.has\(id\)\) return `"\$\{id\}" is a persona\./);
+  // A single option is not a choice, so the agent picker only appears once there is one.
+  assertSource(read('webview-ui/sidebar/components/Composer.tsx'), /!editing && agentOptions\.length > 1 && \(/);
+});
+
+test('the persona chip represents the chat on screen, and nothing else resets it', () => {
+  // The host used to publish the GLOBAL default as `activePersonaId` on every config
+  // message, and the webview adopted it unconditionally on empty chats — so any
+  // config change wiped the persona the user had chosen for this conversation.
+  assert.match(agent, /activePersonaId: this\.personaIdFor\(active\),/);
+  assert.doesNotMatch(agent, /this\.post\(\{ type: 'config', personas: this\.allPersonas\(\), activePersonaId: this\.defaultPersonaId\(\) \}\);/);
+  // The settings page still edits the default for NEW chats, so that read keeps it.
+  assert.match(agent, /readPersonas: async \(\) => \(\{ personas: this\.allPersonas\(\), activePersonaId: this\.defaultPersonaId\(\) \}\)/);
+  const app = read('webview-ui/sidebar/App.tsx');
+  assertSource(app, /if \(msg\.activePersonaId\) setPersonaId\(msg\.activePersonaId\);/);
+  assert.doesNotMatch(app, /if \(sessionFor\(activeIdRef\.current\)\.turns\.length === 0\) setPersonaId\(msg\.activePersonaId \|\| "default"\);/);
+  // The "no persona" row can never be removed, whatever the host labelled it.
+  assertSource(read('webview-ui/settings/panels/PersonasPanel.tsx'), /persona\.builtin === true \|\| persona\.id === DEFAULT_PERSONA_ID/);
+});

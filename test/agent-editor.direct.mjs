@@ -9,29 +9,32 @@ import * as editor from '../src/agent-editor.ts';
  * rather than as a notification after the dialog closed.
  */
 
+// What the host ships now. Apex/Phantom/Pivot/Forge/Stack were tone prompts, not
+// agents, and live in `src/personas.ts`.
 const builtIns = [
-  { id: 'apex', name: 'Apex (Builder)' },
-  { id: 'phantom', name: 'Phantom (Debugger)' },
   { id: 'default', name: 'SleepyCode' },
 ];
 
 test('built-ins come first, read-only, with their role split from the name', () => {
   const rows = editor.agentRows(builtIns, [{ id: 'mine', name: 'My agent', prompt: 'Be brief.' }]);
-  assert.deepEqual(rows.map(row => row.id), ['apex', 'phantom', 'default', 'mine']);
+  assert.deepEqual(rows.map(row => row.id), ['default', 'mine']);
   assert.equal(rows[0].builtIn, true);
-  // The host stores `Apex (Builder)`; the label is the name and the role apart.
-  assert.equal(rows[0].name, 'Apex');
-  assert.equal(rows[0].role, 'Build');
-  assert.equal(rows[3].builtIn, false);
-  assert.equal(rows[3].role, 'Custom');
-  assert.equal(rows[3].prompt, 'Be brief.');
+  // The picker metadata owns the label and the role, not the host's storage name.
+  assert.equal(rows[0].name, 'SleepyCode');
+  assert.equal(rows[0].role, 'Auto');
+  assert.equal(rows[1].builtIn, false);
+  assert.equal(rows[1].role, 'Custom');
+  assert.equal(rows[1].prompt, 'Be brief.');
+  // An id that used to be a built-in agent is no longer dressed up as one.
+  const legacy = editor.agentRows(builtIns, [{ id: 'apex', name: 'Apex' }]);
+  assert.equal(legacy.find(row => row.id === 'apex').builtIn, false);
 });
 
 test('a custom agent cannot shadow a built-in, and is not offered', () => {
   // The host resolves agents by id and built-ins win, so that row could never run.
-  const rows = editor.agentRows(builtIns, [{ id: 'apex', name: 'Impostor' }, { id: 'apex', name: 'Impostor again' }]);
-  assert.equal(rows.filter(row => row.id === 'apex').length, 1);
-  assert.equal(rows.find(row => row.id === 'apex').builtIn, true);
+  const rows = editor.agentRows(builtIns, [{ id: 'default', name: 'Impostor' }, { id: 'default', name: 'Impostor again' }]);
+  assert.equal(rows.filter(row => row.id === 'default').length, 1);
+  assert.equal(rows.find(row => row.id === 'default').builtIn, true);
 });
 
 test('a draft is refused when it would not save correctly', () => {
@@ -39,8 +42,10 @@ test('a draft is refused when it would not save correctly', () => {
   assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'x', name: '' }, existing), /name/);
   assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: '', name: 'X' }, existing), /id/);
   assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'has space', name: 'X' }, existing), /letters, numbers/);
-  // Saving over a built-in would delete it from the menu.
-  assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'apex', name: 'X' }, existing), /built-in/);
+  // Saving over a built-in would delete it from the menu…
+  assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'default', name: 'X' }, existing), /built-in/);
+  // …and a persona id is taken too: Apex is a voice, not a capability.
+  assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'apex', name: 'X' }, existing), /persona/);
   // Saving over someone else's agent replaced it, because the host upserts by id.
   assert.match(editor.validateAgentDraft({ ...editor.emptyAgentDraft(), id: 'mine', name: 'X' }, existing, { isNew: true }), /already used/);
   // Editing the agent itself keeps its own id.

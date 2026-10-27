@@ -1779,14 +1779,16 @@ test('choosing a level posts the message the host already handles', () => {
 test('the agent list and the selected agent reach the composer', () => {
   const out = adapter.toReactMessage({
     type: 'config',
-    agentId: 'apex',
-    agents: [{ id: 'default', name: 'SleepyCode' }, { id: 'apex', name: 'Apex (Builder)' }],
+    agentId: 'default',
+    agents: [{ id: 'default', name: 'SleepyCode' }, { id: 'mine', name: 'My agent' }],
   });
-  assert.equal(out.agentId, 'apex');
-  assert.deepEqual(out.agentOptions.map(o => o.id), ['default', 'apex']);
-  // The label is the short one the menu shows, not the stored name.
-  assert.equal(out.agentOptions[1].name, 'Apex');
-  assert.equal(out.agentOptions[1].role, 'Build');
+  assert.equal(out.agentId, 'default');
+  assert.deepEqual(out.agentOptions.map(o => o.id), ['default', 'mine']);
+  // The built-in label comes from the picker metadata, the custom one from the row.
+  assert.equal(out.agentOptions[0].name, 'SleepyCode');
+  assert.equal(out.agentOptions[0].role, 'Auto');
+  assert.equal(out.agentOptions[1].name, 'My agent');
+  assert.equal(out.agentOptions[1].role, 'Custom');
 });
 
 test('a missing agent list is an empty list, not undefined', () => {
@@ -1799,12 +1801,12 @@ test('a missing agent list is an empty list, not undefined', () => {
 
 test('initialState carries the agents so the first paint has a picker', () => {
   const out = adapter.buildInitialState({
-    agentId: 'forge',
-    agents: [{ id: 'forge', name: 'Forge (Reviewer)' }],
+    agentId: 'default',
+    agents: [{ id: 'default', name: 'SleepyCode' }, { id: 'mine', name: 'My agent', role: 'Custom' }],
   });
-  assert.equal(out.agentId, 'forge');
-  assert.equal(out.agentOptions[0].name, 'Forge');
-  assert.equal(out.agentOptions[0].role, 'Review');
+  assert.equal(out.agentId, 'default');
+  assert.deepEqual(out.agentOptions.map(o => o.id), ['default', 'mine']);
+  assert.equal(out.agentOptions[0].role, 'Auto');
 });
 
 test('selecting an agent posts the message the host already handles', () => {

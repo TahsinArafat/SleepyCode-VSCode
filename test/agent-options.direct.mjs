@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as agents from '../src/agent-options.ts';
+
+const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 
 /*
  * The classic composer had an agent menu; the React one has no selector at all,
@@ -13,24 +16,25 @@ import * as agents from '../src/agent-options.ts';
  * passed through rather than forced into the built-in vocabulary.
  */
 
-test('the six built-ins get the short name and role the menu shows', () => {
-  const options = agents.agentOptions([
-    { id: 'default', name: 'SleepyCode' },
-    { id: 'apex', name: 'Apex (Builder)' },
-    { id: 'phantom', name: 'Phantom (Debugger)' },
-    { id: 'pivot', name: 'Pivot (Prototyper)' },
-    { id: 'forge', name: 'Forge (Reviewer)' },
-    { id: 'stack', name: 'Stack (Architect)' },
-  ]);
-  assert.deepEqual(options.map(o => o.id), ['default', 'apex', 'phantom', 'pivot', 'forge', 'stack']);
-  // The long parenthesised form is the host's storage name, not the label.
-  assert.equal(options[1].name, 'Apex');
-  assert.equal(options[1].role, 'Build');
+test('the built-in agent gets its short name and role from the picker metadata', () => {
+  // `default` is the only built-in agent left: the other five were tone prompts
+  // with no model and no tool policy, so they are personas now.
+  const options = agents.agentOptions([{ id: 'default', name: 'SleepyCode' }]);
+  assert.deepEqual(options.map(o => o.id), ['default']);
   assert.equal(options[0].role, 'Auto');
-  for (const option of options) {
-    assert.equal(option.builtIn, true, `${option.id} is built in`);
-    assert.ok(option.description.length > 10, `${option.id} needs a description`);
+  assert.equal(options[0].builtIn, true);
+  assert.ok(options[0].description.length > 10);
+});
+
+test('an id that used to be an agent is a persona, not a built-in agent', () => {
+  // A host that still sent one must not have it dressed up as an agent again.
+  for (const id of agents.LEGACY_AGENT_PERSONA_IDS) {
+    assert.equal(agents.isLegacyPersonaAgent(id), true, `${id} moved to personas`);
+    const [option] = agents.agentOptions([{ id, name: id }]);
+    assert.equal(option.builtIn, false, `${id} is not a built-in agent any more`);
   }
+  assert.equal(agents.isLegacyPersonaAgent('default'), false);
+  assert.equal(agents.isLegacyPersonaAgent(undefined), false);
 });
 
 test('a custom agent keeps its own name and is marked as custom', () => {
@@ -86,9 +90,11 @@ test('an unknown built-in id is treated as a custom agent', () => {
 
 test('the built-in metadata covers every id the host ships', () => {
   // A built-in that gains no metadata would silently render as a custom agent,
-  // which is wrong but not obvious. `AGENT_DEFINITIONS` is the source.
-  for (const id of ['default', 'apex', 'phantom', 'pivot', 'forge', 'stack']) {
-    assert.ok(agents.BUILT_IN_AGENT_META[id], `${id} needs picker metadata`);
-  }
-  assert.equal(Object.keys(agents.BUILT_IN_AGENT_META).length, 6);
+  // which is wrong but not obvious. `AGENT_DEFINITIONS` is the source, and it now
+  // ships exactly one: the five tone prompts moved to `src/personas.ts`.
+  const definitions = read('src/agent.ts').match(/export const AGENT_DEFINITIONS[\s\S]*?\n\];/)?.[0] ?? '';
+  const ids = [...definitions.matchAll(/\{\s*id: '([a-z0-9-]+)'/gi)].map(match => match[1]);
+  assert.deepEqual(ids, ['default']);
+  for (const id of ids) assert.ok(agents.BUILT_IN_AGENT_META[id], `${id} needs picker metadata`);
+  assert.deepEqual(Object.keys(agents.BUILT_IN_AGENT_META), ['default']);
 });

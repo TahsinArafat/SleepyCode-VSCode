@@ -14,38 +14,36 @@
  */
 
 /** How a built-in agent presents in the picker. */
+/**
+ * How a built-in agent presents in the picker.
+ *
+ * Only `default` is left. The other five — Apex, Phantom, Pivot, Forge, Stack —
+ * were id + name + a paragraph about how to work: no model, no tool policy. That
+ * is a persona, and they live in `src/personas.ts` now. Keeping them here meant
+ * two dropdowns in the composer listing the same idea.
+ *
+ * An agent answers a different question: what may run. `default` is "nothing
+ * special", and everything else is a custom agent, which really does carry a
+ * model and a tool allow/deny list.
+ *
+ * Their ids stay reserved below: a conversation saved while they were agents may
+ * still name one, and a custom agent must not take that name back.
+ */
 export const BUILT_IN_AGENT_META: Record<string, { name: string; role: string; description: string }> = {
   default: {
     name: 'SleepyCode',
     role: 'Auto',
     description: 'General coding agent that adapts to the task.',
   },
-  apex: {
-    name: 'Apex',
-    role: 'Build',
-    description: 'Implements production-ready features and verifies the full path.',
-  },
-  phantom: {
-    name: 'Phantom',
-    role: 'Debug',
-    description: 'Reproduces failures, traces root causes, and adds regression coverage.',
-  },
-  pivot: {
-    name: 'Pivot',
-    role: 'Prototype',
-    description: 'Builds the smallest useful implementation for fast validation.',
-  },
-  forge: {
-    name: 'Forge',
-    role: 'Review',
-    description: 'Reviews correctness, security, regressions, and maintainability.',
-  },
-  stack: {
-    name: 'Stack',
-    role: 'Architect',
-    description: 'Designs boundaries and migrations while still shipping code.',
-  },
 };
+
+/** Ids that once named a built-in agent, now personas. Reserved for agents. */
+export const LEGACY_AGENT_PERSONA_IDS = ['apex', 'phantom', 'pivot', 'forge', 'stack'] as const;
+
+/** True when an agent id is really a persona the user chose before the merge. */
+export function isLegacyPersonaAgent(id: unknown): boolean {
+  return typeof id === 'string' && (LEGACY_AGENT_PERSONA_IDS as readonly string[]).includes(id);
+}
 
 export interface AgentOption {
   id: string;

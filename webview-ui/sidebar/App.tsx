@@ -1522,12 +1522,14 @@ export function App() {
           // A persona edited in Settings must show here, and one deleted while in
           // use must not leave the chip naming something gone.
           if (Array.isArray(msg.personas)) setPersonas(msg.personas);
+          // The host names the persona of the conversation on screen, so adopting it
+          // is always right. The old empty-chat special case below it overwrote the
+          // user's choice on EVERY config message, because a config that carried no
+          // persona published '' and this fell back to "default".
           if (msg.activePersonaId) setPersonaId(msg.activePersonaId);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
           if (msg.uiPrefs) setUiPrefs(msg.uiPrefs);
-          // Only follow the global default persona for brand-new (empty) chats.
-          if (sessionFor(activeIdRef.current).turns.length === 0) setPersonaId(msg.activePersonaId || "default");
           break;
         case "modelsFetched":
           setModels(msg.models || []);

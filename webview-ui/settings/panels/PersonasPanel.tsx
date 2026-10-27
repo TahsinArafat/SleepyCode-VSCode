@@ -66,8 +66,12 @@ export function PersonasPanel() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  const builtIns = state.personas.filter((persona) => persona.builtin);
-  const custom = state.personas.filter((persona) => !persona.builtin);
+  // `default` is the "no persona" case and can never be removed, whatever the host
+  // labelled it: a row with a Remove button for it is a control that would break
+  // every chat that has not chosen one.
+  const isBuiltIn = (persona: Persona) => persona.builtin === true || persona.id === DEFAULT_PERSONA_ID;
+  const builtIns = state.personas.filter(isBuiltIn);
+  const custom = state.personas.filter((persona) => !isBuiltIn(persona));
   const active = state.personas.find((persona) => persona.id === state.activePersonaId) ?? state.personas[0];
 
   const save = () => {

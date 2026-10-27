@@ -15,6 +15,13 @@
  */
 
 import { BUILT_IN_AGENT_META } from './agent-options.ts';
+import { BUILTIN_PERSONAS } from './personas.ts';
+
+/**
+ * Persona ids. An agent may not take one: two lists keyed by the same word is
+ * exactly how "Apex" came to mean two different things in the same composer.
+ */
+const RESERVED_PERSONA_IDS = new Set(BUILTIN_PERSONAS.map(persona => persona.id));
 
 /** Ids are used in storage keys and in prompts, so they stay boring. */
 const ID_RULE = /^[A-Za-z0-9_-]+$/;
@@ -88,7 +95,11 @@ export function validateAgentDraft(
   // A new agent may not take an id that is in use — the host upserts by id, so the
   // save would silently replace the other agent. Editing keeps its own id.
   const taken = existing.find(entry => entry.id === id && (entry.builtIn || options.isNew === true));
+  // `default` is both, so the built-in rule goes first: it is the more specific truth.
   if (taken) return taken.builtIn ? `"${id}" is a built-in agent. Choose another id.` : `"${id}" is already used by another agent.`;
+  // A persona id is not available either: two lists keyed by the same word is how
+  // "Apex" ended up meaning two different things in the same composer.
+  if (RESERVED_PERSONA_IDS.has(id)) return `"${id}" is a persona. Choose a different id for an agent.`;
   if (parseToolList(draft.allow).length && parseToolList(draft.deny).length) {
     return 'Allow and deny cannot both list tools: that rule would contradict itself.';
   }

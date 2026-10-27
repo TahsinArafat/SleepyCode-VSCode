@@ -2341,7 +2341,9 @@ export function Composer({
           dropdown, so the agent stays put and the others sit beside it. */}
       <div className="composer-footer">
         <ModePicker mode={mode} onMode={onMode} />
-        {!editing && agentOptions.length > 0 && (
+        {/* A single option is not a choice. With only `default` left as a built-in
+            agent, the picker appears only once the user has an agent of their own. */}
+        {!editing && agentOptions.length > 1 && (
           <AgentPicker openSignal={openControl?.name === "agent" ? openControl.token : undefined} value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
         )}
         {!editing && personas.length > 1 && (
