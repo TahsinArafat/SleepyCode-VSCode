@@ -558,9 +558,10 @@ export { approvalAppliesInMode } from './webview-adapter.ts';
 export const HIDDEN_SETTINGS_SECTIONS = [
   'llamacpp',
   'ollama',
-  'personas',
   // Backed by a feature store SleepyCode does not have: showing it would present
-  // controls that write nowhere.
+  // controls that write nowhere. `personas` is not here at all: the section was
+  // removed rather than hidden, because an agent already is a named instruction
+  // set with a model and a tool list, chosen per conversation.
 ] as const;
 
 const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);

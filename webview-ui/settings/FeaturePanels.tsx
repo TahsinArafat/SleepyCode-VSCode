@@ -11,7 +11,6 @@
 // this file preserves the historical import surface used by App.tsx.
 export { OAuthAccountCard, ProvidersPanel } from "./panels/ProvidersPanel";
 export { ModelsPanel } from "./panels/ModelsPanel";
-export { PersonasPanel } from "./panels/PersonasPanel";
 export { McpPanel } from "./panels/McpPanel";
 export { RulesPanel } from "./panels/RulesPanel";
 export { SubagentsPanel } from "./panels/SubagentsPanel";

@@ -6,7 +6,9 @@ const flags = await import('../webview-ui/shared/featureFlags.ts');
 test('sections with no host backing are hidden', () => {
   // `hooks` left this list: it now edits the rules the host actually evaluates,
   // instead of shell commands nothing ran and nothing stored.
-  for (const id of ['llamacpp', 'ollama', 'personas']) {
+  // `personas` is not hidden — the section and its panel were deleted, because an
+  // agent already is a named instruction set chosen per conversation.
+  for (const id of ['llamacpp', 'ollama']) {
     assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
 });
@@ -72,8 +74,9 @@ test('the webview section rules ARE the host adapter rules, not a second copy', 
 
 test('the rail never offers a section the host will not route to', async () => {
   const host = await import('../src/settings-adapter.ts');
-  const nav = ['general', 'providers', 'llamacpp', 'ollama', 'usage', 'agents', 'models', 'behavior',
-    'personas', 'rules', 'marketplace', 'subagents', 'mcp', 'hooks', 'indexing', 'advanced', 'about'];
+  // `personas` is gone from the rail entirely, so it is not a section to route.
+  const nav = ['general', 'account', 'providers', 'llamacpp', 'ollama', 'usage', 'agents', 'models', 'behavior',
+    'rules', 'marketplace', 'subagents', 'mcp', 'hooks', 'indexing', 'advanced', 'about'];
   for (const id of nav) {
     // Either it is visible and routes to itself, or it is hidden and drops out
     // of the rail. Nothing may be visible-but-unroutable.

@@ -12,7 +12,7 @@ import { Select } from "../shared/Select";
 import { Icon, IconName } from "../shared/icons";
 import { vscode } from "../shared/vscode";
 import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMPTY_FEATURES, FeatureConfig, LlamacppStatus, McpStatus, ModelDef, ModelUsage, OAUTH_LABEL, OAuthStatus, OllamaModel, OllamaStatus, Persona, RuleInfo, SkillInfo, uid } from "./features";
-import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, PersonasPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
+import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
@@ -59,7 +59,7 @@ const DEFAULTS: Settings = {
   systemPrompt: "",
 };
 
-type Section = "general" | "account" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
+type Section = "general" | "account" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
 
 // Group connection, agent, and workspace settings in the navigation rail.
 const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
@@ -72,7 +72,6 @@ const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "agents", label: "Agents", icon: "agent" },
   { id: "models", label: "Models", icon: "model" },
   { id: "behavior", label: "Behavior", icon: "tools" },
-  { id: "personas", label: "Personas", icon: "bot", sep: true },
   { id: "rules", label: "Rules & Skills", icon: "ruler" },
   { id: "marketplace", label: "Skill Marketplace", icon: "book" },
   { id: "subagents", label: "Subagents", icon: "agent" },
@@ -118,7 +117,6 @@ const SECTION_KEYWORDS: Partial<Record<Section, string>> = {
   models: "enable disable model catalog reasoning effort thinking context",
   providers: "api key openai anthropic google openrouter oauth custom base url connect",
   behavior: "workspace context file reading terminal tools auto edits approval allow deny ask review policy allowlist denylist commands mcp web",
-  personas: "persona system prompt custom",
   rules: "rules skills agents.md always apply glob",
   subagents: "subagents teams squad project mode delegate task tool members roster subagent model",
   mcp: "mcp tools servers",
@@ -744,7 +742,6 @@ export function App() {
 
           {section === "ollama" && !isSectionHidden("ollama") && <OllamaPanel status={ollamaStatus} models={ollamaModels} />}
 
-          {section === "personas" && !isSectionHidden("personas") && <PersonasPanel features={features} setFeatures={setFeatures} builtinPersonas={builtinPersonas} />}
 
           {section === "rules" && <RulesPanel rules={rules} skills={skills} />}
 

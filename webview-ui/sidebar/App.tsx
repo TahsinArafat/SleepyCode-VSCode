@@ -525,27 +525,6 @@ function ErrorCard({ block }: { block: ErrorBlock }) {
   );
 }
 
-function PersonaSelect({
-  personas,
-  personaId,
-  onSelect,
-}: {
-  personas: PersonaInfo[];
-  personaId: string;
-  onSelect: (id: string) => void;
-}) {
-  if (!personas.length) return null;
-  return (
-    <div className="persona-select">
-      <div className="persona-select-label">Persona</div>
-      <Select aria-label="Persona" value={personaId} onChange={event => onSelect(event.target.value)}>
-        {personas.map(persona => <option key={persona.id} value={persona.id} title={persona.description}>{persona.name}</option>)}
-      </Select>
-      <div className="persona-description">{personas.find(persona => persona.id === personaId)?.description}</div>
-    </div>
-  );
-}
-
 /** Approvals whose callId belongs to a tool inside this Task block. */
 function approvalsForSubagent(block: ToolBlock, approvals?: Record<string, ApprovalRequestInfo>): ApprovalRequestInfo[] {
   if (!approvals) return [];
@@ -934,7 +913,6 @@ export function App() {
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [moreOpen]);
-  const [personas, setPersonas] = React.useState<PersonaInfo[]>([]);
   const [personaId, setPersonaId] = React.useState("default");
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
@@ -1305,7 +1283,6 @@ export function App() {
           seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.runningConvIds?.includes(msg.activeId ?? "") ?? false);
           markRunning(msg.runningConvIds);
           setActiveId(msg.activeId);
-          setPersonas(msg.personas || []);
           setPersonaId(msg.activePersonaId || "default");
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
@@ -1397,7 +1374,6 @@ export function App() {
           if (msg.agentId) setAgentId(msg.agentId);
           if (msg.agentOptions) setAgentOptions(msg.agentOptions);
           if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
-          setPersonas(msg.personas || []);
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
@@ -2151,14 +2127,6 @@ export function App() {
                 ))}
               </div>
             )}
-            <PersonaSelect
-              personas={personas}
-              personaId={personaId}
-              onSelect={(p) => {
-                setPersonaId(p);
-                post({ type: "setPersona", personaId: p });
-              }}
-            />
           </div>
         ) : (
           // Keep each user message and its assistant response in one scroll group.
@@ -2386,7 +2354,6 @@ export function App() {
         <Composer
           focusKey={activeId ?? "new"}
           approvalPolicy={approvalPolicy}
-          persona={turns.length ? personas.find(persona => persona.id === personaId) : undefined}
           mode={mode}
           onMode={(m) => {
             setMode(m);

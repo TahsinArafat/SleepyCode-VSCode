@@ -1241,7 +1241,6 @@ export function Composer({
   activeTeamIds,
   onTeams,
   approvalPolicy,
-  persona,
 }: {
   mode: Mode;
   onMode: (m: Mode) => void;
@@ -1250,7 +1249,6 @@ export function Composer({
   activeTeamIds?: string[];
   onTeams?: (ids: string[]) => void;
   approvalPolicy?: ApprovalPolicy;
-  persona?: PersonaInfo;
   models: string[];
   modelList: ModelDef[];
   selectedModel: string;
@@ -2269,9 +2267,6 @@ export function Composer({
         )}
         {!editing && approvalAppliesInMode(mode) && (
           <ApprovalPicker openSignal={openControl?.name === "approval" ? openControl.token : undefined} policy={approvalPolicy} />
-        )}
-        {persona && persona.id !== "default" && (
-          <span className="composer-persona" title={persona.description}><Icon name="agent" size={13} />{persona.name}</span>
         )}
       </div>
       <ImagePreview images={previewImages} activeId={previewImageId} onClose={() => setPreviewImageId(null)} />
