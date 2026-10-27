@@ -238,6 +238,11 @@ export interface StoredSettings {
    * nowhere — the defect this shape exists to prevent.
    */
   systemNotifications?: boolean;
+  /**
+   * The SearXNG endpoint that web search is served from. The tool exists only
+   * when this is set, so it doubles as the web-search switch.
+   */
+  searxngUrl?: string;
 }
 
 export interface PanelSettings {
@@ -247,6 +252,7 @@ export interface PanelSettings {
   enableFileReading: boolean;
   enableTerminalSuggestions: boolean;
   systemPrompt: string;
+  searxngUrl: string;
 }
 
 /**
@@ -264,7 +270,18 @@ export function toPanelSettings(settings: StoredSettings): PanelSettings {
     enableFileReading: true,
     enableTerminalSuggestions: true,
     systemPrompt: settings.systemPrompt ?? '',
+    searxngUrl: settings.searxngUrl ?? '',
   };
+}
+
+/**
+ * A SearXNG endpoint, or '' for "no web search". Trimmed and stripped of a
+ * trailing slash because the tool appends `/search?q=` to it, and a value that
+ * cannot be fetched would leave a tool that exists and always fails.
+ */
+export function normalizeSearxngUrl(value: unknown): string {
+  const url = typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+  return /^https?:\/\/[^\s]+$/i.test(url) ? url : '';
 }
 
 /** Panel edits -> the SleepyCode configuration keys they correspond to. */
@@ -274,6 +291,7 @@ export function fromPanelSettings(settings: Partial<PanelSettings>): StoredSetti
   if (typeof settings.systemPrompt === 'string') patch.systemPrompt = settings.systemPrompt;
   if (typeof settings.enableWorkspaceContext === 'boolean') patch.repoIndex = settings.enableWorkspaceContext;
   if (typeof settings.maxResponseLength === 'number') patch.maxSteps = settings.maxResponseLength;
+  if (typeof settings.searxngUrl === 'string') patch.searxngUrl = normalizeSearxngUrl(settings.searxngUrl);
   return patch;
 }
 

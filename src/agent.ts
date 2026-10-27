@@ -1644,6 +1644,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         maxSteps: this.config().maxSteps,
         systemPrompt: this.config().systemPrompt,
         repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+        // The web-search tool exists only when this is set, so the window shows
+        // it as the web-search switch.
+        searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
       }),
       writeSettings: async (patch) => {
         const config = vscode.workspace.getConfiguration('sleepycode');
@@ -1652,6 +1655,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
         if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
         if (patch.systemNotifications !== undefined) await config.update('systemNotifications', patch.systemNotifications, vscode.ConfigurationTarget.Global);
+        if (patch.searxngUrl !== undefined) await this.context.globalState.update('sleepycode.searxngUrl', patch.searxngUrl || undefined);
         this.log('info', 'settings.write', JSON.stringify(patch));
         this.postConfig();
       },

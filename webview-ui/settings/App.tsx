@@ -49,6 +49,7 @@ interface Settings {
   enableFileReading: boolean;
   enableTerminalSuggestions: boolean;
   systemPrompt: string;
+  searxngUrl: string;
 }
 
 const DEFAULTS: Settings = {
@@ -58,6 +59,7 @@ const DEFAULTS: Settings = {
   enableFileReading: true,
   enableTerminalSuggestions: true,
   systemPrompt: "",
+  searxngUrl: "",
 };
 
 type Section = "general" | "account" | "usage" | "agents" | "personas" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
@@ -773,6 +775,31 @@ export function App() {
                 <Row title="Workspace Context" desc="Include workspace info in the agent's context.">
                   <Toggle checked={s.enableWorkspaceContext} onChange={(v) => set("enableWorkspaceContext", v)} />
                 </Row>
+                {/* The web-search tool is registered only when a SearXNG endpoint
+                    is set, so this switch IS the endpoint: on seeds the default
+                    local instance, off clears it. */}
+                <Row
+                  title="Web Search"
+                  desc="Let the agent search the web through your own SearXNG instance (JSON output enabled). Nothing is sent to a third party."
+                >
+                  <Toggle
+                    checked={!!s.searxngUrl}
+                    onChange={(v) => set("searxngUrl", v ? s.searxngUrl || "http://localhost:8888" : "")}
+                  />
+                </Row>
+                {!!s.searxngUrl && (
+                  <Row title="SearXNG URL" desc="Where the search request goes. http:// or https:// only.">
+                    <input
+                      className="text-input"
+                      aria-label="SearXNG URL"
+                      value={s.searxngUrl}
+                      spellCheck={false}
+                      onChange={(event) => set("searxngUrl", event.target.value)}
+                      onBlur={() => { if (s.searxngUrl && !/^https?:\/\/\S+$/i.test(s.searxngUrl.trim())) set("searxngUrl", ""); }}
+                      placeholder="http://localhost:8888"
+                    />
+                  </Row>
+                )}
                 {/* Removed: "Terminal Tools". Tool availability is gated by the
                     agent mode, not by a setting, so the toggle could never
                     take effect. */}

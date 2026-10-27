@@ -673,3 +673,18 @@ test('the OAuth status is posted in the shape the window reads', () => {
   assert.ok(payload.status, 'the status must be nested under `status`');
   assert.deepEqual(payload.status.accounts, []);
 });
+
+test('the SearXNG endpoint is the web-search switch, and a bad one is refused', () => {
+  // The tool is registered only when this string is set, so an endpoint that
+  // cannot be fetched would leave a tool that exists and always fails.
+  assert.equal(adapter.normalizeSearxngUrl('http://localhost:8888/'), 'http://localhost:8888');
+  assert.equal(adapter.normalizeSearxngUrl('  https://searx.example.org  '), 'https://searx.example.org');
+  for (const bad of ['localhost:8888', 'ftp://example.org', 'javascript:alert(1)', 'http://', 'https://a b', 42, null]) {
+    assert.equal(adapter.normalizeSearxngUrl(bad), '', `${JSON.stringify(bad)} must be refused`);
+  }
+  // Empty means off, and both directions of the mapping agree.
+  assert.equal(adapter.fromPanelSettings({ searxngUrl: '' }).searxngUrl, '');
+  assert.equal(adapter.fromPanelSettings({ searxngUrl: 'http://localhost:8888' }).searxngUrl, 'http://localhost:8888');
+  assert.equal(adapter.toPanelSettings({}).searxngUrl, '');
+  assert.equal(adapter.toPanelSettings({ searxngUrl: 'https://searx.example.org' }).searxngUrl, 'https://searx.example.org');
+});

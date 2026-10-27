@@ -1120,3 +1120,17 @@ test('the Indexing page controls the index it describes', () => {
   // And the readout says which of those two states it is in.
   assert.match(read('src/index-report.ts'), /enabled: boolean;/);
 });
+
+test('the web-search switch is the endpoint the tool is registered from', () => {
+  // There is no separate flag: `buildTools` adds `web_search` only when
+  // `searxngUrl` is set. A switch that stored anything else would be a control
+  // that writes nowhere.
+  assert.match(tools, /const endpoint = ctx\.config\(\)\.searxngUrl;\n  if \(endpoint\) \{/);
+  const app = read('webview-ui/settings/App.tsx');
+  assertSource(app, /onChange=\{\(v\) => set\("searxngUrl", v \? s\.searxngUrl \|\| "http:\/\/localhost:8888" : ""\)\}/);
+  // Reading and writing it round-trips through the settings shape, and an
+  // endpoint that cannot be fetched is refused rather than half-saved.
+  assert.match(read('src/settings-adapter.ts'), /export function normalizeSearxngUrl/);
+  assert.match(agent, /searxngUrl: this\.context\.globalState\.get<string>\('sleepycode\.searxngUrl', ''\)/);
+  assert.match(agent, /if \(patch\.searxngUrl !== undefined\) await this\.context\.globalState\.update\('sleepycode\.searxngUrl', patch\.searxngUrl \|\| undefined\);/);
+});
