@@ -344,6 +344,13 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'marketplaceInstall',
   'marketplaceUninstall',
   'requestMarketplaceInstalled',
+  // Rules & Skills. `createRule`/`deleteRule`/`managePlugins`/`browserSettings`
+  // are deliberately absent: SleepyCode has no rule model beyond its single
+  // project memory file, and no plugin or browser surface, so those buttons were
+  // removed from the page rather than wired to something else.
+  'openWorkspaceFile',
+  'createSkill',
+  'deleteSkill',
   'fetchAllModels',
   'openVsCodeSettings',
   'openEditorSettings',
@@ -626,4 +633,122 @@ export function shouldShowAccountQuota(status: { accounts?: unknown[] } | undefi
 /** The truthful OAuth status for this build: no accounts, no errors. */
 export function emptyOAuthStatus(): { accounts: unknown[]; errors: Record<string, string> } {
   return { accounts: [], errors: {} };
+}
+
+// ---------------------------------------------------------------- rules & skills
+
+/** Normalise a path for comparison: separators unified, `.`/`..` collapsed. */
+function normalizePath(value: string): string {
+  const unified = value.replace(/\\/g, '/');
+  const parts: string[] = [];
+  for (const segment of unified.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      // Walk back only within the path: a leading `..` is kept so a traversal
+      // attempt cannot normalise its way inside a root it never was in.
+      if (parts.length && parts[parts.length - 1] !== '..') parts.pop();
+      else parts.push('..');
+      continue;
+    }
+    parts.push(segment);
+  }
+  return (unified.startsWith('/') ? '/' : '') + parts.join('/');
+}
+
+/** True when `candidate` is the same file as, or inside, `root`. */
+function isInside(root: string, candidate: string): boolean {
+  const base = normalizePath(root);
+  const target = normalizePath(candidate);
+  return target === base || target.startsWith(base.endsWith('/') ? base : `${base}/`);
+}
+
+/**
+ * The skill folder a SKILL.md path belongs to, or null.
+ *
+ * The path arrives in a webview message, so it is resolved against the skills
+ * root rather than trusted: uninstalling by a path from the page would otherwise
+ * be able to name any directory on disk.
+ */
+export function skillFolderFromPath(skillsRoot: string, skillFilePath: unknown): string | null {
+  if (typeof skillFilePath !== 'string' || !skillFilePath || !skillsRoot) return null;
+  const file = normalizePath(skillFilePath);
+  const root = normalizePath(skillsRoot);
+  if (!isInside(root, file)) return null;
+  const rest = file.slice(root.length + 1).split('/');
+  // Exactly `<folder>/<SKILL.md>`: a file directly in the root is not a skill.
+  if (rest.length !== 2 || !rest[0]) return null;
+  // `skills.ts` owns the canonical list, but it imports `vscode` and this module
+  // is part of the browser bundle — so the comparison is case-insensitive here
+  // and `test/settings-adapter.direct.mjs` asserts it still matches the real list.
+  if (rest[1]!.toLowerCase() !== 'skill.md') return null;
+  return rest[0]!;
+}
+
+/**
+ * A starting SKILL.md.
+ *
+ * The frontmatter is what `parseSkillFrontmatter` reads, so a scaffold without it
+ * would install a skill the list shows as unnamed. The name is slugged for the
+ * same reason a skill name is slugged anywhere else: it becomes a folder.
+ */
+export function skillScaffold(name: unknown): string {
+  const raw = typeof name === 'string' ? name.trim() : '';
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'new-skill';
+  return [
+    '---',
+    `name: ${slug}`,
+    'description: Describe when the agent should use this skill.',
+    '---',
+    '',
+    `# ${raw || 'New skill'}`,
+    '',
+    'Describe the task this skill covers, then the steps the agent should take.',
+    'Keep it short enough to read in one pass: the agent loads this when a task matches.',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Resolve a file the panel asked to open.
+ *
+ * Only paths inside a root this extension controls are opened: the path comes
+ * from a webview message, and "open whatever path the page names" is how a
+ * settings page turns into an arbitrary-file reader.
+ */
+export function openableFile(rawPath: unknown, roots: readonly string[]): string | null {
+  if (typeof rawPath !== 'string' || !rawPath) return null;
+  if (!rawPath.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(rawPath)) return null;
+  const allowed = roots.filter(root => typeof root === 'string' && root);
+  if (!allowed.some(root => isInside(root, rawPath))) return null;
+  return rawPath;
+}
+
+/**
+ * Whether a delete request names the project memory file — and nothing else.
+ *
+ * SleepyCode's only "rule" is the project memory file. Deleting it is a real
+ * action, but the message must not be able to name any other path.
+ */
+export function isProjectMemoryPath(candidate: unknown, memoryPath: unknown): boolean {
+  if (typeof candidate !== 'string' || !candidate) return false;
+  if (typeof memoryPath !== 'string' || !memoryPath) return false;
+  return normalizePath(candidate) === normalizePath(memoryPath);
+}
+
+/**
+ * Turn a panel-supplied path into an absolute one inside the workspace.
+ *
+ * The Rules row carries `.sleepycode/memory.md` — relative, because that is how
+ * the host stores it — so it must be joined onto the workspace root before any
+ * containment check can mean anything. A relative path that climbs out of the
+ * workspace resolves to null rather than to somewhere unexpected. An absolute
+ * path is returned unchanged for `openableFile` to authorise.
+ */
+export function resolvePanelPath(rawPath: unknown, workspaceRoot: string | undefined): string | null {
+  if (typeof rawPath !== 'string' || !rawPath) return null;
+  if (rawPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(rawPath)) return rawPath;
+  if (typeof workspaceRoot !== 'string' || !workspaceRoot) return null;
+  const joined = `${normalizePath(workspaceRoot)}/${rawPath.replace(/\\/g, '/')}`;
+  const resolved = normalizePath(joined);
+  return isInside(workspaceRoot, resolved) ? resolved : null;
 }

@@ -26,16 +26,12 @@ export function RulesPanel({
 
       <div className="rss-section-head">
         <span className="rss-title">Rules <span className="rss-help" title="Rules live in .cursor/rules/*.md and AGENTS.md. Always-apply rules are injected every turn.">?</span></span>
-        <button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "createRule" })}>
-          <Icon name="plus" size={12} /> New
-        </button>
       </div>
       <p className="panel-hint">Use Rules to guide agent behavior, like enforcing best practices or coding standards. Rules can be applied always, by file path, or manually.</p>
       {rules.length === 0 ? (
         <div className="rss-empty">
-          <div className="rss-empty-title">No Rules Yet</div>
-          <div className="rss-empty-sub">Create rules to guide agent behavior</div>
-          <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "createRule" })}>New Rule</button>
+          <div className="rss-empty-title">No project memory yet</div>
+          <div className="rss-empty-sub">The agent records durable project decisions here as it works.</div>
         </div>
       ) : (
         <div className="rss-list">
@@ -51,15 +47,9 @@ export function RulesPanel({
                 {r.description && <div className="lr-desc">{r.file}{r.globs ? ` · ${r.globs}` : ""}</div>}
               </div>
               <span className={"badge-tag " + (r.alwaysApply ? "always" : "glob")}>{r.alwaysApply ? "always" : r.globs ? "glob" : "manual"}</span>
-              {r.path && (
-                <button
-                  className="icon-btn rss-del"
-                  title="Delete rule"
-                  onClick={(e) => { e.stopPropagation(); vscode.postMessage({ type: "deleteRule", path: r.path, name: r.file }); }}
-                >
-                  <Icon name="trash" size={13} />
-                </button>
-              )}
+              {/* No delete: SleepyCode's only rule is the project memory file,
+                  and one-click deleting the agent's durable knowledge from a
+                  list is not a control worth having. */}
             </div>
           ))}
         </div>
@@ -72,8 +62,7 @@ export function RulesPanel({
         </button>
       </div>
       <p className="panel-hint">Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked by the agent when relevant.</p>
-      <div className="rss-section-head"><button className="btn-secondary" onClick={() => vscode.postMessage({ type: "managePlugins" })}>Manage plugins</button><button className="btn-ghost sm" onClick={() => vscode.postMessage({ type: "browserSettings" })}>Browser settings</button></div>
-      <p className="panel-hint">Install, update or remove local skill and MCP packages.</p>
+      <p className="panel-hint">Skills are installed from the Skill Marketplace, or created here.</p>
       {skills.length === 0 ? (
         <div className="rss-empty">
           <div className="rss-empty-title">No Skills Yet</div>

@@ -1273,6 +1273,66 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return {
       signIn: () => this.signIn(),
       writeChatPrefs: (patch) => this.writeChatPrefs(patch),
+      openPanelFile: async (rawPath) => {
+        const root = this.workspaceRoot();
+        // Resolve first (the Rules row is workspace-relative), then authorise
+        // against the roots this extension owns. The path came from a webview
+        // message, so it is never opened unchecked.
+        const resolved = settingsAdapter.resolvePanelPath(rawPath, root?.fsPath);
+        const allowed = settingsAdapter.openableFile(resolved, [
+          root?.fsPath ?? '',
+          this.skillsRoot().fsPath,
+          this.context.globalStorageUri.fsPath,
+        ]);
+        if (!allowed) return false;
+        try {
+          await vscode.window.showTextDocument(vscode.Uri.file(allowed), { preview: true });
+          return true;
+        } catch (error) {
+          this.log('warn', 'settings.openFile.failed', errorMessage(error));
+          return false;
+        }
+      },
+      createSkill: async () => {
+        const name = await vscode.window.showInputBox({
+          prompt: 'Name for the new skill',
+          placeHolder: 'release-checklist',
+          validateInput: value => (value.trim() ? undefined : 'Enter a name'),
+        });
+        if (!name) return { ok: false, text: 'No name given, so no skill was created.' };
+        const folder = sanitizeSkillName(name);
+        if (!folder) return { ok: false, text: 'That name has no usable characters.' };
+        const file = vscode.Uri.joinPath(this.skillsRoot(), folder, 'SKILL.md');
+        try {
+          // Never overwrite: the folder name is user-supplied, so refusing is the
+          // difference between adding a skill and destroying one.
+          await vscode.workspace.fs.stat(file);
+          return { ok: false, text: `A skill named “${folder}” already exists.` };
+        } catch {
+          // Does not exist — the expected path.
+        }
+        try {
+          await vscode.workspace.fs.writeFile(file, new TextEncoder().encode(settingsAdapter.skillScaffold(name)));
+          await vscode.window.showTextDocument(file, { preview: false });
+          this.log('info', 'skill.created', folder);
+          return { ok: true, text: `Created “${folder}”. Edit the description so the agent knows when to use it.` };
+        } catch (error) {
+          return { ok: false, text: `Could not create the skill: ${errorMessage(error)}` };
+        }
+      },
+      deleteSkill: async (rawPath) => {
+        const folder = settingsAdapter.skillFolderFromPath(this.skillsRoot().fsPath, rawPath);
+        if (!folder) return { ok: false, text: 'That path is not an installed skill, so nothing was removed.' };
+        const choice = await vscode.window.showWarningMessage(`Delete the skill “${folder}”?`, { modal: true }, 'Delete');
+        if (choice !== 'Delete') return { ok: false, text: 'Deletion cancelled.' };
+        try {
+          await uninstallSkill(this.skillsRoot(), folder);
+          this.log('info', 'skill.deleted', folder);
+          return { ok: true, text: `Deleted “${folder}”.` };
+        } catch (error) {
+          return { ok: false, text: `Could not delete the skill: ${errorMessage(error)}` };
+        }
+      },
       resetUsage: async () => {
         await this.context.globalState.update('sleepycode.usage', []);
         this.log('info', 'usage.reset', 'local usage cleared');

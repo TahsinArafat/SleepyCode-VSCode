@@ -613,6 +613,10 @@ export function App() {
   // Set when a jump asked for a section this build does not serve, so the
   // reason for landing elsewhere is on screen rather than only in the log.
   const [sectionNotice, setSectionNotice] = React.useState("");
+  // Result of a rule/skill action. The host can refuse (a path that is not an
+  // installed skill, a name already taken), and a refusal that shows nowhere
+  // reads as a button that did nothing.
+  const [panelNotice, setPanelNotice] = React.useState<{ text: string; error: boolean } | null>(null);
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
@@ -694,6 +698,8 @@ export function App() {
         setOllamaStatus(msg.status);
       } else if (msg.type === "ollamaModels") {
         setOllamaModels(msg.models || []);
+      } else if (msg.type === "panelNotice") {
+        setPanelNotice({ text: msg.text || "", error: !!msg.error });
       } else if (msg.type === "oauthStatus") {
         setOauthStatus(msg.status);
       } else if (msg.type === "usageData") {
@@ -772,6 +778,9 @@ export function App() {
         <div className="settings-page">
         <div className="content-inner" key={section}>
           {sectionNotice && <div className="panel-hint" role="status" style={{ marginTop: 0 }}>{sectionNotice}</div>}
+          {panelNotice?.text && (
+            <div className="panel-hint" role={panelNotice.error ? "alert" : "status"} style={{ marginTop: 0 }}>{panelNotice.text}</div>
+          )}
           {section === "general" && (
             <>
               <h1 className="page-title">General</h1>

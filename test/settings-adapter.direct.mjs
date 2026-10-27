@@ -489,3 +489,109 @@ test('the empty OAuth status is the truthful one, not a placeholder', () => {
   // It says "no accounts", which is true, rather than inventing any.
   assert.deepEqual(adapter.emptyOAuthStatus(), { accounts: [], errors: {} });
 });
+
+// ---------------------------------------------------------------- rules & skills
+//
+// Every button in Rules & Skills posted a type the settings window refused, so
+// the whole section was furniture: rows did not open, nothing could be created
+// or removed. These pin the parts that decide whether an action is safe.
+
+test('a skill path resolves to its folder only when it is inside the skills root', () => {
+  const root = '/home/u/.config/Code/User/globalStorage/x/skills';
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/my-skill/SKILL.md`), 'my-skill');
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/my-skill/skill.md`), 'my-skill');
+  // Anything outside the root is refused: this path arrives in a webview message
+  // and must not be able to point at the user's home directory.
+  assert.equal(adapter.skillFolderFromPath(root, '/home/u/other/SKILL.md'), null);
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/../secrets/SKILL.md`), null);
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/SKILL.md`), null, 'a file directly in the root has no skill folder');
+  assert.equal(adapter.skillFolderFromPath(root, ''), null);
+  assert.equal(adapter.skillFolderFromPath(root, undefined), null);
+});
+
+test('a new skill is scaffolded with frontmatter the loader can read', () => {
+  const scaffold = adapter.skillScaffold('My Fancy Skill');
+  // `parseSkillFrontmatter` reads name/description between --- markers, so a
+  // scaffold without them installs a skill that shows up unnamed.
+  assert.match(scaffold, /^---\n/);
+  assert.match(scaffold, /\nname: my-fancy-skill\n/);
+  assert.match(scaffold, /\ndescription: .+\n/);
+  assert.match(scaffold, /\n---\n/);
+  // A heading body, so the file is not empty when opened.
+  assert.match(scaffold, /\n# /);
+});
+
+test('a scaffolded skill name cannot escape the skills directory', () => {
+  // The name becomes a folder name; a separator or traversal would place the
+  // file elsewhere.
+  for (const raw of ['../../etc/passwd', 'a/b', 'a\\b', '..']) {
+    const scaffold = adapter.skillScaffold(raw);
+    assert.doesNotMatch(scaffold, /name: .*[\/\\]/, `${raw} produced a path separator`);
+    assert.doesNotMatch(scaffold, /name: \.\./, `${raw} produced traversal`);
+  }
+  // An empty or symbol-only name still yields a usable, non-empty slug.
+  assert.match(adapter.skillScaffold(''), /\nname: .+\n/);
+  assert.match(adapter.skillScaffold('***'), /\nname: .+\n/);
+});
+
+test('only a path inside a known root can be opened from the panel', () => {
+  const roots = ['/work/project', '/state/skills'];
+  assert.equal(adapter.openableFile('/work/project/.sleepycode/memory.md', roots), '/work/project/.sleepycode/memory.md');
+  assert.equal(adapter.openableFile('/state/skills/a/SKILL.md', roots), '/state/skills/a/SKILL.md');
+  // A message cannot make the host open an arbitrary file.
+  assert.equal(adapter.openableFile('/etc/passwd', roots), null);
+  assert.equal(adapter.openableFile('/work/project/../../etc/passwd', roots), null);
+  assert.equal(adapter.openableFile('relative/path.md', roots), null);
+  assert.equal(adapter.openableFile('', roots), null);
+});
+
+test('deleting a rule is only ever the project memory file', () => {
+  const memory = '/work/project/.sleepycode/memory.md';
+  assert.equal(adapter.isProjectMemoryPath(memory, memory), true);
+  // Normalised, so a redundant segment is not treated as a different file.
+  assert.equal(adapter.isProjectMemoryPath('/work/project/./.sleepycode/memory.md', memory), true);
+  assert.equal(adapter.isProjectMemoryPath('/work/project/.sleepycode/other.md', memory), false);
+  assert.equal(adapter.isProjectMemoryPath('/etc/passwd', memory), false);
+  assert.equal(adapter.isProjectMemoryPath(undefined, memory), false);
+  assert.equal(adapter.isProjectMemoryPath(memory, undefined), false);
+});
+
+test('the skill-file check still matches the list the loader uses', async () => {
+  // settings-adapter is in the browser bundle, so it cannot import skills.ts
+  // (which imports vscode). The comparison is duplicated, so it is asserted
+  // against the real list rather than trusted.
+  const source = await import('node:fs/promises').then(fs => fs.readFile(new URL('../src/skills.ts', import.meta.url), 'utf8'));
+  const list = source.match(/SKILL_FILE_NAMES\s*=\s*\[([^\]]*)\]/)?.[1] ?? '';
+  const names = [...list.matchAll(/'([^']+)'/g)].map(m => m[1].toLowerCase());
+  assert.ok(names.length > 0, 'skills.ts should still declare SKILL_FILE_NAMES');
+  assert.ok(names.includes('skill.md'), 'settings-adapter compares against skill.md');
+  // Every accepted spelling must resolve to the same folder.
+  const root = '/r/skills';
+  for (const name of names) {
+    assert.equal(adapter.skillFolderFromPath(root, `${root}/s/${name}`), 's', `${name} should resolve`);
+  }
+});
+
+test('a workspace-relative panel path is resolved before it is checked', () => {
+  // The Rules row carries `.sleepycode/memory.md`, which is relative — so it has
+  // to be joined onto the workspace before containment can mean anything. A
+  // relative path that climbs out of the workspace resolves to null.
+  assert.equal(adapter.resolvePanelPath('.sleepycode/memory.md', '/work/project'), '/work/project/.sleepycode/memory.md');
+  assert.equal(adapter.resolvePanelPath('./.sleepycode/memory.md', '/work/project'), '/work/project/.sleepycode/memory.md');
+  assert.equal(adapter.resolvePanelPath('../../etc/passwd', '/work/project'), null);
+  assert.equal(adapter.resolvePanelPath('a/../../../etc/passwd', '/work/project'), null);
+  // An absolute path is passed through unchanged; `openableFile` validates it.
+  assert.equal(adapter.resolvePanelPath('/state/skills/a/SKILL.md', '/work/project'), '/state/skills/a/SKILL.md');
+  assert.equal(adapter.resolvePanelPath('', '/work/project'), null);
+  assert.equal(adapter.resolvePanelPath(undefined, '/work/project'), null);
+  assert.equal(adapter.resolvePanelPath('.sleepycode/memory.md', undefined), null);
+});
+
+test('a resolved relative path then clears the containment check', () => {
+  // The two steps compose: resolve, then authorise.
+  const roots = ['/work/project', '/state/skills'];
+  const resolved = adapter.resolvePanelPath('.sleepycode/memory.md', '/work/project');
+  assert.equal(adapter.openableFile(resolved, roots), '/work/project/.sleepycode/memory.md');
+  const escaped = adapter.resolvePanelPath('../../etc/passwd', '/work/project');
+  assert.equal(adapter.openableFile(escaped, roots), null);
+});

@@ -47,6 +47,12 @@ export interface SettingsPanelHost {
   refreshModels(): Promise<string[]>;
   /** Start the first-party sign-in flow. */
   signIn(): void;
+  /** Open a panel-supplied path after resolving and authorising it. */
+  openPanelFile(path: unknown): Promise<boolean>;
+  /** Scaffold a skill and open it. */
+  createSkill(): Promise<{ ok: boolean; text: string }>;
+  /** Remove an installed skill, named by its SKILL.md path. */
+  deleteSkill(path: unknown): Promise<{ ok: boolean; text: string }>;
   /** Clear the recorded local usage. */
   resetUsage(): Promise<void>;
   /** Store chat preferences for this workspace. */
@@ -310,6 +316,30 @@ export class SettingsPanel {
         // Only ever hand http(s) to the OS: a settings payload is not a trusted
         // source for arbitrary URI schemes.
         if (/^https?:\/\//i.test(target)) void vscode.env.openExternal(vscode.Uri.parse(target));
+        return;
+      }
+      case 'openWorkspaceFile': {
+        // Every rule row and every skill row is a click target. The path arrives
+        // from the page, so it is resolved against a root this extension owns and
+        // authorised before anything is opened.
+        const opened = await this.host.openPanelFile(message.path);
+        if (!opened) this.host.log('warn', 'settings.openFile.refused', String(message.path ?? ''));
+        return;
+      }
+      case 'createSkill': {
+        // SleepyCode can create a skill (a scaffolded SKILL.md in its skills
+        // directory), so this button is real. The rule section's own New/Delete
+        // are OpenCursor's rule model, which SleepyCode does not have — those
+        // buttons are removed from the page rather than wired to something else.
+        const result = await this.host.createSkill();
+        this.post({ type: 'panelNotice', text: result.text, error: !result.ok });
+        if (result.ok) await this.pushFeatures();
+        return;
+      }
+      case 'deleteSkill': {
+        const result = await this.host.deleteSkill(message.path);
+        this.post({ type: 'panelNotice', text: result.text, error: !result.ok });
+        if (result.ok) await this.pushFeatures();
         return;
       }
       case 'signIn':
