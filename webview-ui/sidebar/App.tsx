@@ -1442,6 +1442,13 @@ export function App() {
             activeIdRef.current = msg.activeId;
             setActiveId(msg.activeId);
             setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
+            // The host withheld the transcript because that conversation is mid-run,
+            // so all we have is whatever streamed in while it was in the background.
+            // If that is nothing — a reload, a moved pane, a run that began before
+            // the switch — the chat would render its empty state for a conversation
+            // that has history. Ask once; the answer bypasses the suppression.
+            const known = sessionsRef.current.get(msg.activeId);
+            if (!known || known.turns.length === 0) post({ type: "requestTranscript", convId: msg.activeId });
             force();
           }
           break;

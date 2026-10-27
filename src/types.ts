@@ -81,6 +81,9 @@ export type WebMessage =
   // names the scope the user picked. It is not a request to reveal one turn's
   // tracked files.
   | { type: 'startReview'; title: string; prompt: string }
+  // An explicit request for a transcript the webview never received. It is
+  // answered even mid-run, unlike the automatic republish.
+  | { type: 'requestTranscript'; conversationId: string }
   | { type: 'compactProgress'; conversationId: string; phase: 'start' | 'summarizing' | 'done' | 'cancelled' | 'error'; auto?: boolean; text?: string; beforeTokens?: number; afterTokens?: number; contextWindow?: number; itemCount?: number }
   | { type: 'requestFilePicker' }
   | { type: 'pasteImage'; dataUrl: string; mimeType: string; name: string; size: number }

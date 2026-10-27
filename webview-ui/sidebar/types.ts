@@ -125,6 +125,7 @@ export type InMessage =
   | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string; compactionUndoable?: boolean; compactionRedoable?: boolean }
   /** Which conversation the host made active, with no transcript replayed. */
   | { type: "conversationActive"; activeId: string }
+  /** Asks for a transcript the webview never received. Answered even mid-run. */
   | { type: "error"; convId?: string; message: string }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
   | { type: "fileSearchResults"; requestId: number; items: MentionItem[] }
@@ -208,6 +209,7 @@ export type OutMessage =
   | { type: "newConversation"; personaId?: string }
   | { type: "setPersona"; personaId: string }
   | { type: "selectConversation"; id: string }
+  | { type: "requestTranscript"; convId: string }
   | { type: "deleteConversation"; id: string }
   | { type: "persistTurns"; convId?: string; turns: Turn[] }
   | { type: "cancelRun"; convId?: string }

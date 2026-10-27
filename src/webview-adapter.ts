@@ -83,6 +83,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'loadConversation':
       return { type: 'openConversation', id: message.convId ?? message.activeId };
 
+    case 'requestTranscript': {
+      const conversationId = message.conversationId ?? message.convId;
+      return conversationId ? { type: 'requestTranscript', conversationId } : null;
+    }
+
     case 'archiveConversation':
       return { type: 'archiveConversation', id: message.id };
 

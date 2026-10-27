@@ -2141,3 +2141,23 @@ test('starting a review is not a request to reveal a turn changes', () => {
   assert.equal(adapter.toSleepyMessage({ type: 'startReview' }), null);
 });
 
+
+// ---------------------------------------------------------------- filling an empty switch
+
+/*
+ * Switching to a conversation whose snapshot was withheld leaves the webview with
+ * whatever it accumulated from that run's events. If it never saw them — a reload,
+ * a moved pane, a run that started before the switch — it has nothing, and the
+ * chat renders its empty state instead of the conversation. So it asks once.
+ */
+
+test('the webview can ask for a transcript it never received', () => {
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'requestTranscript', convId: 'c7' }),
+    { type: 'requestTranscript', conversationId: 'c7' },
+  );
+  // Without a conversation there is nothing to request, and the host would fall
+  // back to whichever conversation it considers active — which may not be the one
+  // the user is looking at.
+  assert.equal(adapter.toSleepyMessage({ type: 'requestTranscript' }), null);
+});

@@ -297,6 +297,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private reactMode = false;
   /** Conversations whose React transcript is live-streaming (see `post`). */
   private readonly reactStreaming = new Set<string>();
+  /** Let the next transcript snapshot through even if that conversation is streaming. */
+  private reactSnapshotOnce = false;
   /** The React base has no sign-in banner, so the offer is surfaced once. */
   private signInOffered = false;
   /** Newest assistant item per conversation, used to route React change review. */
@@ -2826,6 +2828,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'newConversation') return this.newConversation();
+    if (message.type === 'requestTranscript') {
+      // The webview switched to a conversation and has no turns for it: either it
+      // never saw that run's stream (reload, moved pane) or a snapshot was
+      // withheld mid-run. Republishing is otherwise suppressed while streaming;
+      // this one answer is exempt, and it is consumed by the message it allows.
+      const project = this.activeProject();
+      const requested = project?.conversations.find(entry => entry.id === (message.conversationId || project.activeConversationId));
+      if (!project || !requested) return;
+      project.activeConversationId = requested.id;
+      this.reactSnapshotOnce = true;
+      this.syncConversations();
+      return;
+    }
     if (message.type === 'openConversation') {
       const project = this.activeProject();
       const opened = project?.conversations.find(item => item.id === message.id);
@@ -6622,7 +6637,11 @@ ${cached}`;
           this.reactStreaming.delete(streamId);
         }
       }
-      const streaming = Boolean(streamId && this.reactStreaming.has(streamId));
+      // An explicit request from the webview is answered even mid-run: it only
+      // asks when it has nothing to show for the conversation it just switched
+      // to, so there are no live turns here to protect.
+      const streaming = Boolean(streamId && this.reactStreaming.has(streamId)) && !this.reactSnapshotOnce;
+      if (typed.type === 'conversation') this.reactSnapshotOnce = false;
       // Remember the running tool call so a consent prompt can be pinned to the
       // tool card it belongs to instead of floating at the bottom of the chat.
       if (typed.type === 'tool' && (typed as { phase?: string }).phase === 'start' && streamId) {

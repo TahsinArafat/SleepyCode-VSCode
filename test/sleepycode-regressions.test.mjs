@@ -967,3 +967,17 @@ test('the webview follows the host when a run suppresses the transcript snapshot
   assertSource(app, /case "conversationActive":/);
   assertSource(app, /setActiveId\(msg\.activeId\)/);
 });
+
+test('a conversation whose transcript was never received can be filled', () => {
+  const adapter = read('src/webview-adapter.ts');
+  const agentSource = read('src/agent.ts');
+  const app = read('webview-ui/sidebar/App.tsx');
+  // Switching to a mid-run conversation gets identity only, so the webview can be
+  // left holding nothing and render its empty state for a chat full of history.
+  assert.match(adapter, /case 'requestTranscript': \{/);
+  assertSource(app, /post\(\{ type: "requestTranscript", convId: msg\.activeId \}\)/);
+  // Answered even while streaming: that request exists precisely for the case the
+  // suppression would otherwise keep empty.
+  assert.match(agentSource, /const streaming = Boolean\(streamId && this\.reactStreaming\.has\(streamId\)\) && !this\.reactSnapshotOnce;/);
+  assertSource(agentSource, /if \(message\.type === 'requestTranscript'\) \{/);
+});
