@@ -1201,3 +1201,34 @@ test('a panel nothing renders is deleted, not kept behind a barrel', () => {
     assert.doesNotMatch(css, new RegExp(`\\.${name}(?![A-Za-z0-9_-])`), `.${name} belonged to a deleted panel`);
   }
 });
+
+test('a host message the webview waits for is translated, not dropped', () => {
+  // The failure this pins: the host posts, the adapter's switch has no case, the
+  // message becomes null, and the reader that was written for it never fires. The
+  // feature looks wired and does nothing.
+  const adapterSource = read('src/webview-adapter.ts');
+  for (const type of ['approvalResolved', 'fileIcon', 'pasteResolved']) {
+    assert.match(adapterSource, new RegExp(`case '${type}':`), `${type} must be translated`);
+  }
+  // The shapes the readers actually use, not just the type strings.
+  assert.match(adapterSource, /convId: message\.conversationId \?\? '',\n        requestId: String\(message\.requestId \?\? ''\),\n        approved: message\.approved === true,/);
+  assert.match(adapterSource, /type: 'fileIcon', filename: String\(message\.filename \?\? ''\), icon: message\.icon \?\? null/);
+  assert.match(adapterSource, /type: 'pasteResolved', requestId: message\.requestId/);
+  // A command that revealed the chat and posted a message nothing reads now opens
+  // the page it names.
+  assert.match(agent, /if \(this\.reactMode\) \{ void this\.showSettings\(false, 'usage'\); return; \}/);
+  assert.match(agent, /if \(this\.reactMode\) \{ void this\.showSettings\(false, 'marketplace'\); return; \}/);
+});
+
+test('state that belongs to one conversation is not applied to another', () => {
+  const app = read('webview-ui/sidebar/App.tsx');
+  // A background run publishes its own stats; the ring belongs to the visible chat.
+  assertSource(app, /if \(msg\.convId && activeIdRef\.current && msg\.convId !== activeIdRef\.current\) break;/);
+  // The persona a chat runs on travels with the conversation, or a per-chat
+  // override silently reverts on every switch.
+  assert.match(agent, /personaId: this\.personaIdFor\(active\), compactionUndoable, compactionRedoable \}\);/);
+  assert.match(read('src/webview-adapter.ts'), /\.\.\.\(typeof message\.personaId === 'string' \? \{ personaId: message\.personaId \} : \{\}\)/);
+  // Steering guidance carries the queue id it consumed, so the optimistic row is
+  // cleared rather than re-inserted on every workflow update.
+  assert.match(agent, /this\.post\(\{ type: 'steered', conversationId, requestId: entry\.id, text: entry\.text \}\)/);
+});
