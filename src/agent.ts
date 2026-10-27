@@ -946,7 +946,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.refreshSessionStats();
   }
 
-  /** Open the OpenCursor settings window (also used by the command). */
+  /** Open the settings window (also used by the command). */
   public openSettingsWindow(section?: string): void {
     SettingsPanel.show(this.context, this.settingsPanelHost(), section);
   }
@@ -2030,7 +2030,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showSettings(initialSetup = false, section?: string): Promise<void> {
-    // In React mode the OpenCursor settings window is the real surface: it is
+    // In React mode the settings window is the real surface: it is
     // the only structured editor for MCP servers. The classic webview keeps its
     // own settings view for the fallback path.
     if (this.reactMode) {

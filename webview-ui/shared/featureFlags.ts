@@ -1,7 +1,7 @@
 /*
  * Feature visibility for the SleepyCode React webview.
  *
- * The webview is based on OpenCursor, which ships a much wider surface than
+ * The webview is based on a ported UI that ships a much wider surface than
  * SleepyCode exposes (multi-provider accounts, local model runtimes, personas,
  * teams, docs indexing, remote jobs, plugins). Those screens stay in the tree
  * and are only hidden here: nothing is deleted, so a future release can switch
@@ -27,7 +27,7 @@ export function filterSections<T extends { id: string }>(sections: readonly T[])
  */
 export const SHOW_PROVIDER_GROUPS = false;
 
-/** OpenCursor-only capabilities that have no SleepyCode implementation yet. */
+/** Base-UI capabilities that have no SleepyCode implementation yet. */
 const HIDDEN_FEATURES = new Set<string>([
   'remoteJobs',
   'plugins',
@@ -38,13 +38,13 @@ const HIDDEN_FEATURES = new Set<string>([
   'teams',
 ]);
 
-/** True when an OpenCursor-only feature should stay out of the UI. */
+/** True when a base-UI-only feature should stay out of the UI. */
 export function isFeatureHidden(id: string): boolean {
   return HIDDEN_FEATURES.has(id);
 }
 
 /**
- * Composer modes SleepyCode implements. Multitask and Project are OpenCursor
+ * Composer modes SleepyCode implements. Multitask and Project are base-UI
  * coordinators that delegate to its team system; SleepyCode has subagents but
  * no team coordinator, so those modes are hidden rather than shown broken.
  */

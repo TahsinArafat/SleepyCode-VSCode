@@ -1,5 +1,5 @@
 /**
- * The OpenCursor settings window, hosted by SleepyCode.
+ * The settings window, hosted by SleepyCode.
  *
  * The React settings bundle was already being built into `dist/webview/settings.*`
  * but had no host, so the only reachable settings surface was VS Code's own
@@ -351,7 +351,7 @@ export class SettingsPanel {
       case 'createSkill': {
         // SleepyCode can create a skill (a scaffolded SKILL.md in its skills
         // directory), so this button is real. The rule section's own New/Delete
-        // are OpenCursor's rule model, which SleepyCode does not have — those
+        // are the upstream rule model, which SleepyCode does not have — those
         // buttons are removed from the page rather than wired to something else.
         const result = await this.host.createSkill();
         this.post({ type: 'panelNotice', text: result.text, error: !result.ok });

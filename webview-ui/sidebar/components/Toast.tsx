@@ -1,7 +1,7 @@
 /*
  * Transient notices.
  *
- * Written for SleepyCode: OpenCursor's base has no toast component, so every
+ * Written for SleepyCode: the ported base has no toast component, so every
  * `toast` message the host posted was dropped — MCP authorization results and
  * hook warnings had no visible surface at all.
  *

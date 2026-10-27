@@ -38,7 +38,7 @@ export interface TeamDef {
   builtin?: boolean;
 }
 
-/** Unified hook events covering OpenCursor, Cursor and Claude Code trigger points. */
+/** Unified hook events covering the supported extension trigger points. */
 export type HookEvent =
   | "beforeSubmit"
   | "beforeShell"

@@ -1,6 +1,6 @@
 /**
  * Adapter between SleepyCode's backend message protocol (`WebMessage`, see
- * `src/types.ts`) and the OpenCursor React webview protocol
+ * `src/types.ts`) and the React webview protocol
  * (`webview-ui/sidebar/types.ts`).
  *
  * Two directions:
@@ -41,7 +41,7 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'ready' };
 
     case 'sendMessage': {
-      // OpenCursor carries context as inline <attached /> tags in the message
+      // The ported UI carries context as inline <attached /> tags in the message
       // text. SleepyCode takes it as file attachments and sends the text alone,
       // so the tags are lifted out here.
       const mentions = splitMentions(message.text ?? '');
@@ -655,7 +655,7 @@ function approvalRequest(message: SleepyMsg): ReactMsg {
 
 /**
  * SleepyCode tool ids are snake_case; the React tool cards are keyed by the
- * OpenCursor names (icons, labels and the plan card all switch on them).
+ * the ported tool names (icons, labels and the plan card all switch on them).
  */
 const TOOL_NAMES: Record<string, string> = {
   plan: 'WritePlan',
@@ -1173,7 +1173,7 @@ export function reactAttachmentsOf(attachments: unknown): { images: { name: stri
  * The `@` categories this build can actually answer.
  *
  * Only file and folder search has a SleepyCode source. Docs, terminals and past
- * chats are OpenCursor features whose data SleepyCode does not have, and a
+ * chats are upstream features whose data SleepyCode does not have, and a
  * mention is not harmless when unanswered: every pill serialises its `path` as a
  * FILE attachment, so a conversation id or terminal name would reach the model as
  * a bogus file path. The composer therefore offers a category only when this
@@ -1187,8 +1187,8 @@ export function isMentionCategoryAnswered(kind: string): boolean {
 }
 
 /**
- * Pull OpenCursor's inline context tags out of a message. The tags remain the
- * source of truth for the model in OpenCursor; here they become file
+ * Pull the inline context tags out of a message. The tags remain the
+ * source of truth for the model upstream; here they become file
  * attachments, which is how SleepyCode supplies the same context.
  */
 export function splitMentions(text: string): { text: string; files: { kind: 'file'; path: string }[] } {

@@ -1,7 +1,7 @@
 /*
  * Providers: the endpoints this extension can talk to, and their keys.
  *
- * Written for SleepyCode rather than reusing the ported OpenCursor panel, because
+ * Written for SleepyCode rather than reusing the ported panel, because
  * that one is built around its own provider store (accounts, OAuth, balances,
  * per-provider model catalogs) — none of which exists here. This one covers what
  * SleepyCode actually supports: a first-party provider plus compatibility

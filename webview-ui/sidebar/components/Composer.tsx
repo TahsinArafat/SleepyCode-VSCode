@@ -242,7 +242,7 @@ const ALL_MODES: { id: Mode; label: string; icon: IconName }[] = [
   { id: "ask", label: "Ask", icon: "chat" },
 ];
 
-// Multitask/Project coordinate OpenCursor teams, which SleepyCode does not
+// Multitask/Project coordinate upstream teams, which SleepyCode does not
 // have. They stay defined above so they can be switched back on later.
 const MODES = filterModes(ALL_MODES);
 

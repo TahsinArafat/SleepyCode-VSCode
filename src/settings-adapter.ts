@@ -1,14 +1,14 @@
 /**
- * Bridge between SleepyCode's stored configuration and the OpenCursor settings
+ * Bridge between SleepyCode's stored configuration and the settings
  * window.
  *
- * The settings window is OpenCursor's React UI, so it speaks OpenCursor's
+ * The settings window is a ported React UI, so it speaks that UI's
  * shapes (`McpServerConfig`, `McpStatus`, its own `Settings`). SleepyCode owns
  * the storage. Everything here is a pure mapping so it can be tested without an
  * extension host, and so no panel code has to know both vocabularies.
  *
- * Note the MCP config shape is deliberately OpenCursor's rather than
- * SleepyCode's older `{ url, transport, auth }`: OpenCursor's supports stdio
+ * Note the MCP config shape is deliberately the ported UI's rather than
+ * SleepyCode's older `{ url, transport, auth }`: it supports stdio
  * (command/args/env), which SleepyCode's saved connections could not express at
  * all, and it is the shape the already-ported `src/mcp-client.ts` consumes.
  */
@@ -144,7 +144,7 @@ export function toMcpPanelStatus(status: StoredMcpStatus): PanelMcpStatus {
 /**
  * The `features` message the settings window reads its MCP page from. Only the
  * fields this panel uses are sent; the rest of `FeatureConfig` belongs to
- * OpenCursor features SleepyCode hides.
+ * Upstream features SleepyCode hides.
  */
 export function toPanelFeatures(
   connections: readonly StoredMcpConnection[],
@@ -279,7 +279,7 @@ export function fromPanelSettings(settings: Partial<PanelSettings>): StoredSetti
 
 // ---------------------------------------------------------------- usage
 
-/** One model's row in the panel, matching OpenCursor's `ModelUsage`. */
+/** One model's row in the panel, matching the panel's `ModelUsage`. */
 export interface PanelModelUsage {
   promptTokens: number;
   completionTokens: number;
@@ -320,7 +320,7 @@ export function toPanelUsage(aggregate: any): Record<string, PanelModelUsage> {
 
 /**
  * Messages the settings window sends that SleepyCode can answer. Anything else
- * (local runtimes, docs indexing, semantic index) belongs to OpenCursor
+ * (local runtimes, docs indexing, semantic index) belongs to the base UI
  * features this build hides, and answering them with invented data would be
  * worse than ignoring them.
  */
@@ -521,7 +521,7 @@ export { approvalAppliesInMode } from './webview-adapter.ts';
 // ---------------------------------------------------------------- sections
 
 /**
- * Settings sections that belong to OpenCursor-only features.
+ * Settings sections that belong to base-UI-only features.
  *
  * This is the canonical list. The webview's rail re-exports it rather than
  * keeping its own copy, because two lists that must match are a bug waiting to
@@ -537,7 +537,7 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'subagents',
   'indexing',
   'hooks',
-  // Backed by OpenCursor's own stores, which SleepyCode does not have: showing
+  // Backed by the base UI's own stores, which SleepyCode does not have: showing
   // them would present controls that write nowhere.
   'models',
   'agents',
@@ -565,7 +565,7 @@ export const VISIBLE_SETTINGS_SECTIONS = [
 
 const visibleSections = new Set<string>(VISIBLE_SETTINGS_SECTIONS);
 
-/** True when a settings section is OpenCursor-only and must not be displayed. */
+/** True when a settings section is base-UI-only and must not be displayed. */
 export function isSectionHidden(id: string | undefined): boolean {
   return typeof id === 'string' && hiddenSections.has(id);
 }

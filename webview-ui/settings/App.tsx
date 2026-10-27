@@ -775,7 +775,7 @@ export function App() {
     vscode.postMessage(payload);
   };
 
-  // OpenCursor-only sections stay in NAV so they can be switched back on, but
+  // Base-UI-only sections stay in NAV so they can be switched back on, but
   // the rail only ever renders sections SleepyCode actually implements.
   const visibleNav = filterSections(NAV);
   const navFiltered = navQuery.trim()
@@ -1011,7 +1011,7 @@ export function App() {
             <UsagePanel usage={usage} oauthStatus={oauthStatus} features={features} setFeatures={setFeatures} />
           )}
 
-          {/* SleepyCode's own provider surface. The ported OpenCursor panel needs
+          {/* SleepyCode's own provider surface. The ported panel needs
               its own provider store (accounts, OAuth, balances), none of which
               exists here, so this section renders the panel that matches what
               SleepyCode actually supports. */}

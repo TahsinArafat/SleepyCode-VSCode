@@ -7,7 +7,7 @@
  * is more battle-tested than SleepyCode's hand-rolled flow.
  *
  * Adapted for SleepyCode: the secret-storage key prefix is ours, and the user
- * facing strings name SleepyCode rather than OpenCursor.
+ * facing strings name SleepyCode rather than the upstream product.
  */
 
 import { createServer, type Server } from 'node:http';

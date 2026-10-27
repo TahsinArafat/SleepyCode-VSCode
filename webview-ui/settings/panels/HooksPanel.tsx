@@ -178,7 +178,7 @@ export function HooksPanel({ features, setFeatures }: { features: FeatureConfig;
     <>
       <h1 className="page-title">Hooks</h1>
       <div className="section-label">Lifecycle Hooks</div>
-      <p className="panel-hint">Run shell commands on agent lifecycle events. Context is passed via OPENCURSOR_* env vars.</p>
+      <p className="panel-hint">Rules evaluated on agent lifecycle events. A rule can log, warn, block, or require approval when it matches the event, tool, path or text it is given.</p>
       {features.hooks.map((h, i) => (
         <div className="feature-card" key={h.id}>
           <div className="fc-head">

@@ -1,7 +1,7 @@
 /*
  * Skill Marketplace panel.
  *
- * Written for SleepyCode rather than ported: OpenCursor's settings window has no
+ * Written for SleepyCode rather than ported: the settings window has no
  * marketplace section, and SleepyCode already has the whole backend (search the
  * SkillsMP catalogue, list a repository's skills, install, uninstall). This panel
  * is only the surface.
