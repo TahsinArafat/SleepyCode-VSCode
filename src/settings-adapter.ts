@@ -362,6 +362,9 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'saveProvider',
   'deleteProvider',
   'setProviderKey',
+  // Which provider new conversations use. The page showed an "Active" badge and
+  // had no control that wrote it.
+  'setActiveProvider',
   // The three settings surfaces the window gained alongside the classic ones.
   'getLogs',
   'clearLogs',

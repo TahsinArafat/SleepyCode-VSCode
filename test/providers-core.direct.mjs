@@ -111,3 +111,18 @@ test('junk providers are dropped rather than rendered as blank rows', () => {
   assert.deepEqual(rows.map(r => r.id), ['ok']);
   assert.deepEqual(providers.providerRows({ providers: undefined, keys: {}, activeId: '' }), []);
 });
+test('the default provider can be changed from the page that shows it', () => {
+  const rows = providers.providerRows({
+    providers: [{ id: 'sleepy', name: 'SleepyAI', baseURL: 'https://api', isSleepy: true }, { id: 'local', name: 'Local', baseURL: '' }],
+    keys: {},
+    activeId: 'sleepy',
+  });
+  const [firstParty, local] = rows;
+  // The dark state: "Active" rendered as a badge with nothing that writes it.
+  assert.equal(providers.canActivateProvider(firstParty), false);
+  assert.match(providers.activateHint(firstParty), /already the default/);
+  // A keyless endpoint can still be the default: a local server needs no key.
+  assert.equal(providers.canActivateProvider(local), true);
+  assert.match(providers.activateHint(local), /Local/);
+  assert.equal(providers.canActivateProvider(undefined), false);
+});

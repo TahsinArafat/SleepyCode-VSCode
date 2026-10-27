@@ -144,3 +144,20 @@ export function providerFromDraft(draft: ProviderDraft): ProviderConfig {
   if (models.length) provider.modelList = models;
   return provider;
 }
+/**
+ * Whether a row can become the default provider for new conversations.
+ *
+ * "Active" is shown on this page but could never be changed from it: the value
+ * lived in state no control wrote to. Any stored provider can be the default —
+ * including one with no key, because a local endpoint may not need one.
+ */
+export function canActivateProvider(row: ProviderRow | undefined): boolean {
+  return Boolean(row && typeof row.id === 'string' && row.id.length > 0 && !row.active);
+}
+
+/** The button's title: why it is offered, or why it is not. */
+export function activateHint(row: ProviderRow | undefined): string {
+  if (!row) return 'No provider.';
+  if (row.active) return `${row.name} is already the default for new conversations.`;
+  return `Make ${row.name} the default for new conversations.`;
+}

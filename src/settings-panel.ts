@@ -75,6 +75,8 @@ export interface SettingsPanelHost {
   removeProvider(id: string): Promise<void>;
   /** Store (or clear) an endpoint's API key. */
   setProviderKey(id: string, key: string): Promise<void>;
+  /** Make one provider the default for new conversations. */
+  setActiveProvider(id: string): Promise<void>;
   /** Recent extension log entries, newest last. */
   readLogs(): Promise<unknown[]>;
   /** Clear the recorded extension log. */
@@ -421,6 +423,10 @@ export class SettingsPanel {
         return;
       case 'reindexIndex':
         this.post({ type: 'indexStatus', status: await this.host.rebuildIndex().catch(() => null) });
+        return;
+      case 'setActiveProvider':
+        await this.host.setActiveProvider(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'providers', providers: await this.host.readProviders().catch(() => []) });
         return;
       case 'getHooks':
         this.post({ type: 'hooks', hooks: await this.host.readHooks().catch(() => []) });

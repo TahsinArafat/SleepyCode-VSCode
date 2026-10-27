@@ -14,7 +14,7 @@
 import * as React from "react";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
-import { validateProviderDraft, type ProviderDraft, type ProviderRow } from "../../../src/providers-core";
+import { activateHint, canActivateProvider, validateProviderDraft, type ProviderDraft, type ProviderRow } from "../../../src/providers-core";
 import { SettingsDialog } from "./SettingsDialog";
 
 export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
@@ -23,7 +23,15 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
   const [keyValue, setKeyValue] = React.useState("");
   const [error, setError] = React.useState("");
   // Two-step remove: a misclick deleted the endpoint and its secret outright.
+  // Disarmed on a timer, not on pointer-leave: the label changes on the first
+  // press, which re-renders the button between mousedown and mouseup, so a leave
+  // that fires in between zeroes the count and the gesture becomes unreachable.
   const [confirmRemove, setConfirmRemove] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!confirmRemove) return;
+    const timer = window.setTimeout(() => setConfirmRemove(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [confirmRemove]);
 
   const openNew = () => { setError(""); setEditing({ name: "", baseURL: "", models: "" }); };
   const openEdit = (row: ProviderRow) => {
@@ -73,6 +81,15 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
               </div>
             </div>
             <div className="provider-actions">
+              {canActivateProvider(row) && (
+                <button
+                  className="btn-ghost"
+                  title={activateHint(row)}
+                  onClick={() => vscode.postMessage({ type: "setActiveProvider", id: row.id })}
+                >
+                  Use by default
+                </button>
+              )}
               {!row.isSleepy && (
                 <>
                   <button className="btn-secondary" onClick={() => { setKeyFor(row.id); setKeyValue(""); }}>
@@ -90,7 +107,6 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
                         setConfirmRemove(row.id);
                       }
                     }}
-                    onMouseLeave={() => setConfirmRemove(null)}
                   >
                     {confirmRemove === row.id ? "Remove?" : "Remove"}
                   </button>

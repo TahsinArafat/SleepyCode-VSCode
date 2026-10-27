@@ -1453,6 +1453,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'provider.saved', built.id);
         await this.refreshModels();
       },
+      setActiveProvider: async (id) => {
+        const providers = this.getProviders();
+        // Only a provider that exists: a stale id would leave every new
+        // conversation pointing at nothing.
+        if (!id || !providers.some(provider => provider.id === id)) return;
+        await this.context.globalState.update('sleepycode.activeProvider', id);
+        this.log('info', 'provider.active', id);
+        // The model picker and the chat's own selection read the active provider.
+        this.postConfig();
+        await this.refreshModels();
+      },
       removeProvider: async (id) => {
         const providers = this.getProviders();
         const target = providers.find(provider => provider.id === id);
