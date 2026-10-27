@@ -31,6 +31,7 @@ import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
 import { pickContextWindow } from './context-window-core';
+import { contextPressure, liveSliceBudget, trimToolResultsForRequest } from './context-guard';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
@@ -135,6 +136,25 @@ export const AGENT_DEFINITIONS: { id: string; name: string; color: string; promp
 ];
 
 /** Tools that stay available regardless of an agent's allow/deny policy so the UI can still report progress. */
+/**
+ * Thrown when the loop stops itself before the next step would overflow the
+ * window. Carries the figures so the card can name them, and is marked so the
+ * error path can offer "Retry" — unlike a provider rejection, this one is
+ * recoverable: auto-compaction runs before the turn is committed.
+ */
+class ContextLimitError extends Error {
+  readonly contextLimit = true;
+  constructor(readonly measuredTokens: number, readonly window?: number, readonly budgetTokens?: number) {
+    super(window && window > 0
+      ? `This turn reached ${Math.round(measuredTokens / 1_000)}k of the model's ${Math.round(window / 1_000)}k-token window, so it stopped before the next step could overflow it.`
+      : `This turn reached ${Math.round(measuredTokens / 1_000)}k tokens against a ${Math.round((budgetTokens ?? 0) / 1_000)}k-token budget, so it stopped before the next step could overflow it.`);
+    this.name = 'ContextLimitError';
+  }
+}
+
+const contextLimitReached = (measured: number, window?: number | null, budget?: number): ContextLimitError =>
+  new ContextLimitError(measured, window ?? undefined, budget);
+
 const AGENT_ALWAYS_ALLOWED_TOOLS = new Set(['plan', 'ask_user']);
 
 /** Tool-name prefixes that may be granted or revoked as a group in an agent's policy. */
@@ -5285,6 +5305,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         let runCacheRead = 0;
         let runCacheWrite = 0;
         let lastStepInput = 0;
+        // One notice per turn when the request had to shrink the live slice.
+        let liveTrimNoticed = false;
         let liveStartTime = Date.now();
         let streamStartTime = Date.now();
         try {
@@ -5292,6 +5314,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             finishReason = '';
             let iterationStepCount = 0;
             streamStartTime = Date.now();
+            // The previous step's request is measured truth: it contains the system
+            // prompt, the tools, the stored history AND this turn's tool results. When
+            // it already used most of the window, the next step would overflow — and
+            // the only thing that used to notice was the provider rejecting the
+            // request, which loses the turn. Stop here instead: the turn is committed
+            // with its work, auto-compaction runs below, and continuing fits.
+            const budgetTokens = structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit);
+            if (contextPressure({ measuredPromptTokens: lastStepInput, contextWindow: modelInfo.contextWindow, budgetTokens }) === 'near') {
+              throw contextLimitReached(lastStepInput, modelInfo.contextWindow, budgetTokens);
+            }
             const imageAttachments = (composerContext?.attachments ?? []).filter((attachment): attachment is Extract<Attachment, { kind: 'image' }> => attachment.kind === 'image' && Boolean(attachment.tempPath));
             const prompt: string | ModelMessage[] = imageAttachments.length
               ? [{
@@ -5311,8 +5343,31 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             runGuidance.push(...this.drainSteering(conversationId));
             const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
             let agentMessages: ModelMessage[] | undefined;
-            if (history.length || runMessages.length) {
-              agentMessages = iterationRequestMessages(history, runMessages, streamPrompt);
+            // The live slice is unbudgeted by nature: one assistant tool-call + result
+            // per step. Give it what the history and the prompt leave, and shrink the
+            // REQUEST when it does not fit — `runMessages` itself is untouched, since
+            // it is what the turn persists.
+            const liveBudget = liveSliceBudget({
+              budgetTokens: structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit),
+              historyTokens: estimateHistoryTokens(history, estimateMessageTokens),
+              promptTokens: Math.ceil((streamPrompt.length + runGuidance.join('').length) / CHARS_PER_TOKEN),
+            });
+            const trimmedLive = trimToolResultsForRequest(runMessages, liveBudget, estimateMessageTokens);
+            const liveForRequest = trimmedLive.messages;
+            // Say it once per turn. The results are still in the saved transcript; what
+            // the model gets is a stub, and it should know why a file it "read" is not
+            // in front of it any more.
+            if (trimmedLive.stubbed > 0 && !liveTrimNoticed) {
+              liveTrimNoticed = true;
+              this.post({
+                type: 'contextNotice',
+                conversationId,
+                kind: 'trimmed',
+                text: `${trimmedLive.stubbed} older tool result${trimmedLive.stubbed === 1 ? '' : 's'} from this turn were left out of the request to stay within the model's window. They are still saved in this conversation.`,
+              });
+            }
+            if (history.length || liveForRequest.length) {
+              agentMessages = iterationRequestMessages(history, liveForRequest as ModelMessage[], streamPrompt);
               if (imageAttachments.length) {
                 const imageParts = await Promise.all(imageAttachments.map(async attachment => ({ type: 'image' as const, image: await readFile(attachment.tempPath!), mediaType: attachment.mimeType })));
                 const last = agentMessages[agentMessages.length - 1];
@@ -5502,7 +5557,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
             if (finishReason === 'error') throw new Error('The model stopped because the provider reported a generation error.');
             if (finishReason === 'content-filter') throw new Error('The model stopped because the provider blocked the response.');
-            if (!shouldAutoContinue(answer, finishReason, continuationCount)) break;
+            const nearLimit = contextPressure({ measuredPromptTokens: lastStepInput, contextWindow: modelInfo.contextWindow, budgetTokens: structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit) }) === 'near';
+            if (!shouldAutoContinue(answer, finishReason, continuationCount, { nearLimit })) break;
             continuationCount++;
             const priorThinking = persistedReasoningBody(reasoningBuffer.trim() || collectReasoningText(work));
             streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}${priorThinking ? `\n\nYour previous thinking (do not repeat it; continue from it):\n${priorThinking.slice(-reasoningLimit)}` : ''}`;
@@ -5652,6 +5708,25 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // must show the exact provider/tool/server error that terminated the run.
         const message = providerErrorMessage(error);
         errorInfo.message = message;
+        if (error instanceof ContextLimitError) {
+          // Our own stop, not the provider's. It is recoverable — auto-compaction
+          // runs below, before the next attempt — so the card offers a retry rather
+          // than telling the user to go and manage their context by hand.
+          errorInfo.code = 'context_too_large';
+          errorInfo.title = 'Context is full';
+          errorInfo.message = message;
+          errorInfo.retryable = true;
+          errorInfo.primaryAction = 'retry';
+          errorInfo.primaryLabel = 'Retry with compacted history';
+          errorInfo.secondaryAction = 'context';
+          errorInfo.secondaryLabel = 'Manage context';
+          this.post({
+            type: 'contextNotice',
+            conversationId,
+            kind: 'trimmed',
+            text: `${message} The work so far is kept; older turns are compacted so continuing fits.`,
+          });
+        }
         if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
         if (model) errorItem.model = model;

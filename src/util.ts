@@ -75,12 +75,20 @@ export function normalizeTranscriptItem(item: Partial<TranscriptItem>, fallbackT
   };
 }
 
-export function shouldAutoContinue(answer: string, finishReason: string, continuationCount: number): boolean {
+export function shouldAutoContinue(
+  answer: string,
+  finishReason: string,
+  continuationCount: number,
+  options: { nearLimit?: boolean } = {},
+): boolean {
   if (continuationCount >= 2) return false;
   if (finishReason === 'length') return true;
   if (finishReason && finishReason !== 'stop' && finishReason !== 'unknown' && finishReason !== 'other') return false;
   const text = answer.trim();
-  if (!text) return true;
+  // An empty reply is usually worth one more try — but not when the last request
+  // already used most of the window. Some gateways report "too large" as an empty
+  // response, and re-sending the same context twice more cannot succeed.
+  if (!text) return !options.nearLimit;
   const tail = text.slice(-700);
   const unfinishedAction = /(?:^|\n)(?:now|next|then|after that)\b[^\n]{0,500}(?::|\.{3}|…)$/i;
   const statedIntent = /(?:^|\n)(?:let me|i(?:'ll| will| am going to| need to))\s+(?:update|edit|change|fix|add|remove|create|write|implement|run|inspect|check|test|open|read|wire|finish|build)\b[^\n]{0,400}(?::|\.{3}|…)?$/i;

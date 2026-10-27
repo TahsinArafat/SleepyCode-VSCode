@@ -468,7 +468,10 @@ test('structured model history persists across turns instead of flattening to te
   // The run seeds the provider with real messages when structured history exists,
   // including the live tool-call slice of the current iteration.
   assert.match(agent, /const history = this\.structuredHistory\(conversation, modelInfo\.contextWindow, modelInfo\.maxOutputLimit\)/);
-  assert.match(agent, /iterationRequestMessages\(history, runMessages, streamPrompt\)/);
+  // The live slice is handed over as a request-only view: budgeted down when it does
+  // not fit, while `runMessages` keeps everything for the saved transcript.
+  assert.match(agent, /agentMessages = iterationRequestMessages\(history, liveForRequest as ModelMessage\[\], streamPrompt\)/);
+  assert.match(agent, /const liveForRequest = trimmedLive\.messages;/);
   assert.match(agent, /messages: agentMessages/);
   // Response messages (assistant tool calls + tool results) are captured and kept.
   assert.match(agent, /runMessages\.push\(\.\.\.\(responseMessages as ModelMessage\[\]\)\.filter\(message => message\.role !== 'system'\)\)/);
@@ -1299,4 +1302,40 @@ test('a steering request the host never answers does not linger on screen', () =
   // it leaves a "Steering…" row on screen for the rest of the session.
   assertSource(app, /if \(!rows\.some\(row => row\.id === pendingId\) && !mailbox\.some\(entry => entry\.id === pendingId\)\) pending\.delete\(pendingId\);/);
   assertSource(app, /if \(!pending\.size\) pendingSteeringRef\.current\.delete\(id\);/);
+});
+
+test('the loop stops itself before a step can overflow the window', () => {
+  // The provider's prompt_tokens for the previous step is measured truth — it
+  // includes the system prompt, the tools, the stored history and this turn's tool
+  // results. It was collected and only used to stamp a number on the finished item:
+  // nothing acted on it, so the first thing to notice a full window was the provider
+  // rejecting the request, which loses the turn.
+  const guard = read('src/context-guard.ts');
+  assert.match(guard, /export function contextPressure/);
+  assert.match(guard, /export const CONTEXT_PRESSURE_RATIO = 0\.9/);
+  assert.match(agent, /if \(contextPressure\(\{ measuredPromptTokens: lastStepInput, contextWindow: modelInfo\.contextWindow, budgetTokens \}\) === 'near'\)/);
+  assert.match(agent, /throw contextLimitReached\(lastStepInput, modelInfo\.contextWindow, budgetTokens\)/);
+  // Our own stop is recoverable, unlike a provider rejection: compaction runs before
+  // the turn is committed, so the card offers a retry instead of a dead end.
+  assert.match(agent, /if \(error instanceof ContextLimitError\) \{/);
+  assert.match(agent, /errorInfo\.primaryLabel = 'Retry with compacted history';/);
+  // …and it says so out loud rather than stopping silently.
+  assert.match(agent, /The work so far is kept; older turns are compacted so continuing fits\./);
+});
+
+test('the turn in flight is budgeted for the request but never lost from the transcript', () => {
+  const guard = read('src/context-guard.ts');
+  // Messages are never removed (a missing tool result is what providers reject) and
+  // the caller's array is never mutated (it is what the turn persists).
+  assert.match(guard, /export function trimToolResultsForRequest/);
+  assert.match(guard, /Messages are never removed, and the caller's array is never mutated/);
+  assert.match(agent, /const liveBudget = liveSliceBudget\(\{/);
+  assert.match(agent, /const trimmedLive = trimToolResultsForRequest\(runMessages, liveBudget, estimateMessageTokens\);/);
+  // The saved transcript keeps the whole slice.
+  assert.match(agent, /if \(runMessages\.length\) this\.appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
+  // And the model is told when a result it "read" is no longer in front of it.
+  assert.match(agent, /were left out of the request to stay within the model's window/);
+  // An empty reply at high pressure is not retried twice: same context, same result.
+  assert.match(read('src/util.ts'), /if \(!text\) return !options\.nearLimit;/);
+  assert.match(agent, /shouldAutoContinue\(answer, finishReason, continuationCount, \{ nearLimit \}\)/);
 });
