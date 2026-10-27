@@ -1,3 +1,4 @@
+import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
@@ -1339,6 +1340,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private settingsPanelHost(): SettingsPanelHost {
     return {
       signIn: () => this.signIn(),
+      indexReport: async () => indexReport.indexReport(this.projectIndex.snapshot),
+      rebuildIndex: async () => indexReport.indexReport(await this.ensureProjectIntelligence(true)),
       readHooks: async () => this.hookRules(),
       writeHooks: async (rules) => {
         // Validate on the way in: a rule the host cannot evaluate would sit in the

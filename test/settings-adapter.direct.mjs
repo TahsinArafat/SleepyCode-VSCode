@@ -8,7 +8,9 @@ const adapter = await import('../src/settings-adapter.ts');
  * can be exact: a reachable page posting an unsupported type is a defect, and a
  * page this build does not render is not.
  */
-const HIDDEN_PANEL_POSTS = new Set(['setEmbedModel', 'syncIndex', 'deleteIndex', 'openCursorignore', 'getIndexStatus']);
+// Posts no reachable page makes: the embedding store and its ignore file belong to
+// a page this build no longer renders.
+const UNSUPPORTED_PANEL_POSTS = new Set(['setEmbedModel', 'syncIndex', 'deleteIndex', 'openCursorignore']);
 
 // The settings window is OpenCursor's, so its MCP page speaks OpenCursor's
 // config shape. SleepyCode stores its own. These tests pin both directions,
@@ -629,23 +631,26 @@ test('every message the settings window posts is allowed through', async () => {
     const text = await fs.readFile(new URL(file, root), 'utf8');
     for (const match of text.matchAll(/postMessage\(\s*\{\s*type:\s*"([a-zA-Z]+)"/g)) {
       const type = match[1];
-      // The hidden `indexing` page posts types this build does not serve; it is
-      // unreachable, so those are listed separately rather than pretended.
-      if (HIDDEN_PANEL_POSTS.has(type)) continue;
+      // Posts no reachable page makes — the embedding store — are listed
+      // separately rather than pretended.
+      if (UNSUPPORTED_PANEL_POSTS.has(type)) continue;
       if (!adapter.isPanelMessage({ type })) offenders.push(`${file}: ${type}`);
     }
   }
   assert.deepEqual(offenders, [], `posted but dropped by the allow-list:\n${offenders.join('\n')}`);
 });
 
-test('the hidden indexing page is the only source of unsupported posts', () => {
+test('the embedding store is the only thing left unsupported', () => {
   // If this set ever grows, a reachable page is posting something the host drops.
-  assert.deepEqual([...HIDDEN_PANEL_POSTS].sort(), [
-    'deleteIndex', 'getIndexStatus', 'openCursorignore', 'setEmbedModel', 'syncIndex',
+  assert.deepEqual([...UNSUPPORTED_PANEL_POSTS].sort(), [
+    'deleteIndex', 'openCursorignore', 'setEmbedModel', 'syncIndex',
   ]);
-  for (const type of HIDDEN_PANEL_POSTS) {
+  for (const type of UNSUPPORTED_PANEL_POSTS) {
     assert.equal(adapter.isPanelMessage({ type }), false, `${type} should still be unsupported`);
   }
+  // Indexing answers now, so its page is reachable and its status is served.
+  assert.equal(adapter.isPanelMessage({ type: 'getIndexStatus' }), true);
+  assert.equal(adapter.isPanelMessage({ type: 'reindexIndex' }), true);
 });
 
 test('signIn reaches the host, because it is the only sign-in control in the window', () => {

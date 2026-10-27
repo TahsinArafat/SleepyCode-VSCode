@@ -15,13 +15,13 @@ import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMP
 import { HooksPanel, LlamacppPanel, McpPanel, ModelsPanel, OAuthAccountCard, OllamaPanel, PersonasPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
-import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
 import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
 import { AccountPanel } from "./panels/AccountPanel";
 import { SleepyQuota, useSleepyAccount } from "./panels/SleepyQuota";
+import { IndexPanel } from "./panels/IndexPanel";
 import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
@@ -58,31 +58,6 @@ const DEFAULTS: Settings = {
 };
 
 type Section = "general" | "account" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
-
-interface IndexStatus {
-  indexing: boolean;
-  done: number;
-  total: number;
-  files: number;
-  chunks: number;
-  model: string;
-  backend?: "local" | "remote";
-  device?: string | null;
-  accelerator?: "gpu" | "cpu" | "remote" | "pending";
-  deviceLabel?: string;
-  modelRepo?: string;
-  modelDtype?: string;
-  modelPooling?: string;
-  modelDim?: number;
-  remoteBaseUrl?: string;
-  runtime?: string;
-  platform?: string;
-  limitReason?: string;
-}
-interface EmbedModel {
-  id: string;
-  name: string;
-}
 
 // Group connection, agent, and workspace settings in the navigation rail.
 const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
@@ -456,180 +431,8 @@ function UsagePanel({
 }
 
 /** Provider models usable for embeddings (id mentions embed/embedding). */
-const isEmbeddingModel = (id: string) => /embed/i.test(id);
-
-function IndexingPanel({
-  status,
-  models,
-  modelList,
-  docs,
-  docsStatus,
-  features,
-  setFeatures,
-}: {
-  status: IndexStatus;
-  models: EmbedModel[];
-  modelList: ModelDef[];
-  docs: DocSourceInfo[];
-  docsStatus: DocsStatus;
-  features: FeatureConfig;
-  setFeatures: (p: Partial<FeatureConfig>) => void;
-}) {
-  const pct = status.total > 0 ? Math.round((status.done / status.total) * 100) : status.files > 0 ? 100 : 0;
-  const remoteEmbed = modelList.filter((m) => isEmbeddingModel(m.id));
-  const accel = status.accelerator || "pending";
-  const accelClass =
-    accel === "gpu" ? "gpu" : accel === "cpu" ? "cpu" : accel === "remote" ? "remote" : "pending";
-  const accelText =
-    accel === "gpu" ? "GPU" : accel === "cpu" ? "CPU" : accel === "remote" ? "Remote" : "Loading...";
-  return (
-    <>
-      <h1 className="page-title">Indexing &amp; Docs</h1>
-      <div className="section-label">Codebase</div>
-      <div className="index-card">
-        <div className="index-card-title">Codebase Indexing</div>
-        <p className="row-desc">
-          Embed codebase for improved contextual understanding and knowledge. Embeddings and metadata are
-          stored locally on your machine - your code never leaves your computer. The index persists across
-          restarts; only new or changed files are re-embedded.
-        </p>
-        <div className="index-divider" />
-        <Row title="Enable Indexing" desc="When off, background embedding stops. Existing index files stay on disk; text search remains available.">
-          <Toggle
-            checked={features.indexingEnabled !== false}
-            onChange={(v) => setFeatures({ indexingEnabled: v })}
-          />
-        </Row>
-        <div className="index-progress" style={{ opacity: features.indexingEnabled === false ? 0.5 : 1 }}>
-          <div className="index-progress-pct">{pct}%</div>
-          <div className="index-bar">
-            <div className="index-bar-fill" style={{ width: `${pct}%` }} />
-          </div>
-          <div className="index-progress-meta">
-            {features.indexingEnabled === false
-              ? `Disabled - ${status.files} files on disk`
-              : status.indexing
-              ? `Indexing ${status.done} / ${status.total} files...`
-              : `${status.files} files / ${status.chunks || 0} chunks`}
-          </div>
-          {status.limitReason && <div className="index-progress-meta" role="status">{status.limitReason}</div>}
-        </div>
-        <div className="index-divider" />
-        <div className="index-runtime">
-          <div className="index-runtime-head">
-            <span className={`index-accel-badge ${accelClass}`}>{accelText}</span>
-            <span className="index-runtime-device">{status.deviceLabel || "-"}</span>
-          </div>
-          <dl className="index-tech">
-            <div>
-              <dt>Model</dt>
-              <dd>
-                <code>{status.model}</code>
-              </dd>
-            </div>
-            {status.modelRepo && (
-              <div>
-                <dt>Repo</dt>
-                <dd>
-                  <code>{status.modelRepo}</code>
-                </dd>
-              </div>
-            )}
-            {status.modelDtype && (
-              <div>
-                <dt>Dtype</dt>
-                <dd>
-                  <code>{status.modelDtype}</code>
-                </dd>
-              </div>
-            )}
-            {status.modelPooling && (
-              <div>
-                <dt>Pooling</dt>
-                <dd>
-                  <code>{status.modelPooling}</code>
-                </dd>
-              </div>
-            )}
-            {status.modelDim != null && (
-              <div>
-                <dt>Dimensions</dt>
-                <dd>
-                  <code>{status.modelDim}</code>
-                </dd>
-              </div>
-            )}
-            {status.device != null && status.device !== "" && (
-              <div>
-                <dt>ONNX EP</dt>
-                <dd>
-                  <code>{status.device}</code>
-                </dd>
-              </div>
-            )}
-            <div>
-              <dt>Backend</dt>
-              <dd>
-                <code>{status.backend || "local"}</code>
-              </dd>
-            </div>
-            {status.remoteBaseUrl && (
-              <div>
-                <dt>Endpoint</dt>
-                <dd>
-                  <code>{status.remoteBaseUrl}</code>
-                </dd>
-              </div>
-            )}
-            <div>
-              <dt>Runtime</dt>
-              <dd>
-                <code>{status.runtime || "—"}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Platform</dt>
-              <dd>
-                <code>{status.platform || "—"}</code>
-              </dd>
-            </div>
-          </dl>
-        </div>
-        <div className="index-divider" />
-        <div className="index-model-row">
-          <span className="index-model-label">Embedding model</span>
-          <ModelSelect
-            models={remoteEmbed}
-            value={status.model}
-            onChange={(id) => !status.indexing && features.indexingEnabled !== false && vscode.postMessage({ type: "setEmbedModel", modelId: id })}
-            customItems={models.map((m) => ({ value: m.id, label: m.name, desc: "local - runs on your machine" }))}
-            style={{ maxWidth: 260 }}
-          />
-          <div className="index-actions" style={{ marginTop: 0, marginLeft: "auto" }}>
-            <button className="btn-secondary" disabled={status.indexing || features.indexingEnabled === false} onClick={() => vscode.postMessage({ type: "syncIndex" })}>
-              <Icon name="reset" /> {status.indexing ? "Syncing..." : "Sync"}
-            </button>
-            <button className="btn-secondary danger" disabled={status.indexing} onClick={() => vscode.postMessage({ type: "deleteIndex" })}>
-              <Icon name="trash" /> Delete Index
-            </button>
-          </div>
-        </div>
-      </div>
-      <div className="index-card rows-card">
-        <Row title="Index New Folders" desc="Automatically index any new folders added to the workspace">
-          <Toggle checked={features.indexNewFolders !== false} onChange={(v) => setFeatures({ indexNewFolders: v })} disabled={features.indexingEnabled === false} />
-        </Row>
-        <Row title="Ignore Files in .cursorignore" desc="Files to exclude from indexing in addition to .gitignore">
-          <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "openCursorignore" })}>Edit</button>
-        </Row>
-        <Row title="Index Repositories for Instant Grep" desc="Automatically index repositories to speed up Grep searches. All data is stored locally.">
-          <Toggle checked={features.indexForGrep !== false} onChange={(v) => setFeatures({ indexForGrep: v })} disabled={features.indexingEnabled === false} />
-        </Row>
-      </div>
-      <DocsSection docs={docs} status={docsStatus} />
-    </>
-  );
-}
+// The Indexing page is SleepyCode's own: src/index-report.ts decides what it
+// shows, and panels/IndexPanel.tsx renders it.
 
 export function App() {
   const [section, setSection] = React.useState<Section>("general");
@@ -661,10 +464,6 @@ export function App() {
   const [skills, setSkills] = React.useState<SkillInfo[]>([]);
   const [builtinPersonas, setBuiltinPersonas] = React.useState<Persona[]>([]);
   const [modelCatalog, setModelCatalog] = React.useState<ModelDef[]>([]);
-  const [indexStatus, setIndexStatus] = React.useState<IndexStatus>({ indexing: false, done: 0, total: 0, files: 0, chunks: 0, model: "minilm" });
-  const [embedModels, setEmbedModels] = React.useState<EmbedModel[]>([]);
-  const [docSources, setDocSources] = React.useState<DocSourceInfo[]>([]);
-  const [docsStatus, setDocsStatus] = React.useState<DocsStatus>({ done: 0, total: 0 });
   const [llamacppStatus, setLlamacppStatus] = React.useState<LlamacppStatus>({ installed: false, running: {}, loading: {}, errors: {}, logs: {} });
   const [ollamaStatus, setOllamaStatus] = React.useState<OllamaStatus>({ installed: false, pulling: {}, errors: {} });
   const [ollamaModels, setOllamaModels] = React.useState<OllamaModel[]>([]);
@@ -715,16 +514,6 @@ export function App() {
         setSkills(msg.skills || []);
         setBuiltinPersonas(msg.builtinPersonas || []);
         setModelCatalog(msg.modelCatalog || []);
-      } else if (msg.type === "indexStatus") {
-        setIndexStatus(msg.status);
-        if (msg.models) setEmbedModels(msg.models);
-      } else if (msg.type === "docSources") {
-        setDocSources(msg.docs || []);
-        if (msg.status) setDocsStatus(msg.status);
-      } else if (msg.type === "docsStatus") {
-        setDocsStatus(msg.status);
-        // Refresh doc list when an indexing run finishes.
-        if (!msg.status?.indexing) vscode.postMessage({ type: "getIndexStatus" });
       } else if (msg.type === "llamacppStatus") {
         setLlamacppStatus(msg.status);
       } else if (msg.type === "ollamaStatus") {
@@ -753,7 +542,6 @@ export function App() {
     window.addEventListener("message", handler);
     vscode.postMessage({ type: "getSettings" });
     vscode.postMessage({ type: "getFeatures" });
-    vscode.postMessage({ type: "getIndexStatus" });
     vscode.postMessage({ type: "getUsage" });
     vscode.postMessage({ type: "oauthGet" });
     return () => window.removeEventListener("message", handler);
@@ -1102,9 +890,7 @@ export function App() {
             </>
           )}
 
-          {section === "indexing" && !isSectionHidden("indexing") && (
-            <IndexingPanel status={indexStatus} models={embedModels} modelList={modelList} docs={docSources} docsStatus={docsStatus} features={features} setFeatures={setFeatures} />
-          )}
+          {section === "indexing" && <IndexPanel />}
 
           {section === "advanced" && (
             <>

@@ -55,6 +55,10 @@ export interface SettingsPanelHost {
   readHooks(): Promise<unknown[]>;
   /** Replace the hook rules. */
   writeHooks(rules: unknown): Promise<void>;
+  /** SleepyCode's project index, as the Indexing page shows it. */
+  indexReport(): Promise<unknown>;
+  /** Rebuild the index now, and return the fresh report. */
+  rebuildIndex(): Promise<unknown>;
   /** Open a panel-supplied path after resolving and authorising it. */
   openPanelFile(path: unknown): Promise<boolean>;
   /** Scaffold a skill and open it. */
@@ -411,6 +415,12 @@ export class SettingsPanel {
         return;
       case 'completeSetup':
         await this.host.completeSetup();
+        return;
+      case 'getIndexStatus':
+        this.post({ type: 'indexStatus', status: await this.host.indexReport().catch(() => null) });
+        return;
+      case 'reindexIndex':
+        this.post({ type: 'indexStatus', status: await this.host.rebuildIndex().catch(() => null) });
         return;
       case 'getHooks':
         this.post({ type: 'hooks', hooks: await this.host.readHooks().catch(() => []) });

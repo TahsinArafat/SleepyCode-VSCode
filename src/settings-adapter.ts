@@ -378,6 +378,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // edits the rules the host actually evaluates.
   'getHooks',
   'saveHooks',
+  // Indexing. The ported page asked for a status this build never answered, and
+  // its rebuild talked to an embedding store that does not exist here.
+  'getIndexStatus',
+  'reindexIndex',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -543,7 +547,6 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'ollama',
   'personas',
   'subagents',
-  'indexing',
   // Backed by the base UI's own stores, which SleepyCode does not have: showing
   // them would present controls that write nowhere.
   'models',
@@ -568,6 +571,8 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'rules',
   // Backed now: the page edits the rules the host evaluates.
   'hooks',
+  // Backed now: it reports SleepyCode's own project index.
+  'indexing',
   'marketplace',
   'mcp',
   'advanced',
