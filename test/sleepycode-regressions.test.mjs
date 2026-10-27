@@ -1191,15 +1191,10 @@ test('a panel nothing renders is deleted, not kept behind a barrel', () => {
   ]) {
     assert.equal(existsSync(new URL(`../${dead}`, import.meta.url)), false, `${dead} should be gone`);
   }
-  // The classes those panels were styled by are gone from the stylesheet too.
-  // A global orphan sweep is tempting here and was tried: it flags ancestor
-  // selectors (`thead.cfg-table th`) whose rules can never match either, and
-  // proving each one harmless is more judgement than a test should encode. What
-  // is checkable is that the deleted screens' own class names left with them.
-  const css = read('webview-ui/settings/settings.css');
-  for (const name of ['doc-row', 'doc-form', 'docs-card', 'provider-picker', 'api-provider-card', 'api-key-row', 'model-card', 'model-opt-row', 'provider-connection']) {
-    assert.doesNotMatch(css, new RegExp(`\\.${name}(?![A-Za-z0-9_-])`), `.${name} belonged to a deleted panel`);
-  }
+  // Their CSS was briefly deleted with them and that was a mistake: the pruner
+  // split selector lists on commas without respecting parentheses and produced
+  // malformed rules elsewhere in the same file. The stylesheet is whole again;
+  // unused rules cost bytes, a broken rule costs the page.
 });
 
 test('a host message the webview waits for is translated, not dropped', () => {
