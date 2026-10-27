@@ -27,6 +27,7 @@ import { filterModes } from "../../shared/featureFlags";
 import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
 import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
 import { CONTEXT_TOGGLES, contextCount, contextCountLabel } from "../../../src/context-panel.ts";
+import { contextLevel, contextPercent, formatCost, formatSpeed, formatTokens } from "../../../src/cost-core.ts";
 import { matchSlashCommands, parseSlash, runSlashCommand, slashOpen } from "../../../src/slash-commands.ts";
 
 /** Top-level @ menu categories. */
@@ -402,6 +403,52 @@ function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetSta
     }
   };
   return { focused, setFocused, close, show, triggerKey, menuKey };
+}
+
+/** Session readout: tokens, cost, throughput and how full the window is. The
+ * classic composer had this as a popover behind the context pill; without it a
+ * user cannot tell what a turn cost or how close the window is to trimming. */
+function SessionInfo({
+  tokens,
+  cost,
+  speed,
+  usedTokens,
+  contextLimit,
+}: {
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null };
+  speed?: number;
+  usedTokens: number;
+  contextLimit: number;
+}) {
+  const percent = contextPercent(usedTokens, contextLimit);
+  const speedLabel = formatSpeed(speed);
+  return (
+    <div className="session-info" role="group" aria-label="Session usage">
+      <div className="session-info-head">
+        <span>This conversation</span>
+      </div>
+      <dl className="session-info-grid">
+        <dt>Input</dt><dd>{formatTokens(tokens.input)}{tokens.cacheRead > 0 && <span className="session-cache"> · {formatTokens(tokens.cacheRead)} cached</span>}</dd>
+        <dt>Output</dt><dd>{formatTokens(tokens.output)}</dd>
+        {tokens.cacheWrite > 0 && (<><dt>Cache write</dt><dd>{formatTokens(tokens.cacheWrite)}</dd></>)}
+        <dt>Cost</dt>
+        <dd title={cost.total === null ? "This model has no published price, so the cost cannot be worked out." : undefined}>
+          {formatCost(cost.total)}
+        </dd>
+        {speedLabel && (<><dt>Speed</dt><dd>{speedLabel}</dd></>)}
+      </dl>
+      <div className="session-info-context">
+        <div className="session-info-context-head">
+          <span>Context</span>
+          <span>{formatTokens(usedTokens)} / {formatTokens(contextLimit)} · {percent}%</span>
+        </div>
+        <div className="limit-track">
+          <div className={"limit-fill " + contextLevel(percent)} style={{ width: percent + "%" }} />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** What goes into the next request: a switch per source, the attachments, and a
@@ -1156,6 +1203,7 @@ export function Composer({
   onCommand,
   onOpenControl,
   activeConversationId,
+  sessionStats,
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -1221,6 +1269,8 @@ export function Composer({
   /** Slash commands that open a composer control instead of posting anything. */
   onOpenControl?: (control: "context" | "model" | "agent" | "approval") => void;
   activeConversationId?: string;
+  /** Session readout, computed host-side. */
+  sessionStats?: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number };
   /** Tokens consumed by the conversation so far (drives the context ring). */
   usedTokens?: number;
   /** Queued messages count; Enter on an empty editor fires the next one now. */
@@ -2102,6 +2152,17 @@ export function Composer({
           {/* Approval governs edits and commands, which only agent mode can
               perform. Showing the control in a read-only mode implied a gate
               that was never consulted. */}
+          {!editing && sessionStats && (sessionStats.tokens.input > 0 || sessionStats.cost.total !== null) && (
+            <div className="composer-stats">
+              <SessionInfo
+                tokens={sessionStats.tokens}
+                cost={sessionStats.cost}
+                speed={sessionStats.speed}
+                usedTokens={usedTokens ?? 0}
+                contextLimit={sessionStats.contextLimit}
+              />
+            </div>
+          )}
           {!editing && context && (
             <ContextPanel
               state={context}

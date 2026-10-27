@@ -37,6 +37,7 @@ import * as modelOptions from './model-options';
 import * as worktreeNaming from './worktree-naming';
 import * as queueCore from './queue-core';
 import * as featurePrefs from './feature-prefs';
+import * as costCore from './cost-core';
 import { renderReactWebviewHtml } from './webview-react';
 import { SettingsPanel, type SettingsPanelHost } from './settings-panel';
 import * as settingsAdapter from './settings-adapter';
@@ -899,6 +900,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * active transcript and the bootstrap state. The React app renders nothing
    * until `initialState` arrives, so this runs on every `ready`.
    */
+  /** Republish the active conversation's totals, e.g. after opening it. */
+  private refreshSessionStats(): void {
+    const active = this.activeConversation();
+    if (active) this.postSessionStats(active.id);
+  }
+
   private sendReactBootstrap(): void {
     const active = this.activeConversation();
     const selection = active ? this.selectionFor(active) : undefined;
@@ -922,6 +929,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // intends to run those prompts — and "Resume interrupted request" has no row
     // to resume from.
     this.postWorkflow(active?.id);
+    // Same for the session totals: they are derived from stored records, so a
+    // reload can rebuild them rather than starting from zero.
+    this.refreshSessionStats();
   }
 
   /** Open the OpenCursor settings window (also used by the command). */
@@ -1025,6 +1035,43 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private readChatWorkspace(): unknown {
     return this.context.globalState.get<unknown>(this.chatWorkspaceKey(), undefined);
+  }
+
+  /**
+   * What this conversation has consumed and cost.
+   *
+   * The host owns the arithmetic because it owns the prices: shipping rates to the
+   * webview would duplicate the split between cached and uncached input tokens,
+   * which is the part that is easy to get wrong.
+   */
+  private postSessionStats(conversationId: string): void {
+    if (!this.reactMode || !conversationId) return;
+    const records = costCore.recordsFor(loadUsage(this.context), conversationId);
+    // The prices the account last reported, cached on this provider. Reading the
+    // account here would return only the signed-in flags.
+    const prices = this.lastSleepyModelPrices as costCore.ModelPrice[];
+    const summary = costCore.sessionSummary(
+      records.map(record => ({
+        model: record.model,
+        input: record.inputTokens,
+        output: record.outputTokens,
+        cacheRead: record.cacheReadTokens ?? 0,
+        cacheWrite: record.cacheWriteTokens ?? 0,
+      })),
+      prices,
+    );
+    const conversation = this.activeProject()?.conversations.find(item => item.id === conversationId);
+    const selection = conversation ? this.selectionFor(conversation) : undefined;
+    const model = selection?.model;
+    const providerId = selection?.provider ?? '';
+    this.post({
+      type: 'sessionStats',
+      conversationId,
+      tokens: summary.tokens,
+      cost: summary.cost,
+      speed: costCore.latestSpeed(records),
+      contextLimit: this.getEffectiveModelInfo(providerId, model ?? '').contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    });
   }
 
   /** Whether a finished request should be written to the local usage log. */
@@ -2681,6 +2728,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         project.updatedAt = Date.now();
         void this.persistProjects();
         this.syncConversations();
+        this.refreshSessionStats();
         // Switching chats must leave the composer on a model this conversation's
         // engine can run; without this a model-less CLI chat would show the
         // local SleepyAI default and substitute on its first send.
@@ -4653,7 +4701,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           const harvested = harvestSubagentText(subagentText, leftoverText);
           subagentText = harvested.text;
           if (totalInput || totalOutput) {
-            if (this.shouldRecordUsage()) recordUsage(this.context, { model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
+            if (this.shouldRecordUsage()) recordUsage(this.context, { conversationId, model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
           const text = subagentText;
           releaseSubagent();
@@ -4997,7 +5045,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               runCacheWrite += ucacheWrite;
               const durationMs = Date.now() - streamStartTime;
               const tokensPerSecond = durationMs > 0 ? Math.round((uout / durationMs) * 1000) : 0;
-              if (this.shouldRecordUsage()) recordUsage(this.context, { model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
+              if (this.shouldRecordUsage()) recordUsage(this.context, { conversationId, model, provider: providerConfig.id, inputTokens: uin, outputTokens: uout, cacheReadTokens: ucacheRead, cacheWriteTokens: ucacheWrite, durationMs, tokensPerSecond });
+              this.postSessionStats(conversationId);
               // Count the step against the conversation's goal, so a bounded goal
               // actually limits the run instead of being decorative.
               if (conversation.goal) {
@@ -5263,7 +5312,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       progress('summarizing', { auto: options?.auto === true });
       const selection = this.selectionFor(conversation);
       const before = conversation.items;
-      const summarized = await this.summarizeConversation(before, selection, controller.signal);
+      const summarized = await this.summarizeConversation(before, selection, controller.signal, targetId);
       conversation.items = summarized.items;
       // The structured model history must follow the compacted transcript, otherwise
       // the next turn would replay the pre-compaction tool calls we just summarized.
@@ -5396,6 +5445,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     items: TranscriptItem[],
     selection: { model: string; provider: string; agentId: string },
     signal: AbortSignal,
+    /** The conversation this summary is for, so its spend is charged to it. */
+    conversationId?: string,
   ): Promise<{ items: TranscriptItem[]; summaryText: string; usage?: { inputTokens?: number; outputTokens?: number }; modelId: string; providerId: string }> {
     const text = compactionPromptInput(items);
     // Carry what the conversation already inspected and edited. Without this the
@@ -5460,6 +5511,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // when the response is rejected, otherwise reasoning burn stays invisible.
             if (attemptUsage.inputTokens || attemptUsage.outputTokens) {
               if (this.shouldRecordUsage()) recordUsage(this.context, {
+                conversationId,
                 model: candidateId,
                 provider: providerConfig.id,
                 inputTokens: attemptUsage.inputTokens ?? 0,

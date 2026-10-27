@@ -520,6 +520,19 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'queuedPrompt':
       return queuedPrompts(message);
 
+    case 'sessionStats':
+      // Cost is computed host-side: it owns the prices, and shipping rates to the
+      // webview would duplicate the cached-vs-uncached split, which is the part
+      // that is easy to get wrong.
+      return {
+        type: 'sessionStats',
+        convId: String(message.conversationId ?? ''),
+        tokens: message.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: message.cost ?? { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, total: null },
+        speed: message.speed,
+        contextLimit: Number(message.contextLimit ?? 0),
+      };
+
     case 'projectIndex':
       // The host has posted this since the index existed; there was no case for
       // it here, so index state never reached the React UI.

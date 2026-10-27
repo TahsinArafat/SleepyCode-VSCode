@@ -812,6 +812,8 @@ export function App() {
   // composer: these are decisions about the message you are writing, not
   // preferences about the workspace.
   const [contextState, setContextState] = React.useState(DEFAULT_CONTEXT);
+  // What this conversation has cost and consumed, computed host-side.
+  const [sessionStats, setSessionStats] = React.useState<{ convId: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number } | undefined>(undefined);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1333,6 +1335,9 @@ export function App() {
           break;
         case "sleepyStatus":
           setAccountStatus(msg);
+          break;
+        case "sessionStats":
+          setSessionStats(msg);
           break;
         case "pendingChanges":
           setChangeTarget(msg.itemId);
@@ -2250,6 +2255,7 @@ export function App() {
           onToggleContext={(id, value) => setContextState((state) => toggleContext(state, id, value))}
           onReindexProject={() => post({ type: "reindexProject" })}
           activeConversationId={activeId}
+          sessionStats={sessionStats}
           // Slash commands post their own messages: they are the user's intent,
           // not text the model reads.
           onCommand={(message) => post(message)}

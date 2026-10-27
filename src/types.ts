@@ -24,6 +24,8 @@ export type WebMessage =
   // The chat's sign-in banner. Same entry point as the command and the settings
   // window's button.
   | { type: 'signIn' }
+  // What this conversation has cost and consumed so far.
+  | { type: 'sessionStats'; conversationId: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number }
   | { type: 'steerQueued'; conversationId: string; id?: string }
   | { type: 'removeQueued'; conversationId: string; id?: string }
   | { type: 'promoteQueued'; conversationId: string; id?: string }
@@ -416,6 +418,12 @@ export type UsageRecord = {
   model: string;
   provider: string;
   timestamp: number;
+  /**
+   * The conversation this request belonged to. Records written before this field
+   * existed are unscoped and are excluded from every session total rather than
+   * attributed to whichever conversation happens to be open.
+   */
+  conversationId?: string;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;

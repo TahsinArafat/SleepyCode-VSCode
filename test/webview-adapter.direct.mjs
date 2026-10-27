@@ -1930,3 +1930,33 @@ test('only boolean switches survive into the context', () => {
   const out = adapter.toSleepyMessage({ type: 'sendMessage', text: 'hi', context: { includeProjectIndex: false, includeActiveFile: 'yes', includeSelection: 0 } });
   assert.deepEqual(out.context, { includeProjectIndex: false });
 });
+
+// ---------------------------------------------------------------- session stats
+
+test('session stats reach the webview with the cost and the limit', () => {
+  const out = adapter.toReactMessage({
+    type: 'sessionStats', conversationId: 'c1',
+    tokens: { input: 1000, output: 500, cacheRead: 800, cacheWrite: 0 },
+    cost: { input: 0.001, cacheRead: 0.0002, cacheWrite: 0, output: 0.0075, total: 0.0087 },
+    speed: 42, contextLimit: 128000,
+  });
+  assert.equal(out.type, 'sessionStats');
+  assert.equal(out.convId, 'c1');
+  assert.equal(out.cost.total, 0.0087);
+  assert.equal(out.speed, 42);
+  assert.equal(out.contextLimit, 128000);
+});
+
+test('a session with no cost arrives as unknown, not as zero', () => {
+  // Zero would render "$0", which says the session was free.
+  const out = adapter.toReactMessage({ type: 'sessionStats', conversationId: 'c1', tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, total: null } });
+  assert.equal(out.cost.total, null);
+});
+
+test('a malformed session payload degrades to empty rather than throwing', () => {
+  const out = adapter.toReactMessage({ type: 'sessionStats' });
+  assert.deepEqual(out.tokens, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(out.cost.total, null);
+  assert.equal(out.contextLimit, 0);
+  assert.equal(out.convId, '');
+});

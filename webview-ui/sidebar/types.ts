@@ -140,6 +140,8 @@ export type InMessage =
   | { type: "questionAnswered"; convId: string; callId: string; answers: Record<string, string[]> }
   | { type: "approvalRequest"; convId: string; request: ApprovalRequestInfo }
   | { type: "approvalResolved"; convId: string; requestId: string; approved: boolean }
+  /** What this conversation has consumed and cost, computed host-side. */
+  | { type: "sessionStats"; convId: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number }
   /** Account state, for the sign-in banner. */
   | { type: "sleepyStatus"; loggedIn: boolean; busy: boolean; text: string }
   /** Project-index progress. The host has always sent this; nothing mapped it. */
