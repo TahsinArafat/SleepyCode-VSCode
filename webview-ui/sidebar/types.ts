@@ -105,15 +105,18 @@ export interface PendingChangeInfo {
 export type UiPrefs = { chatTextSize: string; motion?: "full" | "system" | "reduced"; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean };
 /** A subagent team as shown in the composer's Project-mode picker. */
 export type TeamInfo = { id: string; name: string; description: string; members: string[] };
+/** A reasoning level the composer may pick. Supplied by the host so the menu
+ * cannot list a level the request body does not understand. */
+export type EffortOption = { id: string; label: string; hint: string };
 export type InMessage =
-  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy }
+  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[] }
   | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
   | { type: "steeringAccepted"; convId: string }
   | { type: "queueDraft"; convId: string; draft: { text: string; attachments: Attachment[] } }
   | { type: "conversationSearchResults"; requestId: number; list: ConversationSummary[] }
-  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy }
+  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[] }
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
@@ -194,6 +197,7 @@ export type OutMessage =
   | { type: "setActiveTeams"; teamIds: string[] }
   | { type: "fetchModels" }
   | { type: "selectModel"; model: string }
+  | { type: "selectReasoningEffort"; effort: string }
   | { type: "saveModelOptions"; modelId: string; options: ModelOption[] }
   | { type: "resetModelOptions"; modelId: string }
   | { type: "searchFiles"; query: string; requestId: number }

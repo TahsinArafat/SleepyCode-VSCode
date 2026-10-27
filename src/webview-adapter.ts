@@ -16,6 +16,7 @@
 
 import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
 import * as modelOptions from './model-options.ts';
+import { REASONING_EFFORTS, REASONING_EFFORT_HINTS, REASONING_EFFORT_LABELS, normalizeReasoningEffort } from './reasoning-effort.ts';
 
 export type SleepyMsg = { type: string; [key: string]: any };
 export type ReactMsg = { type: string; [key: string]: any };
@@ -363,6 +364,11 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
         // projected onto it rather than sending an undefined policy.
         approvalPolicy: message.approvalPolicy ?? approvalPolicyForMode(message.approvalMode),
         approvalMode: message.approvalMode,
+        // The picker needs the level in force, not just the ability to set one.
+        // Never undefined: an unset level is `none`, and a picker with nothing
+        // selected reads as broken.
+        reasoningEffort: normalizeReasoningEffort(message.reasoningEffort),
+        reasoningEfforts: effortOptions(),
         // A send cannot work without a folder; say so before the user types.
         workspaceRoot: message.workspaceRoot,
         canSend: Boolean(message.workspaceRoot ?? message.canSend),
@@ -846,6 +852,8 @@ export function buildInitialState(input: {
   workspaceState?: unknown;
   /** Chat preferences, so the first paint uses the stored values. */
   uiPrefs?: unknown;
+  /** Reasoning level in force, so the composer's picker starts on the truth. */
+  reasoningEffort?: unknown;
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -860,9 +868,23 @@ export function buildInitialState(input: {
     workspaceRoot: input.workspaceRoot,
     canSend: Boolean(input.workspaceRoot),
     approvalPolicy: approvalPolicyForMode(input.approvalMode),
+    reasoningEffort: normalizeReasoningEffort(input.reasoningEffort),
+    reasoningEfforts: effortOptions(),
     ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
     ...(input.uiPrefs ? { uiPrefs: input.uiPrefs } : {}),
   };
+}
+
+// ---------------------------------------------------------------- reasoning effort
+
+/**
+ * The levels a picker renders, in the model's own scale order.
+ *
+ * Built from `reasoning-effort.ts` so the composer and the request body cannot
+ * disagree about which levels exist or what they are called.
+ */
+export function effortOptions(): { id: string; label: string; hint: string }[] {
+  return REASONING_EFFORTS.map(id => ({ id, label: REASONING_EFFORT_LABELS[id], hint: REASONING_EFFORT_HINTS[id] }));
 }
 
 // ---------------------------------------------------------------- panels

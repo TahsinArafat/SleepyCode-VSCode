@@ -1712,3 +1712,49 @@ test('a rename or pin with no conversation named is refused', () => {
   assert.equal(adapter.toSleepyMessage({ type: 'togglePinConversation' }), null);
   assert.equal(adapter.toSleepyMessage({ type: 'togglePinConversation', id: '' }), null);
 });
+
+// ---------------------------------------------------------------- reasoning effort
+//
+// `selectReasoningEffort` was mapped inbound but nothing ever forwarded the
+// CURRENT level, so a picker could not show which one was active — and the
+// composer had no picker at all.
+
+test('the effort levels travel as options the picker can render', () => {
+  const options = adapter.effortOptions();
+  assert.equal(options.length, 7);
+  assert.deepEqual(options.map(o => o.id), ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  for (const option of options) {
+    assert.ok(option.label, `${option.id} needs a label`);
+    assert.ok(option.hint, `${option.id} needs a hint`);
+  }
+  assert.equal(options[0].label, 'None');
+  // Order is the model's own scale, not alphabetical.
+  assert.equal(options[6].id, 'max');
+});
+
+test('the current reasoning level reaches the composer', () => {
+  const out = adapter.toReactMessage({ type: 'config', reasoningEffort: 'high' });
+  assert.equal(out.reasoningEffort, 'high');
+  assert.deepEqual(out.reasoningEfforts.map(o => o.id), ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+});
+
+test('an unrecognised or missing level falls back to the default rather than undefined', () => {
+  // A picker with nothing selected looks broken; `none` is what the host sends
+  // when nothing is stored.
+  assert.equal(adapter.toReactMessage({ type: 'config' }).reasoningEffort, 'none');
+  assert.equal(adapter.toReactMessage({ type: 'config', reasoningEffort: 'nonsense' }).reasoningEffort, 'none');
+  assert.equal(adapter.toReactMessage({ type: 'config', reasoningEffort: 7 }).reasoningEffort, 'none');
+});
+
+test('initialState carries the level too, so the first paint is right', () => {
+  const out = adapter.buildInitialState({ reasoningEffort: 'medium' });
+  assert.equal(out.reasoningEffort, 'medium');
+  assert.equal(adapter.buildInitialState({}).reasoningEffort, 'none');
+});
+
+test('choosing a level posts the message the host already handles', () => {
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'selectReasoningEffort', effort: 'xhigh' }),
+    { type: 'selectReasoningEffort', effort: 'xhigh' },
+  );
+});

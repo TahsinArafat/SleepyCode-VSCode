@@ -762,6 +762,10 @@ export function App() {
   // names the panel first and sends the rows after, so the drawer can open with
   // a loading state instead of appearing empty and then filling in.
   const [panel, setPanel] = React.useState<PanelState | null>(null);
+  // Reasoning effort. The host supplies both the current level and the levels it
+  // accepts, so the menu cannot offer one the request body does not understand.
+  const [reasoningEffort, setReasoningEffort] = React.useState("none");
+  const [reasoningEfforts, setReasoningEfforts] = React.useState<{ id: string; label: string; hint: string }[]>([]);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1164,6 +1168,8 @@ export function App() {
       switch (msg.type) {
         case "initialState":
           setWorkspaceRoot(msg.workspaceRoot);
+          if (msg.reasoningEffort) setReasoningEffort(msg.reasoningEffort);
+          if (msg.reasoningEfforts) setReasoningEfforts(msg.reasoningEfforts);
           setApprovalPolicy(msg.approvalPolicy);
           setMode(msg.mode);
           setSelectedModel(msg.selectedModel || "");
@@ -1257,6 +1263,8 @@ export function App() {
           setSelectedModel(msg.model || ""); // auto hidden for now
           break;
         case "configState":
+          if (msg.reasoningEffort) setReasoningEffort(msg.reasoningEffort);
+          if (msg.reasoningEfforts) setReasoningEfforts(msg.reasoningEfforts);
           if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
           setPersonas(msg.personas || []);
           setHasProviders(!!msg.hasProviders);
@@ -2077,6 +2085,9 @@ export function App() {
           onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
           draft={draft}
           prompts={promptsFromTurns(turns)}
+          reasoningEffort={reasoningEffort}
+          reasoningEfforts={reasoningEfforts}
+          onSelectReasoningEffort={(id) => { setReasoningEffort(id); post({ type: "selectReasoningEffort", effort: id }); }}
           tabDraft={draftsRef.current.get(draftKey) ?? null}
           onTabDraft={(d) => setTabDraft(draftKey, d)}
           onSubmit={(text, attachments) => {

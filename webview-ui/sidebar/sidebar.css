@@ -4477,3 +4477,7 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
    this only labels the row rather than reordering it here. */
 .hi-pin { flex: 0 0 auto; color: var(--accent, #d7ba7d); font-size: 11px; }
 .hi-pin-glyph { font-size: 13px; line-height: 1; }
+
+/* Reasoning-effort menu: label plus the one-line hint, matching the mode menu. */
+.effort-dropdown .mi-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.effort-dropdown .mi-hint { font-size: 11px; color: var(--fg-dim); }

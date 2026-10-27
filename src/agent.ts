@@ -913,6 +913,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // every reload.
       workspaceState: this.readChatWorkspace(),
       uiPrefs: this.readChatPrefs(),
+      reasoningEffort: selection?.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
     }));
     // Queued prompts and goals are host state the webview holds a copy of. They
     // must be re-sent here or a reload shows an empty queue while the host still
