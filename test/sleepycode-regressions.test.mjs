@@ -1010,3 +1010,26 @@ test('the last known models and account answer before the network does', () => {
   assertSource(agentSource, /if \(this\.lastModelGroups\.length\) return;/);
   assertSource(agentSource, /if \(this\.lastSleepyAccountRefresh\) return;/);
 });
+
+test('a status scrolled out of view stops animating', () => {
+  // The thinking shimmer and the matrix loader loop forever. In a long transcript
+  // every one of them keeps restyling itself every frame while the reader is
+  // looking at the newest message, off the other end of the chat. The status is
+  // flagged when it leaves the viewport and the CSS holds the loops; the two
+  // halves are useless apart, so both are pinned here.
+  const css = read('webview-ui/shared/activity-effects.css');
+  const offscreen = css.match(/\[data-offscreen\][^{]*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(offscreen, 'the offscreen flag must have a rule');
+  assert.match(offscreen, /animation-play-state:\s*paused/);
+  // Both loops, or the matrix keeps running while the text holds.
+  assert.match(css, /\[data-offscreen\][^{]*\.t-think-text::before/);
+  assert.match(css, /\[data-offscreen\][^{]*\.t-matrix i/);
+
+  const status = read('webview-ui/shared/ThinkingStatus.tsx');
+  assert.match(status, /new IntersectionObserver/);
+  assert.match(status, /toggleAttribute\("data-offscreen"/);
+  // The element must carry the ref the observer watches, and the observer must
+  // be disconnected — an observer per re-render leaks on a streaming turn.
+  assert.match(status, /<span ref=\{rootRef\} className=\{`activity-status/);
+  assert.match(status, /observer\.disconnect\(\)/);
+});
