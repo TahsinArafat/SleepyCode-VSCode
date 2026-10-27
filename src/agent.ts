@@ -900,6 +900,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'error', conversationId: '', text: `SleepyCode could not load your conversations: ${errorMessage(error)}` });
     }
     this.syncConversations();
+    // Connect the saved MCP servers as the window opens. Without this every
+    // configured server read as unknown after a restart until someone pressed Sync,
+    // because nothing held a connection open before the first run.
+    void this.warmMcpConnections();
     void this.migrateProvidersIfNeeded().then(() => this.loadApiKeys()).then(() => {
       if (this.view !== view) return;
       this.postConfig();
@@ -1584,27 +1588,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.mcpCache = undefined;
       },
       syncConnections: async () => {
-        const connections = await loadMcpConnections(this.context);
-        this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
-        // Spawned servers inherit this PATH. Recording it makes "command not
-        // found" diagnosable without asking the user to reproduce it.
-        const resolvedPath = await loginShellEnv();
-        this.log('info', 'mcp.sync.path', (resolvedPath.PATH ?? '').split(':').slice(0, 8).join(':'));
-        let statuses: McpConnectionStatus[] = [];
-        try {
-          const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);
-          await result.connection.close();
-          statuses = result.statuses;
-          if (result.connection.errors.length) this.log('warn', 'mcp.sync.errors', result.connection.errors.join(' | '));
-        } catch (error) {
-          // A thrown sync used to vanish into a single status named "MCP",
-          // which matched no server and left every row reading "idle".
-          const detail = errorMessage(error);
-          this.log('error', 'mcp.sync.failed', detail);
-          statuses = [];
-        }
-        // One row per saved server, always: never leave the panel guessing.
-        return settingsAdapter.completeMcpStatuses(connections, statuses);
+        // A probe that just ran is the truth; re-running it makes the panel wait
+        // on every server a second time for an answer it already has.
+        const cached = this.mcpStatusCache;
+        if (cached && Date.now() - cached.at < 60_000) return cached.statuses;
+        return this.probeMcpConnections();
       },
       mcpLogin: async (name) => {
         const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
@@ -5998,6 +5986,59 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'gitActionResult', conversationId, itemId, ok: true, action: 'commit', hash, message: message.trim(), item: target.item });
     this.syncConversations();
     void vscode.window.showInformationMessage(`Committed SleepyCode task${hash ? ` (${hash})` : ''}.`);
+  }
+
+  /** Status per saved MCP server, cached for the last probe of this window. */
+  private mcpStatusCache: { at: number; statuses: settingsAdapter.PanelMcpStatus[] } | undefined;
+
+  /**
+   * Connect every saved MCP server and report one status row per server.
+   *
+   * Shared by the settings window's sync button and the startup warm-up: two
+   * copies is how the panel and the run disagree about whether a server is up.
+   */
+  private async probeMcpConnections(): Promise<settingsAdapter.PanelMcpStatus[]> {
+    const connections = await loadMcpConnections(this.context);
+    this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
+    // Spawned servers inherit this PATH. Recording it makes "command not found"
+    // diagnosable without asking the user to reproduce it.
+    const resolvedPath = await loginShellEnv();
+    this.log('info', 'mcp.sync.path', (resolvedPath.PATH ?? '').split(':').slice(0, 8).join(':'));
+    let statuses: McpConnectionStatus[] = [];
+    try {
+      const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);
+      await result.connection.close();
+      statuses = result.statuses;
+      if (result.connection.errors.length) this.log('warn', 'mcp.sync.errors', result.connection.errors.join(' | '));
+    } catch (error) {
+      // A thrown sync used to vanish into a single status named "MCP", which
+      // matched no server and left every row reading "idle".
+      const detail = errorMessage(error);
+      this.log('error', 'mcp.sync.failed', detail);
+      statuses = [];
+    }
+    // One row per saved server, always: never leave the panel guessing.
+    const complete = settingsAdapter.completeMcpStatuses(connections, statuses);
+    this.mcpStatusCache = { at: Date.now(), statuses: complete };
+    return complete;
+  }
+
+  /**
+   * Reconnect the saved MCP servers when the window opens, without waiting for
+   * someone to press Sync.
+   *
+   * A server is only reachable while something is holding it open, and nothing did
+   * until a run started — so after a restart the panel showed every configured
+   * server as unknown until it was synced by hand.
+   */
+  private async warmMcpConnections(): Promise<void> {
+    if (!this.reactMode) return;
+    try {
+      const statuses = await this.probeMcpConnections();
+      if (statuses.length) this.log('info', 'mcp.warm.done', `${statuses.filter(row => row.connected).length}/${statuses.length} connected`);
+    } catch (error) {
+      this.log('warn', 'mcp.warm.failed', errorMessage(error));
+    }
   }
 
   private hookRules(): HookRule[] {
