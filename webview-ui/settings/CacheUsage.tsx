@@ -8,25 +8,25 @@
  */
 
 import * as React from "react";
+import { cacheSplit } from "../../src/cache-usage.ts";
 import type { ModelUsage } from "./features";
 
 function tokens(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-/** Never derive a cache miss from an absent provider counter. */
+/**
+ * Cached versus non-cached input. The arithmetic lives in
+ * `src/cache-usage.ts`: input a provider never gave a cache status for was
+ * billed as ordinary input, so it is counted there rather than reported as a
+ * third figure the reader has to combine themselves.
+ */
 export function CacheUsage({ usage }: { usage: ModelUsage }) {
-  const cached = Math.min(usage.promptTokens, Math.max(0, usage.cachedReadTokens ?? 0));
-  // Historical positive cache totals are evidence of those reads, but older
-  // records have no coverage denominator. Their remaining input stays unknown.
-  const known = Math.min(usage.promptTokens, Math.max(cached, usage.cacheReadInputTokens ?? 0));
-  const noncached = Math.max(0, known - cached);
-  const unknown = Math.max(0, usage.promptTokens - known);
-  const reported = usage.cacheReadInputTokens !== undefined || cached > 0;
+  const { cached, nonCached, reported } = cacheSplit(usage);
   return <span>
     {reported
-      ? <>{tokens(cached)} cached input · {tokens(noncached)} non-cached input{unknown > 0 && <> · {tokens(unknown)} input with cache status unknown</>}</>
-      : <>Cache read: not reported{unknown > 0 && <> for {tokens(unknown)} input tokens</>}</>}
+      ? <>{tokens(cached)} cached input · {tokens(nonCached)} non-cached input</>
+      : <>Cache read: not reported for {tokens(nonCached)} input tokens</>}
     {(usage.cacheWriteReported || (usage.cachedWriteTokens ?? 0) > 0) && <> · {tokens(usage.cachedWriteTokens ?? 0)} cache-write tokens reported</>}
   </span>;
 }

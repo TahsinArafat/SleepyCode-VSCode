@@ -22,11 +22,14 @@ it("renders absent counters as unreported rather than zero cache hits", () => {
   expect(html).not.toContain("0 cached input");
 });
 
-it("separates known cached, known non-cached, and unknown input", () => {
+it("counts input with no cache status as non-cached", () => {
+  // It was a third figure ("30 input with cache status unknown"), which made the
+  // number a reader compares against a bill depend on two others. Input the
+  // provider never gave a cache status for was billed as ordinary input.
   const html = render({ cachedReadTokens: 30, cacheReadInputTokens: 70 });
   expect(html).toContain("30 cached input");
-  expect(html).toContain("40 non-cached input");
-  expect(html).toContain("30 input with cache status unknown");
+  expect(html).toContain("70 non-cached input");
+  expect(html).not.toContain("unknown");
 });
 
 it("shows a reported zero as zero and keeps historical fabricated zeros unknown", () => {
@@ -35,10 +38,10 @@ it("shows a reported zero as zero and keeps historical fabricated zeros unknown"
   expect(render({ cachedReadTokens: 0 })).toContain("Cache read: not reported");
 });
 
-it("does not classify the rest of historical input from a positive cache total alone", () => {
+it("classifies the rest of the prompt from the cached figure alone", () => {
   const html = render({ cachedReadTokens: 40 });
   expect(html).toContain("40 cached input");
-  expect(html).toContain("60 input with cache status unknown");
+  expect(html).toContain("60 non-cached input");
 });
 
 it("distinguishes reported zero cache writes from unknown historical zeros", () => {
