@@ -27,6 +27,7 @@ import { filterModes } from "../../shared/featureFlags";
 import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
 import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
 import { CONTEXT_TOGGLES, contextCount, contextCountLabel } from "../../../src/context-panel.ts";
+import { matchSlashCommands, parseSlash, runSlashCommand, slashOpen } from "../../../src/slash-commands.ts";
 
 /** Top-level @ menu categories. */
 /**
@@ -1152,6 +1153,9 @@ export function Composer({
   context,
   onToggleContext,
   onReindexProject,
+  onCommand,
+  onOpenControl,
+  activeConversationId,
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -1212,6 +1216,11 @@ export function Composer({
   context?: { project: boolean; activeFile: boolean; selection: boolean; attachments: number };
   onToggleContext?: (id: string, value: boolean) => void;
   onReindexProject?: () => void;
+  /** Slash commands post these directly, since they are not messages the user wrote. */
+  onCommand?: (message: OutMessage) => void;
+  /** Slash commands that open a composer control instead of posting anything. */
+  onOpenControl?: (control: "context" | "model" | "agent" | "approval") => void;
+  activeConversationId?: string;
   /** Tokens consumed by the conversation so far (drives the context ring). */
   usedTokens?: number;
   /** Queued messages count; Enter on an empty editor fires the next one now. */
@@ -1247,6 +1256,17 @@ export function Composer({
   const mentionCatRef = React.useRef<MentionCategory | null>(null);
   const [mentionQuery, setMentionQuery] = React.useState("");
   const mentionQueryRef = React.useRef("");
+  // The composer's current text, in state because the slash palette has to react
+  // to it. Kept in step by the editor's onChange and every programmatic set.
+  const [slashText, setSlashText] = React.useState("");
+  const [slashIndex, setSlashIndex] = React.useState(0);
+  // Mirrored into refs so the keyboard handler reads the current palette rather
+  // than whatever it closed over when it was created.
+  const slashOpenNowRef = React.useRef(false);
+  const slashCountRef = React.useRef(0);
+  const slashIndexRef = React.useRef(0);
+  const slashCommandsRef = React.useRef<{ id: string }[]>([]);
+  const runSlashRef = React.useRef<(id: string) => boolean>(() => false);
   const mentionIndexRef = React.useRef(0);
   const reqRef = React.useRef(0);
   // Saved Range marking the typed "@query" (so we can replace it on pick).
@@ -1273,7 +1293,7 @@ export function Composer({
     if (!element) return;
     const editor = new ComposerEditor(element, {
       createMention: makeMentionEl,
-      onChange: () => { refreshEmpty(); detectMentionRef.current?.(); emitDraft(); },
+      onChange: () => { refreshEmpty(); setSlashText(richEditor.current?.getText() ?? ""); detectMentionRef.current?.(); emitDraft(); },
       onCodeBlocks: setCodeBlocks,
       submitWithCtrlEnter: () => !!submitWithCtrlEnterRef.current,
       onSubmit: () => submitRef.current(),
@@ -1580,6 +1600,46 @@ export function Composer({
   const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id));
 
   // Detect an active "@query" right before the caret (within the current text node).
+  // Open only while the composer holds a bare slash word, so a path or a sentence
+  // that starts with a slash does not pop a menu. Suppressed while the @ menu owns
+  // the popup, since they occupy the same place.
+  const slashCommands = React.useMemo(
+    () => (mentionOpen || editing ? [] : slashOpen(slashText) ? matchSlashCommands(slashText) : []),
+    [slashText, mentionOpen, editing],
+  );
+  const slashOpenNow = slashCommands.length > 0;
+
+  /** Run a palette entry: post its messages, fill a prompt, or open a control. */
+  slashOpenNowRef.current = slashOpenNow;
+  slashCountRef.current = slashCommands.length;
+  slashIndexRef.current = slashIndex;
+  slashCommandsRef.current = slashCommands;
+
+  const runSlash = React.useCallback((id: string) => {
+    const parsed = parseSlash(id);
+    if (!parsed) return false;
+    // The argument is whatever followed the command in the composer.
+    const typed = parseSlash(slashText);
+    const args = typed && typed.name === parsed.name ? typed.args : "";
+    const outcome = runSlashCommand(parsed.name, args, { conversationId: activeConversationId, running: !!isRunning });
+    if (!outcome) return false;
+    if (outcome.kind === "messages") {
+      for (const message of outcome.messages ?? []) onCommand?.(message as OutMessage);
+      clear();
+    } else if (outcome.kind === "prompt") {
+      richEditor.current?.setText(outcome.text ?? "");
+      setSlashText(outcome.text ?? "");
+    } else if (outcome.control) {
+      onOpenControl?.(outcome.control);
+      // `/model` with no argument is a request to pick one, so the command word
+      // itself is cleared rather than left in the message.
+      clear();
+    }
+    setSlashIndex(0);
+    return true;
+  }, [slashText, activeConversationId, isRunning, onCommand, onOpenControl]);
+  runSlashRef.current = runSlash;
+
   const detectMention = React.useCallback(() => {
     const close = () => {
       setMentionOpen(false);
@@ -1739,6 +1799,28 @@ export function Composer({
             ))}
           </div>
         )}
+        {slashOpenNow && (
+          <div className="slash-popup" role="listbox" aria-label="Commands" onMouseDown={(e) => e.preventDefault()}>
+            {slashCommands.map((command, index) => (
+              <React.Fragment key={command.id}>
+                {(index === 0 || slashCommands[index - 1].group !== command.group) && (
+                  <div className="slash-group">{command.group}</div>
+                )}
+                <div
+                  role="option"
+                  aria-selected={index === slashIndex}
+                  className={"slash-item" + (index === slashIndex ? " active" : "")}
+                  onMouseEnter={() => setSlashIndex(index)}
+                  onClick={() => runSlash(command.id)}
+                >
+                  <span className="slash-name">{command.id}</span>
+                  <span className="slash-label">{command.label}</span>
+                  <span className="slash-desc">{command.description}</span>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        )}
         {mentionOpen && (
           <div className="mention-popup" onMouseDown={(e) => e.preventDefault()}>
             {mentionCat === null ? (
@@ -1883,6 +1965,17 @@ export function Composer({
               // Tab keeps its normal focus traversal; other button keystrokes
               // cannot select a suggestion or accidentally submit the message.
               if (!((e.ctrlKey || e.metaKey) && ["z", "y"].includes(e.key.toLowerCase()))) return;
+            }
+            // The slash palette owns the arrow keys and Enter while it is open, and
+            // the @ menu gets first refusal because they share the popup slot.
+            if (slashOpenNowRef.current && !mentionOpenRef.current) {
+              if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); setSlashIndex((i) => (i + 1) % slashCountRef.current); return; }
+              if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); setSlashIndex((i) => (i - 1 + slashCountRef.current) % slashCountRef.current); return; }
+              if (e.key === "Enter" || e.key === "Tab") {
+                const command = slashCommandsRef.current[slashIndexRef.current];
+                if (command && runSlashRef.current(command.id)) { e.preventDefault(); e.stopPropagation(); return; }
+              }
+              if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); richEditor.current?.setText(""); setSlashText(""); return; }
             }
             // Mention controls forward history shortcuts to the document too.
             if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {

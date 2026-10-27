@@ -4575,3 +4575,39 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 }
 .context-attachment-remove:hover { background: var(--surface-2); color: var(--fg); }
 .context-action { border-top: 1px solid var(--line-soft, var(--line)); margin-top: 4px; border-radius: 0 0 6px 6px; }
+
+/* Slash palette. Grouped like the classic one, so the list is scannable. */
+.slash-popup {
+	position: absolute;
+	bottom: calc(100% + 4px);
+	left: 8px;
+	right: 8px;
+	z-index: 30;
+	max-height: 320px;
+	overflow-y: auto;
+	background: var(--dropdown-bg);
+	border: 1px solid var(--line);
+	border-radius: var(--r-xl, 12px);
+	box-shadow: var(--el-3);
+	padding: 4px;
+}
+.slash-group {
+	padding: 6px 8px 3px;
+	font-size: 10px;
+	letter-spacing: .04em;
+	text-transform: uppercase;
+	color: var(--fg-dim);
+}
+.slash-item {
+	display: grid;
+	grid-template-columns: minmax(72px, auto) 1fr;
+	grid-template-rows: auto auto;
+	column-gap: 10px;
+	padding: 5px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.slash-item.active { background: var(--surface-2); }
+.slash-name { font-size: 12px; font-weight: 600; }
+.slash-label { font-size: 12px; }
+.slash-desc { grid-column: 2; font-size: 11px; color: var(--fg-dim); }

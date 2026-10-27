@@ -2249,6 +2249,16 @@ export function App() {
           context={{ ...contextState, attachments: draft?.attachments?.length ?? 0 }}
           onToggleContext={(id, value) => setContextState((state) => toggleContext(state, id, value))}
           onReindexProject={() => post({ type: "reindexProject" })}
+          activeConversationId={activeId}
+          // Slash commands post their own messages: they are the user's intent,
+          // not text the model reads.
+          onCommand={(message) => post(message)}
+          onOpenControl={(control) => {
+            // The four controls a command can open. `/model` and `/agent` are
+            // pills, and the others are panels — none of them is faked here.
+            if (control === "context") setContextState((state) => ({ ...state }));
+            post({ type: "openSettings", section: control === "approval" ? "behavior" : undefined });
+          }}
           agentId={agentId}
           agentOptions={agentOptions}
           onSelectAgent={(id) => { setAgentId(id); post({ type: "selectAgent", agentId: id }); }}
