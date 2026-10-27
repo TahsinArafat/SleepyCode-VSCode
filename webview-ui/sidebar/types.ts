@@ -209,7 +209,7 @@ export type OutMessage =
   | { type: "openBrowserTab"; url?: string }
   | { type: "exportConversation"; convId?: string }
   | { type: "newConversation"; personaId?: string }
-  | { type: "setPersona"; personaId: string }
+  | { type: "setPersona"; personaId: string; convId?: string }
   | { type: "selectConversation"; id: string }
   | { type: "requestTranscript"; convId: string }
   | { type: "deleteConversation"; id: string }

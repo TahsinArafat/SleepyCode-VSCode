@@ -617,6 +617,71 @@ function AgentPicker({
 
 /** Reasoning-effort pill. Levels come from the host, so the menu cannot list a
  * level the request body does not understand. */
+
+/** The persona layer in force for this chat: a voice, not an agent. */
+function PersonaPicker({ value, options, onSelect }: {
+  value: string;
+  options: { id: string; name: string; description: string }[];
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  useOutsideClose(open, () => setOpen(false));
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef, [options.length]);
+  const nav = usePickerNavigation(open, setOpen, triggerRef, menuRef, options.findIndex(option => option.id === value), options.length, maxH);
+  const meta = options.find(option => option.id === value) ?? options[0];
+  const pick = (id: string) => { if (!open) return; onSelect(id); nav.close(true); };
+  // A single persona means there is nothing to choose: the chip would be a
+  // control whose only menu entry is the value already shown.
+  if (options.length < 2) return null;
+  return (
+    <button
+      type="button"
+      ref={triggerRef}
+      className="pill persona-pill"
+      aria-label={"Persona: " + (meta?.name ?? "Default")}
+      aria-expanded={open}
+      aria-haspopup="menu"
+      aria-controls={open ? menuId : undefined}
+      title={meta?.description || meta?.name}
+      onKeyDown={nav.triggerKey}
+      onClick={(event) => { event.stopPropagation(); if (open) nav.close(); else nav.show(); }}
+    >
+      <Icon name="bot" />
+      <span>{meta?.name ?? "Persona"}</span>
+      <Icon name="chevD" className="cd" />
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="menu" aria-label="Persona" className="mode-dropdown agent-dropdown"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }}
+          onKeyDown={nav.menuKey} onClick={(event) => event.stopPropagation()}>
+          {options.map((option, index) => (
+            <div
+              key={option.id}
+              className={"mode-item agent-item" + (option.id === value ? " active" : "")}
+              role="menuitemradio"
+              aria-checked={option.id === value}
+              tabIndex={index === nav.focused ? 0 : -1}
+              onFocus={() => nav.setFocused(index)}
+              onClick={() => pick(option.id)}
+            >
+              <div className="agent-item-body">
+                <span className="agent-item-name">{option.name}</span>
+                <span className="agent-item-desc">{option.description}</span>
+              </div>
+              {option.id === value && <Icon name="check" size={13} />}
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
+    </button>
+  );
+}
+
 function EffortPicker({
   openSignal,
   value,
@@ -1224,6 +1289,9 @@ export function Composer({
   agentId = "",
   agentOptions = [],
   onSelectAgent,
+  personas = [],
+  personaId = "",
+  onSelectPersona,
   context,
   onToggleContext,
   onReindexProject,
@@ -1285,6 +1353,10 @@ export function Composer({
   onSelectReasoningEffort?: (id: string) => void;
   /** Agent in force, and the agents to route the next message to. */
   agentId?: string;
+  /** Persona layer: the voices to choose from and the one this chat runs on. */
+  personas?: { id: string; name: string; description: string }[];
+  personaId?: string;
+  onSelectPersona?: (id: string) => void;
   agentOptions?: { id: string; name: string; role: string; description: string }[];
   onSelectAgent?: (id: string) => void;
   /** Which sources go into the next request, and how to change them. */
@@ -2261,6 +2333,9 @@ export function Composer({
         <ModePicker mode={mode} onMode={onMode} />
         {!editing && agentOptions.length > 0 && (
           <AgentPicker openSignal={openControl?.name === "agent" ? openControl.token : undefined} value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
+        )}
+        {!editing && personas.length > 1 && (
+          <PersonaPicker value={personaId} options={personas} onSelect={(id) => onSelectPersona?.(id)} />
         )}
         {!editing && reasoningEfforts.length > 0 && (
           <EffortPicker openSignal={openControl?.name === "effort" ? openControl.token : undefined} value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />

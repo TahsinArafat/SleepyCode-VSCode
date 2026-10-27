@@ -1038,6 +1038,7 @@ export function App() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [moreOpen]);
   const [personaId, setPersonaId] = React.useState("default");
+  const [personas, setPersonas] = React.useState<{ id: string; name: string; description: string }[]>([]);
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
   const [activeTeamIds, setActiveTeamIds] = React.useState<string[]>([]);
@@ -1414,6 +1415,7 @@ export function App() {
           markRunning(msg.runningConvIds);
           setActiveId(msg.activeId);
           setPersonaId(msg.activePersonaId || "default");
+          if (Array.isArray(msg.personas)) setPersonas(msg.personas);
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
@@ -1505,6 +1507,10 @@ export function App() {
           if (msg.agentOptions) setAgentOptions(msg.agentOptions);
           if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
           setHasProviders(!!msg.hasProviders);
+          // A persona edited in Settings must show here, and one deleted while in
+          // use must not leave the chip naming something gone.
+          if (Array.isArray(msg.personas)) setPersonas(msg.personas);
+          if (msg.activePersonaId) setPersonaId(msg.activePersonaId);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
           if (msg.uiPrefs) setUiPrefs(msg.uiPrefs);
@@ -2483,6 +2489,9 @@ export function App() {
           agentId={agentId}
           agentOptions={agentOptions}
           onSelectAgent={(id) => { setAgentId(id); post({ type: "selectAgent", agentId: id }); }}
+          personas={personas}
+          personaId={personaId}
+          onSelectPersona={(id) => { setPersonaId(id); post({ type: "setPersona", convId: activeId, personaId: id }); }}
           reasoningEffort={reasoningEffort}
           reasoningEfforts={reasoningEfforts}
           onSelectReasoningEffort={(id) => { setReasoningEffort(id); post({ type: "selectReasoningEffort", effort: id }); }}

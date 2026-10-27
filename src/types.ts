@@ -6,6 +6,7 @@ import type { ReasoningEffort } from './reasoning-effort';
 export type WebMessage =
   | { type: 'ready' }
   | { type: 'send'; text: string; conversationId?: string; context?: ComposerContext; agentId?: string; mode?: 'agent' | 'ask' | 'plan'; /** Guidance for the run in progress, not a new turn. */ steering?: boolean }
+  | { type: 'setPersona'; personaId: string; convId?: string; conversationId?: string }
   | { type: 'stop' }
   | { type: 'newConversation' }
   | { type: 'openConversation'; id: string }
@@ -288,6 +289,11 @@ export type Conversation = {
    * which sends no reasoning parameter at all.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Persona this chat runs on: a system-prompt layer for voice and priorities.
+   * Absent means the default persona configured for new chats.
+   */
+  personaId?: string;
   /**
    * Composer mode. `agent` acts (and is the only mode where approvals apply);
    * `ask` and `plan` are read-only, enforced by withholding the mutating tools.

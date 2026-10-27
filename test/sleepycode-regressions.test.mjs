@@ -1074,3 +1074,30 @@ test('a mid-run update is shown inside the work it changed, not as a message', (
   assert.ok(rule, '.steering-note has a rule');
   assert.match(rule, /background:\s*var\(--user-bubble\)/);
 });
+
+test('a persona is a prompt layer the host applies, not a label', () => {
+  // The chain, end to end: it is stored, resolved for the chat, appended to the
+  // system prompt of the turn, republished when it changes, and shown in the
+  // composer. A hop that exists but is never reached is this codebase's most
+  // expensive recurring bug, so each one is pinned.
+  const personaCore = read('src/personas.ts');
+  assert.match(personaCore, /export function personaPromptFor/);
+  // A persona with no prompt would look active and change nothing.
+  assert.match(personaCore, /an empty prompt would change nothing/);
+  assert.match(personaCore, /export const DEFAULT_PERSONA_ID = 'default'/);
+
+  assert.match(agent, /const personaText = personas\.personaPromptFor\(this\.allPersonas\(\), personaId\);/);
+  assert.match(agent, /How to work here:/);
+  // The run passes the conversation's own choice, so a per-chat override wins.
+  assert.match(agent, /await this\.systemPrompt\(root, selection\.agentId, this\.personaIdFor\(conversation\)\)/);
+  assert.match(agent, /globalState\.update\('sleepycode\.personas'/);
+  assert.match(agent, /globalState\.get<string>\('sleepycode\.activePersonaId'/);
+
+  const adapterSource = read('src/webview-adapter.ts');
+  assert.match(adapterSource, /personas: Array\.isArray\(input\.personas\) \? input\.personas : \[\]/);
+  assert.match(adapterSource, /case 'setPersona':/);
+
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  assertSource(composer, /<PersonaPicker value=\{personaId\} options=\{personas\}/);
+  assertSource(read('webview-ui/sidebar/App.tsx'), /post\(\{ type: "setPersona", convId: activeId, personaId: id \}\)/);
+});

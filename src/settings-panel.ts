@@ -59,6 +59,14 @@ export interface SettingsPanelHost {
   readModels(): Promise<unknown>;
   /** Built-in agents and the user's own, as the Agents page lists them. */
   readAgents(): Promise<unknown>;
+  /** Personas available, and the one new chats start on. */
+  readPersonas(): Promise<unknown>;
+  /** Create or update one persona. The host re-validates before storing. */
+  savePersona(persona: unknown): Promise<void>;
+  /** Remove one persona, returning any chat that used it to the default. */
+  deletePersona(id: string): Promise<void>;
+  /** Choose the persona new chats start on. */
+  setDefaultPersona(id: string): Promise<void>;
   /** The model chosen for each subagent role, and the models available. */
   readSubagents(): Promise<unknown>;
   /** Replace the per-role model map. */
@@ -469,6 +477,23 @@ export class SettingsPanel {
       case 'setActiveProvider':
         await this.host.setActiveProvider(String(message.id ?? '')).catch(() => undefined);
         this.post({ type: 'providers', providers: await this.host.readProviders().catch(() => []) });
+        return;
+      case 'getPersonas':
+        this.post({ type: 'personas', ...(await this.host.readPersonas().catch(() => ({ personas: [], activePersonaId: '' }))) as object });
+        return;
+      case 'savePersona': {
+        let failure = '';
+        await this.host.savePersona(message.persona).catch((error) => { failure = error instanceof Error ? error.message : String(error); });
+        this.post({ type: 'personaSaved', ok: !failure, error: failure || undefined, ...(await this.host.readPersonas().catch(() => ({}))) as object });
+        return;
+      }
+      case 'deletePersona':
+        await this.host.deletePersona(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'personas', ...(await this.host.readPersonas().catch(() => ({ personas: [], activePersonaId: '' }))) as object });
+        return;
+      case 'setDefaultPersona':
+        await this.host.setDefaultPersona(String(message.id ?? '')).catch(() => undefined);
+        this.post({ type: 'personas', ...(await this.host.readPersonas().catch(() => ({ personas: [], activePersonaId: '' }))) as object });
         return;
       case 'getHooks':
         this.post({ type: 'hooks', hooks: await this.host.readHooks().catch(() => []) });

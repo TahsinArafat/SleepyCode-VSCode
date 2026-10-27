@@ -15,6 +15,7 @@ import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMP
 import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, ProvidersPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
 import { CacheUsage } from "./CacheUsage";
+import { PersonasPanel } from "./panels/PersonasPanel";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
@@ -59,7 +60,7 @@ const DEFAULTS: Settings = {
   systemPrompt: "",
 };
 
-type Section = "general" | "account" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
+type Section = "general" | "account" | "usage" | "agents" | "personas" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
 
 // Group connection, agent, and workspace settings in the navigation rail.
 const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
@@ -70,6 +71,7 @@ const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "ollama", label: "Ollama", icon: "database" },
   { id: "usage", label: "Usage & Quota", icon: "history", sep: true },
   { id: "agents", label: "Agents", icon: "agent" },
+  { id: "personas", label: "Personas", icon: "bot" },
   { id: "models", label: "Models", icon: "model" },
   { id: "behavior", label: "Behavior", icon: "tools" },
   { id: "rules", label: "Rules & Skills", icon: "ruler" },
@@ -115,6 +117,7 @@ const SECTION_KEYWORDS: Partial<Record<Section, string>> = {
   usage: "tokens quota limits plan usage oauth account rate limit",
   agents: "text size submit ctrl enter max tab count web search fetch context conversation tool timeout shell grep",
   models: "enable disable model catalog reasoning effort thinking context",
+  personas: "persona voice style tone personality instructions prompt",
   providers: "api key openai anthropic google openrouter oauth custom base url connect",
   behavior: "workspace context file reading terminal tools auto edits approval allow deny ask review policy allowlist denylist commands mcp web",
   rules: "rules skills agents.md always apply glob",
@@ -723,6 +726,8 @@ export function App() {
           )}
 
           {section === "agents" && <AgentsPanel />}
+
+          {section === "personas" && <PersonasPanel />}
 
           {section === "account" && <AccountPanel />}
 

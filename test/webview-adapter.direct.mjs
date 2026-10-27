@@ -54,7 +54,9 @@ test('react-only messages are dropped', () => {
   // persistTurns is mapped now (the host adopts it defensively); unknown types
   // are still dropped.
   assert.equal(adapter.toSleepyMessage({ type: 'unknownThing' }), null);
-  assert.equal(adapter.toSleepyMessage({ type: 'setPersona', personaId: 'x' }), null);
+  // `setPersona` is mapped now: the host applies the persona to the system prompt
+  // and stores the choice on the conversation.
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'setPersona', personaId: 'x', convId: 'c1' }), { type: 'setPersona', conversationId: 'c1', personaId: 'x' });
 });
 
 // ---------------------------------------------------------------- Sleepy -> React
@@ -545,10 +547,10 @@ test('deleteConversation passes through', () => {
 });
 
 test('messages with no SleepyCode counterpart are dropped', () => {
-  // Both were closed since this test was written: updateChatWorkspace is
-  // persisted and setMode is applied as a tool policy.
-  // Only setPersona and OpenCursor-internal types remain unmapped.
-  for (const type of ['setPersona']) {
+  // Every entry here has been closed since this test was written:
+  // updateChatWorkspace is persisted, setMode is applied as a tool policy, and
+  // setPersona now reaches the prompt. What is left is genuinely OpenCursor-only.
+  for (const type of ['setActiveTeams', 'openFileIcon', 'requestFileIcons']) {
     assert.equal(adapter.toSleepyMessage({ type }), null, `${type} should be dropped`);
   }
 });

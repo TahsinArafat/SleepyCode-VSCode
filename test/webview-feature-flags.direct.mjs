@@ -5,9 +5,9 @@ const flags = await import('../webview-ui/shared/featureFlags.ts');
 
 test('sections with no host backing are hidden', () => {
   // `hooks` left this list: it now edits the rules the host actually evaluates,
-  // instead of shell commands nothing ran and nothing stored.
-  // `personas` is not hidden — the section and its panel were deleted, because an
-  // agent already is a named instruction set chosen per conversation.
+  // instead of shell commands nothing ran and nothing stored. `personas` left it
+  // too: the host now applies a persona to the system prompt, and the composer
+  // can override it per chat, so the section has a real surface behind it.
   for (const id of ['llamacpp', 'ollama']) {
     assert.equal(flags.isSectionHidden(id), true, `${id} should be hidden`);
   }
@@ -17,7 +17,7 @@ test('sections SleepyCode actually backs stay visible', () => {
   // These are the surfaces the settings window serves real SleepyCode data for.
   // `providers` is here on purpose: it gained a real surface, so it is no longer
   // an OpenCursor-only page.
-  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'models', 'agents', 'subagents', 'mcp', 'advanced', 'about']) {
+  for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'marketplace', 'hooks', 'indexing', 'models', 'agents', 'personas', 'subagents', 'mcp', 'advanced', 'about']) {
     assert.equal(flags.isSectionHidden(id), false, `${id} should stay visible`);
   }
 });
@@ -74,8 +74,7 @@ test('the webview section rules ARE the host adapter rules, not a second copy', 
 
 test('the rail never offers a section the host will not route to', async () => {
   const host = await import('../src/settings-adapter.ts');
-  // `personas` is gone from the rail entirely, so it is not a section to route.
-  const nav = ['general', 'account', 'providers', 'llamacpp', 'ollama', 'usage', 'agents', 'models', 'behavior',
+  const nav = ['general', 'account', 'providers', 'llamacpp', 'ollama', 'usage', 'agents', 'personas', 'models', 'behavior',
     'rules', 'marketplace', 'subagents', 'mcp', 'hooks', 'indexing', 'advanced', 'about'];
   for (const id of nav) {
     // Either it is visible and routes to itself, or it is hidden and drops out

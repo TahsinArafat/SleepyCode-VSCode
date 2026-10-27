@@ -247,6 +247,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'setMode':
       return { type: 'setMode', mode: message.mode };
 
+    case 'setPersona':
+      // Per-chat override of the persona layer. The host stores it on the
+      // conversation; it is not a new conversation-wide default.
+      return { type: 'setPersona', conversationId: message.convId, personaId: message.personaId };
+
     case 'cancelSubagent':
       return { type: 'cancelSubagent', callId: message.callId, reason: message.reason };
 
@@ -397,12 +402,12 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
 
     case 'config':
     case 'configState':
-      // React has no personas or teams; SleepyCode's approval mode travels
-      // alongside so the composer's picker can reflect it.
+      // SleepyCode's approval mode travels alongside so the composer's picker can
+      // reflect it, and personas travel because the composer shows the one in use.
       return {
         type: 'configState',
-        personas: [],
-        activePersonaId: '',
+        personas: Array.isArray(message.personas) ? message.personas : [],
+        activePersonaId: typeof message.activePersonaId === 'string' ? message.activePersonaId : '',
         hasProviders: true,
         uiPrefs: message.uiPrefs,
         // The picker reads the policy shape, so the current approval mode is
@@ -987,6 +992,9 @@ export function buildInitialState(input: {
   /** Agent in force, and the agents to choose from. */
   agentId?: string;
   agents?: readonly unknown[];
+  /** Personas available, and the one new chats start on. */
+  personas?: readonly unknown[];
+  activePersonaId?: string;
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -994,8 +1002,8 @@ export function buildInitialState(input: {
     selectedModel: input.selectedModel ?? '',
     activeId: input.activeId,
     turns: input.turns ?? [],
-    personas: [],
-    activePersonaId: '',
+    personas: Array.isArray(input.personas) ? input.personas : [],
+    activePersonaId: input.activePersonaId ?? '',
     hasProviders: true,
     usedTokens: input.usedTokens ?? 0,
     workspaceRoot: input.workspaceRoot,

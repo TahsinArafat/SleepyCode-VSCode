@@ -415,7 +415,9 @@ test('a hidden section resolves to a visible one instead of a blank page', () =>
   // `models` is served now too: it edits the per-model options the host budgets
   // with, so it routes to itself rather than redirecting to General.
   assert.equal(adapter.visibleSection('models'), 'models');
-  assert.equal(adapter.visibleSection('personas'), 'general');
+  // `personas` is served now: the page manages the layer the host applies to the
+  // system prompt, so it routes to itself.
+  assert.equal(adapter.visibleSection('personas'), 'personas');
   // A visible section is returned unchanged, so no jump is ever redirected.
   for (const id of ['general', 'account', 'providers', 'usage', 'behavior', 'rules', 'hooks', 'indexing', 'models', 'agents', 'subagents', 'mcp', 'marketplace', 'advanced', 'about']) {
     assert.equal(adapter.visibleSection(id), id, `${id} must not be redirected`);

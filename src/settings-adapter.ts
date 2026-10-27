@@ -393,6 +393,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'saveAgent',
   'deleteAgent',
   // Subagents: the per-role model map the host already consults at delegate time.
+  'getPersonas',
+  'savePersona',
+  'deletePersona',
+  'setDefaultPersona',
   'getSubagents',
   'saveSubagentModels',
 ]);
@@ -559,9 +563,7 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'llamacpp',
   'ollama',
   // Backed by a feature store SleepyCode does not have: showing it would present
-  // controls that write nowhere. `personas` is not here at all: the section was
-  // removed rather than hidden, because an agent already is a named instruction
-  // set with a model and a tool list, chosen per conversation.
+  // controls that write nowhere.
 ] as const;
 
 const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
@@ -584,6 +586,9 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'hooks',
   // Backed now: it reports SleepyCode's own project index.
   'indexing',
+  // Backed now: the page manages the persona layer the host applies to the
+  // system prompt, and the composer overrides it per chat.
+  'personas',
   // Backed now: it edits the per-model options SleepyCode actually budgets with.
   'models',
   // Backed now: it manages the agents the host already resolves.

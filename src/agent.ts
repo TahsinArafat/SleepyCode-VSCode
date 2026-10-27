@@ -1,6 +1,7 @@
 import * as subagentRoles from './subagent-roles';
 import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
+import * as personas from './personas';
 import { steeringGuidance, takeSteering } from './steering';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
@@ -974,6 +975,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       reasoningEffort: selection?.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
       agentId: selection?.agentId,
       agents: this.allAgents(),
+      personas: this.allPersonas(),
+      activePersonaId: this.defaultPersonaId(),
     }));
     // Queued prompts and goals are host state the webview holds a copy of. They
     // must be re-sent here or a reload shows an empty queue while the host still
@@ -1402,6 +1405,47 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       },
       indexReport: async () => indexReport.indexReport(this.projectIndex.snapshot),
       rebuildIndex: async () => indexReport.indexReport(await this.ensureProjectIntelligence(true)),
+      readPersonas: async () => ({ personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() }),
+      savePersona: async (persona) => {
+        const draft = persona as { id?: unknown; name?: unknown; description?: unknown; prompt?: unknown };
+        const custom = this.customPersonas();
+        const existing = custom.find(item => item.id === String(draft.id ?? ''));
+        // The panel validates first; this is the same rule applied again, because a
+        // message can arrive from anywhere and a persona that changes nothing (no
+        // prompt) would sit in the list looking active.
+        const problem = personas.validatePersonaDraft(
+          { id: String(draft.id ?? ''), name: String(draft.name ?? ''), description: String(draft.description ?? ''), prompt: String(draft.prompt ?? '') },
+          custom,
+          { isNew: !existing },
+        );
+        if (problem) throw new Error(problem);
+        const saved = personas.personaFromDraft({ id: String(draft.id), name: String(draft.name), description: String(draft.description ?? ''), prompt: String(draft.prompt) });
+        const next = existing ? custom.map(item => item.id === saved.id ? saved : item) : [...custom, saved];
+        await this.context.globalState.update('sleepycode.personas', next);
+        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() });
+      },
+      deletePersona: async (id) => {
+        const next = this.customPersonas().filter(item => item.id !== id);
+        await this.context.globalState.update('sleepycode.personas', next);
+        // A chat pointed at a persona that no longer exists falls back to the
+        // default rather than holding an id nothing can resolve.
+        const active = personas.afterPersonaRemoved(this.defaultPersonaId(), id);
+        if (active !== this.defaultPersonaId()) await this.context.globalState.update('sleepycode.activePersonaId', active);
+        for (const project of this.projects) {
+          let touched = false;
+          for (const conversation of project.conversations) {
+            if (conversation.personaId === id) { conversation.personaId = undefined; touched = true; }
+          }
+          if (touched) project.updatedAt = Date.now();
+        }
+        await this.persistProjects();
+        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() });
+      },
+      setDefaultPersona: async (id) => {
+        const personaId = personas.personaById(this.allPersonas(), id).id;
+        await this.context.globalState.update('sleepycode.activePersonaId', personaId);
+        this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: personaId });
+      },
       readHooks: async () => this.hookRules(),
       writeHooks: async (rules) => {
         // Validate on the way in: a rule the host cannot evaluate would sit in the
@@ -2716,6 +2760,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'questionAnswered', conversationId: this.activeProject()?.activeConversationId, callId: message.callId, answers: message.answers ?? {} });
         resolve(message.answers ?? {});
       }
+      return;
+    }
+    if (message.type === 'setPersona') {
+      const conversation = message.conversationId
+        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        : this.activeConversation();
+      if (!conversation) return;
+      // An unknown id falls back to the default rather than storing a persona the
+      // chat cannot resolve.
+      const personaId = personas.personaById(this.allPersonas(), message.personaId).id;
+      conversation.personaId = personaId;
+      this.log('info', 'conversation.persona', `${conversation.id} -> ${personaId}`);
+      await this.persistProjects();
+      // The composer shows the persona in force; republish so the chip agrees.
+      this.post({ type: 'config', personaId });
+      this.syncConversations();
       return;
     }
     if (message.type === 'setMode') {
@@ -4752,7 +4812,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const instructions = [
         modeRules.modeGuidance(runMode),
         goalCore.goalGuidance(conversation.goal),
-        await this.systemPrompt(root, selection.agentId),
+        await this.systemPrompt(root, selection.agentId, this.personaIdFor(conversation)),
         projectMemory ? `Durable project memory from ${MEMORY_RELATIVE_PATH}:\n${projectMemory}` : '',
         `- Skills: installed skill metadata is listed below. Treat it as a discoverable capability inventory. Use skillsmp_list_installed when you need the authoritative current list. If the user invokes /skill, names a skill, or the task clearly matches an installed skill description, call skillsmp_read_installed before planning or acting and follow that local SKILL.md within SleepyCode safety rules. Use skillsmp_search / skillsmp_get_skill / skillsmp_install_skill only when the user needs a skill that is not already installed.`,
         mcpConnection.instructions.length ? `Connected MCP server instructions:\n${mcpConnection.instructions.join('\n')}` : '',
@@ -4833,7 +4893,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'start' });
         const subagentInstructions = [
           modeRules.subagentGuidance(runMode),
-          await this.systemPrompt(root, selection.agentId),
+          await this.systemPrompt(root, selection.agentId, this.personaIdFor(conversation)),
           `You are a ${role} subagent. ${roleInstruction}`,
           'You have an isolated context window. The parent conversation is not available unless context is explicitly included below.',
           'Do not delegate further. The delegate_task tool is intentionally unavailable.',
@@ -6446,6 +6506,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       agentId: selection.agentId,
       // Built-ins then user agents, in the order the Agents panel shows them.
       agents: this.allAgents(),
+      // The composer shows the persona in force, so a Settings change has to
+      // reach it without a reload.
+      personas: this.allPersonas(),
+      activePersonaId: this.defaultPersonaId(),
       reasoningEffort: selection.reasoningEffort,
       // Lets the composer say a folder is needed before the user types, rather
       // than after a message silently goes nowhere.
@@ -6761,7 +6825,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return sections.length ? `\n\nEditor context explicitly included by the user:\n\n${sections.join('\n\n')}` : '';
   }
 
-  private async systemPrompt(root: vscode.Uri, agentId: string): Promise<string> {
+  /** Stored custom personas; malformed entries are dropped on read. */
+  private customPersonas(): personas.Persona[] {
+    return personas.normalizeCustomPersonas(this.context.globalState.get<unknown>('sleepycode.personas', []));
+  }
+
+  /** Built-ins then the user's own, which is the order every surface lists them in. */
+  private allPersonas(): personas.Persona[] {
+    return personas.allPersonas(this.customPersonas());
+  }
+
+  /** The persona new chats start on. An unknown stored id falls back to the default. */
+  private defaultPersonaId(): string {
+    return personas.personaById(this.allPersonas(), this.context.globalState.get<string>('sleepycode.activePersonaId', personas.DEFAULT_PERSONA_ID)).id;
+  }
+
+  /** The persona a specific chat runs on: its own choice, else the default. */
+  private personaIdFor(conversation: { personaId?: string } | undefined): string {
+    return conversation?.personaId ? personas.personaById(this.allPersonas(), conversation.personaId).id : this.defaultPersonaId();
+  }
+
+  private async systemPrompt(root: vscode.Uri, agentId: string, personaId?: string): Promise<string> {
     const ideContext = `You are SleepyCode, an autonomous coding agent embedded inside VS Code. Work carefully and persist until the task is fully complete.
 
 Environment:
@@ -6791,15 +6875,19 @@ Rules:
 - Do not claim success until verification finishes.
 - End with a concise result summary.`;
 
+    // A persona is a voice and a set of priorities, so it sits on top of the base
+    // prompt and under the agent's own instructions (which say what the task is).
+    const personaText = personas.personaPromptFor(this.allPersonas(), personaId);
+    const layered = personaText ? `${ideContext}\n\n---\n\nHow to work here:\n\n${personaText}` : ideContext;
     const agentDef = this.allAgents().find(a => a.id === agentId);
-    if (!agentDef) return ideContext;
+    if (!agentDef) return layered;
     // User agents are always injected live so edits in the settings editor take effect immediately;
     // built-in prompts stay cached because they are static.
     const cacheable = AGENT_DEFINITIONS.some(a => a.id === agentId);
     const cached = cacheable ? this.agentPromptCache.get(agentId) ?? agentDef.prompt : agentDef.prompt;
-    if (!cached) return ideContext;
+    if (!cached) return layered;
     if (cacheable) this.agentPromptCache.set(agentId, cached);
-    return `${ideContext}
+    return `${layered}
 
 ---
 
