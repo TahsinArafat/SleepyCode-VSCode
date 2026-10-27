@@ -5774,6 +5774,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     } catch { return []; }
   }
 
+  /**
+   * Re-send the pending changes for a conversation.
+   *
+   * Posted directly rather than through `post()`: `pendingChanges` is built by the
+   * adapter, not translated by it, so routing it through the translator would drop
+   * it. Used when an action is refused, so the review bar the user just closed
+   * comes back and they can see what is still outstanding.
+   */
+  private resyncPendingChanges(conversationId: string): void {
+    if (!this.reactMode) return;
+    const conversation = this.activeProject()?.conversations.find(item => item.id === conversationId);
+    if (!conversation) return;
+    void this.view?.webview.postMessage(adapter.pendingChangesMessage(conversation.items));
+  }
+
   private async stageTaskChanges(conversationId: string, itemId: string, requestedPaths?: string[]): Promise<void> {
     const target = this.responseItem(conversationId, itemId);
     const root = target ? this.taskGitRoot(target.project) : undefined;
@@ -5787,6 +5802,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const preExisting = await this.taskPathsDirtyBeforeRun(root, target.item, paths);
     if (preExisting.length) {
       void vscode.window.showWarningMessage(`Stage not performed: ${preExisting.length} task file${preExisting.length === 1 ? '' : 's'} already had changes before this SleepyCode task. Use Source Control to stage hunks/files explicitly.`);
+      // The review bar closed optimistically; it has to come back, or the user is
+      // left with a warning and no way back to the files.
+      this.resyncPendingChanges(conversationId);
       return;
     }
     await stageGitPaths(root.fsPath, paths);

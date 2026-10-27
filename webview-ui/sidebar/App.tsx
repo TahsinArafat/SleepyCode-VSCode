@@ -1781,6 +1781,13 @@ export function App() {
     [compactionUndoable, compactionRedoable, activeId, isRunning],
   );
 
+  /** Close the review bar after an action that ends the review for this turn. */
+  const finishReview = React.useCallback((send: () => void) => {
+    setPendingChanges([]);
+    setChangeTarget(undefined);
+    send();
+  }, []);
+
   /** Mark an approval decided locally, so its prompt goes the moment it is answered. */
   const decideApproval = React.useCallback((conversationId: string, requestId: string, approved: boolean) => {
     setApprovals((a) => ({
@@ -2269,17 +2276,20 @@ export function App() {
                       onClick={(event) => {
                         event.stopPropagation();
                         // `changeActionMessages` already refused anything it cannot
-                        // run, so an enabled button always has a message here.
-                        for (const message of changeActionMessages(action.id, { conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning })) {
-                          post(message as any);
-                        }
+                        // run, so an enabled button always has a message here. Commit
+                        // and Restore end the review for this turn; Source Control
+                        // only opens a view, so the bar stays for that one.
+                        const messages = changeActionMessages(action.id, { conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning });
+                        const ends = action.id !== "sourceControl";
+                        const send = () => { for (const message of messages) post(message as any); };
+                        if (ends) finishReview(send); else send();
                       }}
                     >
                       {action.label}
                     </button>
                   ))}
-                <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "rejectAllChanges" }); }}>Undo All</button>
-                <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "acceptAllChanges" }); }}>Keep All</button>
+                <button className="rv-link" onClick={(event) => { event.stopPropagation(); finishReview(() => post({ type: "rejectAllChanges" })); }}>Undo All</button>
+                <button className="rv-link" onClick={(event) => { event.stopPropagation(); finishReview(() => post({ type: "acceptAllChanges" })); }}>Keep All</button>
               </div>
             </div>
             <AnimatedDisclosure open={reviewOpen}>
