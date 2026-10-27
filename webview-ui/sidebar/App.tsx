@@ -17,6 +17,7 @@ import { renderMarkdown } from "../shared/markdown";
 import { copyText } from "../shared/clipboard";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
+import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -770,6 +771,9 @@ export function App() {
   // The agent in force and the agents to choose from, both from the host.
   const [agentId, setAgentId] = React.useState("");
   const [agentOptions, setAgentOptions] = React.useState<{ id: string; name: string; role: string; description: string; builtIn: boolean }[]>([]);
+  // The assistant turn the pending changes belong to. The host tracks it, because
+  // turns carry no id in the webview.
+  const [changeTarget, setChangeTarget] = React.useState<string | undefined>(undefined);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1287,6 +1291,7 @@ export function App() {
           if (msg.modelList) setModelList(msg.modelList);
           break;
         case "pendingChanges":
+          setChangeTarget(msg.itemId);
           setPendingChanges(msg.changes || []);
           break;
         case "conversations":
@@ -2026,6 +2031,26 @@ export function App() {
                 </span>
               </div>
               <div className="review-actions">
+                {changeActions({ conversationId: activeId, itemId: changeTarget, paths: pendingChanges.map(c => c.path), running: isRunning })
+                  .filter(action => action.id !== "stageAll")
+                  .map(action => (
+                    <button
+                      key={action.id}
+                      className="rv-link"
+                      title={action.hint}
+                      disabled={!action.enabled}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        // `changeActionMessages` already refused anything it cannot
+                        // run, so an enabled button always has a message here.
+                        for (const message of changeActionMessages(action.id, { conversationId: activeId, itemId: changeTarget, paths: pendingChanges.map(c => c.path), running: isRunning })) {
+                          post(message as any);
+                        }
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
                 <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "rejectAllChanges" }); }}>Undo All</button>
                 <button className="rv-link" onClick={(event) => { event.stopPropagation(); post({ type: "acceptAllChanges" }); }}>Keep All</button>
               </div>

@@ -1807,3 +1807,19 @@ test('openPanel is refused for a panel that does not exist', () => {
   assert.equal(adapter.toSleepyMessage({ type: 'openPanel', panel: 'marketplace' }), null);
   assert.equal(adapter.toSleepyMessage({ type: 'openPanel' }), null);
 });
+
+test('pendingChanges names the turn that made them', () => {
+  // Every change action resolves its files through a conversation AND a turn.
+  // Turns carry no id in the webview, so the host — which tracks the latest
+  // assistant item — has to send it.
+  const items = [
+    { id: 'u1', role: 'user', text: 'do it' },
+    { id: 'a1', role: 'assistant', text: 'done', changes: [{ path: 'a.ts', action: 'Modified' }] },
+  ];
+  const out = adapter.pendingChangesMessage(items);
+  assert.equal(out.type, 'pendingChanges');
+  assert.equal(out.changes.length, 1);
+  assert.equal(out.itemId, 'a1', 'the assistant turn that made the change');
+  // No changes means no target either, so the buttons stay disabled.
+  assert.equal(adapter.pendingChangesMessage([{ id: 'u1', role: 'user', text: 'hi' }]).itemId, undefined);
+});

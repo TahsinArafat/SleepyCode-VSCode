@@ -719,7 +719,13 @@ function conversationPayload(message: SleepyMsg): ReactMsg {
 
 /** The React change-review message for a transcript's latest edits. */
 export function pendingChangesMessage(items: readonly any[] | undefined): ReactMsg {
-  return { type: 'pendingChanges', changes: pendingChangesOf(items) };
+  const changes = pendingChangesOf(items);
+  // The change actions resolve their files through a conversation and a turn,
+  // and turns carry no id in the webview — so the turn that made these changes
+  // travels with them. Omitted when there is nothing to act on, which is what
+  // keeps the buttons disabled rather than posting a message that cannot work.
+  const itemId = changes.length ? latestAssistantItemId(items) : undefined;
+  return { type: 'pendingChanges', changes, ...(itemId ? { itemId } : {}) };
 }
 
 /**

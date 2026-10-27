@@ -129,7 +129,12 @@ export type InMessage =
   | { type: "mentionSearchResults"; requestId: number; kind: MentionCategory; items: MentionItem[] }
   | { type: "insertMention"; mention: MentionItem }
   | { type: "pasteResolved"; requestId: number; mention?: MentionItem }
-  | { type: "pendingChanges"; changes: PendingChangeInfo[] }
+  /**
+   * `itemId` is the assistant turn that made these changes. Every change action
+   * resolves its files through a conversation and a turn, and turns carry no id
+   * in the webview, so the host sends it.
+   */
+  | { type: "pendingChanges"; changes: PendingChangeInfo[]; itemId?: string }
   | { type: "runStarted"; convId: string; prompt: string; created?: boolean; turns?: Turn[] }
   | { type: "agentEvent"; convId: string; event: AgentEvent }
   | { type: "questionAnswered"; convId: string; callId: string; answers: Record<string, string[]> }
