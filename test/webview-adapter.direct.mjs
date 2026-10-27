@@ -1799,3 +1799,11 @@ test('selecting an agent posts the message the host already handles', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'selectAgent', agentId: 'pivot' }), { type: 'selectAgent', agentId: 'pivot' });
   assert.equal(adapter.toSleepyMessage({ type: 'selectAgent', agentId: '' }), null);
 });
+
+test('openPanel is refused for a panel that does not exist', () => {
+  // The host builds the rows for whatever it is asked for; an unknown id would
+  // reach it as a request it cannot serve.
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'openPanel', panel: 'worktrees' }), { type: 'openPanel', panel: 'worktrees' });
+  assert.equal(adapter.toSleepyMessage({ type: 'openPanel', panel: 'marketplace' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'openPanel' }), null);
+});

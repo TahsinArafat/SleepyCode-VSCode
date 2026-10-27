@@ -136,3 +136,29 @@ test('row buttons are disabled exactly when their message cannot be built', () =
   assert.equal(panel.panelRowActionEnabled('restore', { title: 'no id' }, { conversationId: 'c' }), false);
   assert.equal(panel.panelRowActionEnabled('explode', { id: 'i' }, { conversationId: 'c' }), false);
 });
+
+// ---------------------------------------------------------------- drawer entry
+//
+// The drawer only ever opened when a VS Code command pushed `showPanel`, so
+// everything in it was unreachable from the chat. These are the entries the More
+// menu offers, and the rule that each one names a panel that exists.
+
+test('the menu offers one entry per panel, labelled for a user', () => {
+  const entries = panel.panelMenuEntries();
+  assert.deepEqual(entries.map(e => e.id), ['worktrees', 'index', 'agents', 'tasks', 'checkpoints']);
+  for (const entry of entries) {
+    assert.equal(entry.label, panel.panelTitle(entry.id), `${entry.id} should reuse the panel title`);
+    assert.ok(entry.hint.length > 10, `${entry.id} needs a hint`);
+  }
+  // The hint says what the panel is for, not just its name again.
+  assert.match(entries.find(e => e.id === 'checkpoints').hint, /restore|undo/i);
+});
+
+test('opening a panel posts the message the host handles', () => {
+  assert.deepEqual(panel.openPanelMessage('worktrees'), { type: 'openPanel', panel: 'worktrees' });
+  assert.deepEqual(panel.openPanelMessage('checkpoints'), { type: 'openPanel', panel: 'checkpoints' });
+  // An id that names no panel would ask the host for something it cannot build.
+  assert.equal(panel.openPanelMessage('marketplace'), null);
+  assert.equal(panel.openPanelMessage(''), null);
+  assert.equal(panel.openPanelMessage(undefined), null);
+});

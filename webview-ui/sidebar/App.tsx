@@ -16,6 +16,7 @@ import { ImagePreview } from "../shared/ImagePreview";
 import { renderMarkdown } from "../shared/markdown";
 import { copyText } from "../shared/clipboard";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
+import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -1742,6 +1743,21 @@ export function App() {
               <div className="more-menu">
                 <button title="Create an isolated checkout from committed HEAD. Uncommitted changes stay in this checkout." onClick={() => { setMoreOpen(false); post({ type: "createWorktreeConversation" }); }}><Icon name="gitBranch" size={13} /> New worktree chat</button>
                 <button onClick={() => { setMoreOpen(false); setWorkflowDialog("review"); }}><Icon name="code" size={13} /> Review code</button>
+                {/* The five host panels. They used to open only when a VS Code
+                    command pushed one, so nothing in them was reachable here. */}
+                {panelMenuEntries().map((entry) => (
+                  <button
+                    key={entry.id}
+                    title={entry.hint}
+                    onClick={() => {
+                      setMoreOpen(false);
+                      const message = openPanelMessage(entry.id);
+                      if (message) post(message as any);
+                    }}
+                  >
+                    <Icon name={entry.id === "worktrees" ? "gitBranch" : entry.id === "index" ? "database" : entry.id === "agents" ? "agent" : entry.id === "tasks" ? "task" : "history"} size={13} /> {entry.label}
+                  </button>
+                ))}
                 <button disabled={!!activeId && !!goals[activeId] && goals[activeId].status !== "complete"} onClick={() => { setMoreOpen(false); setWorkflowDialog("goal"); }}><Icon name="list" size={13} /> Start a goal</button>
                 <button disabled={!isRunning || !activeId} onClick={() => { setMoreOpen(false); setWorkflowDialog("steer"); }}><Icon name="edit" size={13} /> Update active task</button>
                 <button disabled={!activeId || isRunning} onClick={() => { setMoreOpen(false); if (activeId) post({ type: "forkConversation", id: activeId }); }}><Icon name="plus" size={13} /> Fork conversation</button>

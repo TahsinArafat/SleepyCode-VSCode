@@ -16,6 +16,7 @@
 
 import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
 import * as modelOptions from './model-options.ts';
+import * as panelCore from './panel-core.ts';
 import { agentOptions } from './agent-options.ts';
 import { REASONING_EFFORTS, REASONING_EFFORT_HINTS, REASONING_EFFORT_LABELS, normalizeReasoningEffort } from './reasoning-effort.ts';
 
@@ -124,7 +125,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'openMemory' };
 
     case 'openPanel':
-      return { type: 'openPanel', panel: message.panel };
+      // Only a panel that exists; the host builds rows for whatever it is asked
+      // for, so an unknown id would be a request it cannot serve.
+      return panelCore.isPanelId(message.panel) ? { type: 'openPanel', panel: message.panel } : null;
 
     case 'requestPanel':
       return { type: 'requestPanel', panel: message.panel };

@@ -132,3 +132,34 @@ export function panelRowActionEnabled(action: string, row: PanelRow, ctx: PanelC
   if (action === 'restore') return Boolean(ctx.conversationId) && !ctx.running;
   return false;
 }
+
+// ---------------------------------------------------------------- drawer entry
+
+/** What each panel is for, shown beside its menu entry. */
+const PANEL_MENU_HINTS: Record<PanelId, string> = {
+  worktrees: 'Isolated checkouts, each on its own branch.',
+  index: 'What the agent knows about this repository.',
+  agents: 'Switch which agent handles the next message.',
+  tasks: 'Hook rules that allow, block or gate tool calls.',
+  checkpoints: 'Restore the workspace to an earlier response.',
+};
+
+/**
+ * The entries a menu offers for opening a panel.
+ *
+ * The drawer used to open only when a VS Code command pushed `showPanel`, so
+ * nothing in it was reachable from the chat. Order matches the command list.
+ */
+export function panelMenuEntries(): { id: PanelId; label: string; hint: string }[] {
+  return PANEL_IDS.map(id => ({ id, label: panelTitle(id), hint: PANEL_MENU_HINTS[id] }));
+}
+
+/**
+ * The message that opens a panel, or null for an id that names none.
+ *
+ * Refusing here keeps an unknown id from reaching the host, which would build
+ * rows for a panel that does not exist.
+ */
+export function openPanelMessage(panel: unknown): { type: 'openPanel'; panel: PanelId } | null {
+  return isPanelId(panel) ? { type: 'openPanel', panel } : null;
+}

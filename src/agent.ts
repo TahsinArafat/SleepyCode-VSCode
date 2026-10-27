@@ -3038,6 +3038,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.syncConversations();
       return;
     }
+    if (message.type === 'openPanel') {
+      // The drawer's own entry point. Without this handler the message the
+      // webview posted had nowhere to land, so the panels were reachable only
+      // from the command palette.
+      this.openPanel(message.panel);
+      return;
+    }
     if (message.type === 'requestPanel') {
       void this.sendPanel(message.panel);
       return;
