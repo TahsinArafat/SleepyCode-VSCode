@@ -13,7 +13,7 @@ import * as React from "react";
 import { Icon } from "../shared/icons";
 import { Select } from "../shared/Select";
 import { ImagePreview } from "../shared/ImagePreview";
-import { renderMarkdown } from "../shared/markdown";
+import { MarkdownView } from "../shared/MarkdownView";
 import { copyText } from "../shared/clipboard";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
@@ -305,10 +305,9 @@ function ExploringSection({
 
 // Memoized: during streaming the whole turn list re-renders on every frame, but
 // only the trailing block's text actually changes. Without this, every earlier
-// message in the conversation re-parses its markdown on each delta.
-const Markdown = React.memo(function Markdown({ text }: { text: string }) {
-  return <div className="markdown-content" dir="auto" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
-});
+// message in the conversation re-parses its markdown on each delta. Within the
+// streaming message only the changed trailing block is re-rendered.
+const Markdown = MarkdownView;
 
 // Render <attached /> tags as the SAME pill as the composer editor:
 // [kind icon] name — shares .mention CSS and KIND_SVG icons.
