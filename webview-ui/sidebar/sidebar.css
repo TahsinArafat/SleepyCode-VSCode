@@ -4657,3 +4657,10 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 	max-width: 46ch;
 }
+
+/* Route note: which model actually ran, and why. Quiet, but persistent. */
+.route-note {
+	display: inline-flex; align-items: center; gap: 6px;
+	font-size: 11px; color: var(--fg-dim);
+	padding: 2px 0;
+}

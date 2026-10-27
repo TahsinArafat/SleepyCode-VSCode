@@ -94,3 +94,42 @@ test('parseTodos extracts checklist state', async () => {
   assert.equal(todos[1].status, 'pending');
   assert.equal(todos[2].status, 'in_progress');
 });
+
+// ---------------------------------------------------------------- route note
+//
+// `modelRoute` was mapped to `shell-notify`, which the reducer does not handle at
+// all — so the "Auto → model · reason" explanation the classic webview showed
+// only ever reached a transient status line that the next status overwrote. The
+// reason a request ran on a different model was effectively invisible.
+
+const applyAll = (events) => events.reduce((list, ev) => turns.applyEvent(list, ev), []);
+
+test('a route note becomes a persistent block, not a status line', () => {
+  const list = applyAll([
+    { type: "route-note", model: "gpt-6-sol", requested: "auto", reason: "cheapest available" },
+  ]);
+  const blocks = list[0].blocks;
+  const note = blocks.find(b => b.kind === "route");
+  assert.ok(note, 'the route note should be a block');
+  assert.equal(note.model, "gpt-6-sol");
+  assert.match(note.text, /cheapest available/);
+});
+
+test('the same route is not repeated when it is announced twice', () => {
+  // The host can re-announce; two identical lines would be noise.
+  const once = applyAll([{ type: "route-note", model: "m", requested: "auto", reason: "r" }]);
+  const twice = applyAll([
+    { type: "route-note", model: "m", requested: "auto", reason: "r" },
+    { type: "route-note", model: "m", requested: "auto", reason: "r" },
+  ]);
+  const count = (t) => t[0].blocks.filter(b => b.kind === "route").length;
+  assert.equal(count(once), 1);
+  assert.equal(count(twice), 1, 'a repeated announcement updates the note rather than adding another');
+});
+
+test('a note with no reason still says which model ran', () => {
+  const list = applyAll([{ type: "route-note", model: "gpt-6-sol", requested: "auto" }]);
+  const note = list[0].blocks.find(b => b.kind === "route");
+  assert.match(note.text, /gpt-6-sol/);
+  assert.doesNotMatch(note.text, /\(\)/, 'no empty parenthetical');
+});

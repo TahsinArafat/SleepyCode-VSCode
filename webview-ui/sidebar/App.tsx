@@ -563,6 +563,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
       if (block.kind === "text") return <div className="block-group" key={index}><Markdown text={block.text} /></div>;
       if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
+      if (block.kind === "route") return <div className="block-group" key={index}><div className="route-note"><Icon name="brain" size={12} /><span>{block.text}</span></div></div>;
       if (block.kind === "compaction") return <div className="block-group" key={index}><CompactionCard block={block} undoable={compaction?.undoable} redoable={compaction?.redoable} onAction={compaction?.onAction} /></div>;
       if (block.kind === "max-steps") return <div className="block-group" key={index}><MaxStepsCard block={block} running={running} /></div>;
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
@@ -637,6 +638,8 @@ function SubagentChat({
                 <div className="block-group" key={bi}><ErrorCard block={b} /></div>
               ) : b.kind === "compaction" ? (
                 <div className="block-group" key={bi}><CompactionCard block={b} /></div>
+              ) : b.kind === "route" ? (
+                <div className="block-group" key={bi}><div className="route-note"><Icon name="brain" size={12} /><span>{b.text}</span></div></div>
               ) : b.kind === "max-steps" ? (
                 <div className="block-group" key={bi}><MaxStepsCard block={b} running={false} /></div>
               ) : b.kind === "verification" ? (

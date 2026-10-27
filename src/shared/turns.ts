@@ -40,6 +40,12 @@ export type AgentEvent =
   | { type: "subagent-event"; callId: string; event: AgentEvent }
   | { type: "mode-changed"; mode: Mode }
   | { type: "shell-notify"; message: string }
+  /**
+   * Which model actually served a request, and why it was not the requested one.
+   * A persistent block rather than a status line: the next status overwrote the
+   * status-line version, so the explanation was effectively invisible.
+   */
+  | { type: "route-note"; model: string; requested?: string; reason?: string }
   | { type: "retry"; attempt: number; max: number; delayMs: number; error: string }
   | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
   | { type: "max-steps"; steps: number }
@@ -106,7 +112,15 @@ export interface MaxStepsBlock {
   resumed?: boolean;
 }
 export interface VerificationBlock { kind: "verification"; summary: import("../agent/verification").VerificationSnapshot }
-export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock;
+export interface RouteBlock {
+  kind: "route";
+  /** The model that served the request. */
+  model: string;
+  /** The one-line explanation, ready to render. */
+  text: string;
+}
+
+export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock | RouteBlock;
 
 export interface UserTurn {
   role: "user";
@@ -302,8 +316,20 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     else blocks.push(note);
   } else if (ev.type === "max-steps") {
     blocks.push({ kind: "max-steps", steps: ev.steps });
+  } else if (ev.type === "route-note") {
+    const note: RouteBlock = { kind: "route", model: ev.model, text: routeNoteText(ev.model, ev.requested, ev.reason) };
+    // A re-announcement updates the existing note instead of stacking another.
+    const at = blocks.findIndex(block => block.kind === "route" && block.model === note.model);
+    if (at >= 0) blocks[at] = note;
+    else blocks.push(note);
   }
   return blocks;
+}
+
+/** One line: which model ran, and the reason when there is one. */
+function routeNoteText(model: string, requested?: string, reason?: string): string {
+  const from = requested && requested !== model ? `${requested} → ${model}` : model;
+  return reason ? `${from} · ${reason}` : from;
 }
 
 interface ToolLocation {
@@ -551,6 +577,15 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const { list, turn } = ensureAssistant(turns);
     closeThinking(turn);
     turn.blocks.push({ kind: "max-steps", steps: ev.steps });
+    return list;
+  }
+
+  if (ev.type === "route-note") {
+    const { list, turn } = ensureAssistant(turns);
+    const note: RouteBlock = { kind: "route", model: ev.model, text: routeNoteText(ev.model, ev.requested, ev.reason) };
+    const at = turn.blocks.findIndex(block => block.kind === "route" && block.model === note.model);
+    if (at >= 0) turn.blocks[at] = note;
+    else turn.blocks.push(note);
     return list;
   }
 

@@ -571,8 +571,16 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
         : null;
 
     case 'modelRoute':
-      return message.model && message.requested !== message.model
-        ? agentEvent(message.conversationId, { type: 'shell-notify', message: `Using ${message.model}${message.reason ? ` (${message.reason})` : ''}` })
+      // A persistent note, not a shell notification. The status-line version was
+      // overwritten by the next status — and `shell-notify` is not handled by the
+      // reducer at all, so it never even reached the transcript.
+      return message.model
+        ? agentEvent(message.conversationId, {
+            type: 'route-note',
+            model: String(message.model),
+            requested: typeof message.requested === 'string' ? message.requested : undefined,
+            reason: typeof message.reason === 'string' ? message.reason : undefined,
+          })
         : null;
 
     case 'restoreDraft':

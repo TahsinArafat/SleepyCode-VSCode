@@ -990,9 +990,12 @@ test('a successful settings save needs no event', () => {
 });
 
 test('a routed model is reported so Auto is not silent', () => {
+  // Was `shell-notify`, a type the reducer does not handle at all — so the note
+  // reached a transient status line, or nothing.
   const out = adapter.toReactMessage({ type: 'modelRoute', conversationId: 'c1', requested: 'auto', model: 'm1', reason: 'cheapest' });
-  assert.equal(out.event.type, 'shell-notify');
-  assert.match(out.event.message, /m1/);
+  assert.equal(out.event.type, 'route-note');
+  assert.equal(out.event.model, 'm1');
+  assert.equal(out.event.reason, 'cheapest');
 });
 
 test('reasoningEnd needs no mapping: thinking closes on the next delta', () => {
@@ -2001,4 +2004,16 @@ test('the footer names the model from the catalog, falling back to the id', () =
   assert.equal(adapter.modelLabel(list, ''), '');
   assert.equal(adapter.modelLabel([], 'gpt-6-sol'), 'gpt-6-sol');
   assert.equal(adapter.modelLabel(undefined, 'x'), 'x');
+});
+
+test('the routed model becomes a persistent note, not a status line', () => {
+  // `shell-notify` is not handled by the reducer, so the old mapping never
+  // reached the transcript at all — the explanation was invisible.
+  const out = adapter.toReactMessage({ type: 'modelRoute', conversationId: 'c1', model: 'gpt-6-sol', requested: 'auto', reason: 'cheapest available' });
+  assert.equal(out.type, 'agentEvent');
+  assert.equal(out.event.type, 'route-note');
+  assert.equal(out.event.model, 'gpt-6-sol');
+  assert.equal(out.event.reason, 'cheapest available');
+  // A route with no model names nothing and is dropped rather than rendered blank.
+  assert.equal(adapter.toReactMessage({ type: 'modelRoute', conversationId: 'c1' }), null);
 });
