@@ -500,6 +500,17 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'queuedPrompt':
       return queuedPrompts(message);
 
+    case 'projectIndex':
+      // The host has posted this since the index existed; there was no case for
+      // it here, so index state never reached the React UI.
+      return {
+        type: 'projectIndex',
+        status: typeof message.status === 'string' ? message.status : '',
+        indexed: Number(message.indexed ?? 0),
+        total: Number(message.total ?? 0),
+        text: typeof message.text === 'string' ? message.text : '',
+      };
+
     case 'workflow':
       // The complete workflow state. React replaces both maps from one message,
       // so this is the only shape that cannot erase half of it.

@@ -140,6 +140,8 @@ export type InMessage =
   | { type: "questionAnswered"; convId: string; callId: string; answers: Record<string, string[]> }
   | { type: "approvalRequest"; convId: string; request: ApprovalRequestInfo }
   | { type: "approvalResolved"; convId: string; requestId: string; approved: boolean }
+  /** Project-index progress. The host has always sent this; nothing mapped it. */
+  | { type: "projectIndex"; status: string; indexed: number; total: number; text: string }
   | { type: "fileIcon"; filename: string; icon?: FileIconInfo }
   | { type: "toast"; id: number; title: string; message: string; kind: "info" | "attention" }
   /** The host opened one of its side panels; the drawer shows a loading state. */

@@ -19,6 +19,7 @@ import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
 import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
+import { COMPOSER_HINTS, STARTERS, indexCard, recentConversations } from "../../src/empty-state.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
 import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
@@ -799,6 +800,9 @@ export function App() {
   // be inferred from the transcript, so it is not guessed here.
   const [compactionUndoable, setCompactionUndoable] = React.useState(false);
   const [compactionRedoable, setCompactionRedoable] = React.useState(false);
+  // Project-index state arrives on its own message; it had no adapter case, so
+  // the UI never showed it at all.
+  const [indexStatus, setIndexStatus] = React.useState<{ status: string; indexed: number; total: number; text: string } | undefined>(undefined);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1314,6 +1318,9 @@ export function App() {
         case "modelsFetched":
           setModels(msg.models || []);
           if (msg.modelList) setModelList(msg.modelList);
+          break;
+        case "projectIndex":
+          setIndexStatus({ status: msg.status, indexed: msg.indexed, total: msg.total, text: msg.text });
           break;
         case "pendingChanges":
           setChangeTarget(msg.itemId);
@@ -1923,17 +1930,46 @@ export function App() {
               <h1 className="empty-title t-stagger-line">Let’s build something</h1>
               <div className="empty-hint t-stagger-line t-stagger-line--2">Turn an idea into code.</div>
             </StaggerReveal>
+            {/* Project intelligence, with a reindex action. The host has posted
+                this status all along; nothing rendered it. */}
+            {indexCard(indexStatus).visible && (
+              <button
+                className="empty-index"
+                disabled={indexCard(indexStatus).busy}
+                title={indexCard(indexStatus).text}
+                onClick={() => post({ type: "reindexProject" })}
+              >
+                <span className={"empty-index-dot" + (indexCard(indexStatus).busy ? " busy" : "")} />
+                <span className="empty-index-text">{indexCard(indexStatus).text}</span>
+                {indexCard(indexStatus).actionLabel && <span className="empty-index-action">{indexCard(indexStatus).actionLabel}</span>}
+              </button>
+            )}
             <div className="empty-actions">
-              {([
-                { icon: "code", label: "Explore code", text: "Give me an overview of this codebase and explain how the main parts fit together." },
-                { icon: "tools", label: "Find a bug", text: "Look through this codebase for a bug and explain how to fix it." },
-                { icon: "list", label: "Make a plan", text: "Help me plan a change to this project. First, ask me what I want to build." },
-              ] as const).map((suggestion) => (
-                <button className="empty-action" key={suggestion.label} onClick={() => setDraft({ text: suggestion.text })}>
-                  <Icon name={suggestion.icon} size={14} /> {suggestion.label}
+              {STARTERS.map((starter) => (
+                <button className="empty-action" key={starter.title} title={starter.description} onClick={() => setDraft({ text: starter.prompt })}>
+                  <Icon name="code" size={14} /> {starter.title}
                 </button>
               ))}
             </div>
+            <div className="empty-hints">
+              {COMPOSER_HINTS.map((hint) => (
+                <span className="empty-hint-item" key={hint.key}><kbd>{hint.key}</kbd> {hint.label}</span>
+              ))}
+            </div>
+            {/* The conversations you were last in, which the classic empty state
+                listed. Archived threads are excluded; the host's order is kept,
+                so pinned ones stay first. */}
+            {recentConversations(conversations).length > 0 && (
+              <div className="empty-recent">
+                <div className="empty-recent-head">Recent conversations</div>
+                {recentConversations(conversations).map((conversation) => (
+                  <button className="empty-recent-row" key={conversation.id} title={conversation.title} onClick={() => post({ type: "selectConversation", id: conversation.id })}>
+                    {conversation.pinned && <span className="hi-pin">★</span>}
+                    <span className="empty-recent-title">{conversation.title}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <PersonaSelect
               personas={personas}
               personaId={personaId}

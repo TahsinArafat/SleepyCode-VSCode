@@ -1835,3 +1835,18 @@ test('the compaction stacks reach the webview', () => {
   assert.equal(bare.compactionUndoable, false);
   assert.equal(bare.compactionRedoable, false);
 });
+
+test('the project-index status reaches the webview instead of being dropped', () => {
+  // The host has always posted `projectIndex`; the adapter had no case for it,
+  // so the React UI never showed index state at all — the same silent data loss
+  // as an unmapped inbound message anywhere else.
+  const out = adapter.toReactMessage({ type: 'projectIndex', status: 'indexing', indexed: 4, total: 9, text: 'Indexing 4/9 files…' });
+  assert.equal(out.type, 'projectIndex');
+  assert.equal(out.status, 'indexing');
+  assert.equal(out.indexed, 4);
+  assert.equal(out.total, 9);
+  assert.equal(out.text, 'Indexing 4/9 files…');
+  // A ready report carries its counts too, and a bare one does not crash.
+  assert.equal(adapter.toReactMessage({ type: 'projectIndex', status: 'ready', indexed: 120 }).indexed, 120);
+  assert.equal(adapter.toReactMessage({ type: 'projectIndex' }).status, '');
+});
