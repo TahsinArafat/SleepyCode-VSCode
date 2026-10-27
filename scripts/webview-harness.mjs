@@ -20,7 +20,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { chromium } from 'playwright';
+
+// `playwright` is not a project dependency: this is a developer tool, and the
+// packaged extension must not carry a browser. Say so plainly instead of failing
+// on an unresolved import.
+const { chromium } = await import('playwright').catch(() => {
+  throw new Error('webview-harness needs playwright:  npm i -D playwright && npx playwright install chromium');
+});
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
