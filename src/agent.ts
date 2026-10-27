@@ -1,3 +1,4 @@
+import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -1001,13 +1002,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         folderPath = match.path;
       }
-      const installName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? requested ?? 'skill');
+      // The folder is namespaced by vendor so two skills of the same name can
+      // both be installed; the name the agent uses stays the plain skill name.
+      const skillName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? requested ?? 'skill');
+      const installName = skillIdentity.skillFolderName({ owner: reference.owner, repo: reference.repo, name: skillName });
       await this.approve('edit', 'Install skill "' + installName + '"?', 'Source: ' + reference.owner + '/' + reference.repo + (folderPath ? ' (' + folderPath + ')' : '') + '\n\nThe skill will be installed into your global skills folder as \'' + installName + '\' and is available in every workspace. Its SKILL.md will be added to the agent\'s instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.');
       await installSkillFromRepository(this.skillsRoot(), { owner: reference.owner, repo: reference.repo, branch: reference.branch, folderPath, installName }, undefined, onProgress);
       const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
       sources[installName] = reference.owner + '/' + reference.repo;
       await this.context.globalState.update('sleepycode.skillSources', sources);
-      return { ok: true, text: `Installed '${installName}'. Ask SleepyCode to use the '${installName}' skill by name.` };
+      return { ok: true, text: `Installed '${skillName}' from ${reference.owner}/${reference.repo}. Ask SleepyCode to use the '${skillName}' skill by name.` };
     } catch (error) {
       return { ok: false, text: errorMessage(error) };
     }
@@ -1017,10 +1021,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private async uninstallMarketplaceSkill(folder: string): Promise<{ ok: boolean; text: string }> {
     await this.ensureGlobalSkills();
     try {
-      const safeName = sanitizeSkillName(folder);
       const installed = await listInstalledSkills(this.skillsRoot());
-      const skill = installed.find(item => item.folder === safeName || sanitizeSkillName(item.name) === safeName);
-      if (!skill) return { ok: false, text: `Skill '${folder || ''}' not found.` };
+      const found = skillIdentity.findSkill(installed, folder);
+      if (found.kind === 'ambiguous') return { ok: false, text: skillIdentity.ambiguousSkillMessage(folder, found.candidates) };
+      if (found.kind !== 'found') return { ok: false, text: `Skill '${folder || ''}' not found.` };
+      const skill = found.skill;
       const choice = await this.prompt('Uninstall skill \'' + skill.name + '\'?', 'This removes \'' + skill.name + '\' from your global skills folder. It will no longer be offered to the agent in any workspace.', { ok: 'Uninstall', cancel: 'Cancel', danger: true });
       if (choice !== 'ok') return { ok: false, text: 'Uninstall cancelled.' };
       await uninstallSkill(this.skillsRoot(), skill.folder);

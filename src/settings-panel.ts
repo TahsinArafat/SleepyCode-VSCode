@@ -88,7 +88,7 @@ export interface SettingsPanelHost {
   /** Search the skill marketplace. */
   marketplaceSearch(query: string, sortBy?: 'stars' | 'recent'): Promise<{ skills: any[]; total: number }>;
   /** Installed skills, with the folder name needed to uninstall. */
-  marketplaceInstalled(): Promise<{ name: string; description: string; folder: string; skillMdPath: string }[]>;
+  marketplaceInstalled(): Promise<{ name: string; description: string; folder: string; skillMdPath: string; key?: string }[]>;
   marketplaceInstall(source: string, skill?: string): Promise<{ ok: boolean; text: string }>;
   marketplaceUninstall(folder: string): Promise<{ ok: boolean; text: string }>;
 }

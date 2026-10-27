@@ -12,6 +12,7 @@
  * it and no parallel API had to be invented.
  */
 
+import * as identity from "../../../src/skill-identity.ts";
 import * as React from 'react';
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
@@ -31,6 +32,8 @@ export interface InstalledSkillRow {
   description: string;
   folder: string;
   path: string;
+  /** `owner/repo:name`, when the folder records a vendor. */
+  key?: string;
 }
 
 export function MarketplacePanel() {
@@ -89,10 +92,12 @@ export function MarketplacePanel() {
     vscode.postMessage({ type: "marketplaceUninstall", folder: row.folder });
   };
 
-  // Slugged the same way the host keys them (`[^a-z0-9]+ -> -`), or a skill whose
-  // display name differs from its folder shows "Install" while it is installed.
+  // Identity is the vendor AND the name. Matching on the name alone marked one
+  // vendor's skill as installed because another vendor's copy of it was.
   const skillKey = (name: string) => String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const installedNames = new Set(installed.map((skill) => skillKey(skill.name)));
+  const installedKeys = new Set(installed.map((skill) => skill.key || skillKey(skill.name)));
+  const rowKey = (row: { name: string; source?: string }) =>
+    row.source ? `${skillKey(row.source).replace(/-/g, "-")}:${skillKey(row.name)}` : skillKey(row.name);
 
   return (
     <>
@@ -130,7 +135,8 @@ export function MarketplacePanel() {
       ) : (
         <div className="skill-list">
           {rows.map((row) => {
-            const already = row.installed || installedNames.has(skillKey(row.name));
+            const key = rowKey(row);
+            const already = row.installed || (key ? installedKeys.has(key) : false);
             return (
               <div className="feature-card" key={row.source ? `${row.source}#${row.name}` : row.name}>
                 <div className="fc-head">
@@ -171,6 +177,7 @@ export function MarketplacePanel() {
                 <div className="fc-title-input" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Icon name="link" size={14} />
                   <span>{row.name}</span>
+                  {row.key && <span className="panel-hint" style={{ margin: 0, fontSize: 11 }}>{row.key.split(":")[0]}</span>}
                 </div>
                 <button
                   className="btn-ghost sm"

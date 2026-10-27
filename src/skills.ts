@@ -1,3 +1,4 @@
+import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 
@@ -22,6 +23,8 @@ export type SkillInfo = {
 export type RepositorySkill = {
   name: string;
   path: string;
+  /** `owner/repo:name` — the candidate's identity, unique per vendor. */
+  key: string;
 };
 
 export type InstalledSkill = {
@@ -29,6 +32,8 @@ export type InstalledSkill = {
   description: string;
   folder: string;
   skillMdPath: string;
+  /** Where it came from, when that is known. */
+  key?: string;
 };
 
 export type InstallResult = {
@@ -130,15 +135,18 @@ async function fetchRepoTree(owner: string, repo: string, branch: string, signal
 
 export async function listRepositorySkills(owner: string, repo: string, branch: string, signal?: AbortSignal): Promise<RepositorySkill[]> {
   const entries = await fetchRepoTree(owner, repo, branch, signal);
+  // Keyed by FOLDER, not by name: a repository that publishes `review` twice
+  // (or two vendors' skills under one repo) used to lose every duplicate after
+  // the first, silently.
   const skills = new Map<string, RepositorySkill>();
   for (const entry of entries) {
     if (entry.type !== 'blob' || !isSkillFile(entry.path)) continue;
     const folder = entry.path.split('/').slice(0, -1).join('/');
+    if (!folder || skills.has(folder)) continue;
     const name = sanitizeSkillName(folder.split('/').pop() ?? 'skill');
-    if (!folder || skills.has(name)) continue;
-    skills.set(name, { name, path: folder });
+    skills.set(folder, { name, path: folder, key: skillIdentity.skillKey({ owner, repo, name }) });
   }
-  return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
 }
 
 async function readRawFile(owner: string, repo: string, branch: string, filePath: string, signal?: AbortSignal): Promise<string> {
@@ -212,7 +220,14 @@ export async function listInstalledSkills(skillsDir: vscode.Uri): Promise<Instal
       }
       if (!skillMdPath) continue;
       const meta = parseSkillFrontmatter(content);
-      result.push({ name: meta.name ?? folder, description: meta.description ?? '', folder, skillMdPath });
+      const identity = skillIdentity.parseFolderName(folder);
+      result.push({
+        name: skillIdentity.skillDisplayName(folder, meta.name),
+        description: meta.description ?? '',
+        folder,
+        skillMdPath,
+        ...(identity.key ? { key: identity.key } : {}),
+      });
     }
   } catch { }
   return result.sort((a, b) => a.name.localeCompare(b.name));
@@ -221,10 +236,13 @@ export async function listInstalledSkills(skillsDir: vscode.Uri): Promise<Instal
 export async function readInstalledSkill(skillsDir: vscode.Uri, name: string): Promise<{ skill: InstalledSkill; content: string }> {
   const requested = name.trim();
   if (!requested) throw new Error('No installed skill specified.');
-  const safe = sanitizeSkillName(requested);
   const installed = await listInstalledSkills(skillsDir);
-  const skill = installed.find(item => item.folder === safe || item.name.toLowerCase() === requested.toLowerCase() || sanitizeSkillName(item.name) === safe);
-  if (!skill) throw new Error(`Installed skill '${requested}' was not found.`);
+  const found = skillIdentity.findSkill(installed, requested);
+  // A name two vendors publish is a choice, not a lookup: resolving it by list
+  // order silently loads the wrong vendor's instructions onto every request.
+  if (found.kind === 'ambiguous') throw new Error(skillIdentity.ambiguousSkillMessage(requested, found.candidates));
+  if (found.kind !== 'found') throw new Error(`Installed skill '${requested}' was not found.`);
+  const skill = found.skill;
   const fileName = path.basename(skill.skillMdPath);
   const uri = vscode.Uri.joinPath(skillsDir, skill.folder, fileName);
   const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
