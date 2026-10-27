@@ -52,12 +52,22 @@ export function parseSkillKey(key: string | undefined): SkillIdentity | undefine
 }
 
 /**
- * The install folder for a skill.
+ * Where a skill lives on disk: `<provider>/<skill>`.
  *
- * Unique per vendor so two `review` skills can both be installed, and prefixed
- * with the skill's own name so the folder still reads as the thing it holds.
+ * The provider is the repository it came from, so the tree reads as
+ * `skills/acme--skills/review` — one folder per vendor, one per skill under it. Two
+ * vendors that both publish `review` therefore coexist, which is the whole point:
+ * before this, the second install overwrote the first.
  */
-export function skillFolderName(identity: SkillIdentity): string {
+export function skillInstallPath(identity: SkillIdentity): string {
+  const name = slug(identity.name) || 'skill';
+  const owner = slug(identity.owner);
+  const repo = slug(identity.repo);
+  return owner && repo ? `${owner}--${repo}/${name}` : name;
+}
+
+/** The slot a skill occupied before the layout was namespaced. */
+export function legacySkillFolder(identity: SkillIdentity): string {
   const name = slug(identity.name) || 'skill';
   const owner = slug(identity.owner);
   const repo = slug(identity.repo);
@@ -73,7 +83,16 @@ export function skillFolderName(identity: SkillIdentity): string {
  * no side table that can drift.
  */
 export function parseFolderName(folder: string): { name: string; key?: string } {
-  const parts = String(folder ?? '').split('--').filter(Boolean);
+  const path = String(folder ?? '').replace(/\\/g, '/');
+  // Current layout: `<provider>/<skill>`, where the provider is `owner--repo`.
+  const [first, second] = path.split('/');
+  if (first && second) {
+    const provider = first.split('--').filter(Boolean);
+    if (provider.length >= 2) return { name: second, key: `${provider[0]}/${provider[1]}:${second}` };
+    return { name: second };
+  }
+  // Layout from before namespacing: `<skill>--<owner>--<repo>`.
+  const parts = path.split('--').filter(Boolean);
   const name = parts[0] ?? '';
   if (parts.length >= 3) return { name, key: `${parts[1]}/${parts[2]}:${name}` };
   return { name };
@@ -83,8 +102,8 @@ export function parseFolderName(folder: string): { name: string; key?: string } 
 export function skillDisplayName(folder: string, declared?: string): string {
   const declaredName = String(declared ?? '').trim();
   if (declaredName) return declaredName;
-  // `review--acme--skills` holds a skill called `review`.
-  return String(folder ?? '').split('--')[0] || String(folder ?? '');
+  // `acme--skills/review` and the older `review--acme--skills` both hold `review`.
+  return parseFolderName(folder).name || String(folder ?? '');
 }
 
 export type SkillLookup<T> =

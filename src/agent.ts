@@ -1008,7 +1008,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // The folder is namespaced by vendor so two skills of the same name can
       // both be installed; the name the agent uses stays the plain skill name.
       const skillName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? requested ?? 'skill');
-      const installName = skillIdentity.skillFolderName({ owner: reference.owner, repo: reference.repo, name: skillName });
+      const installName = skillIdentity.skillInstallPath({ owner: reference.owner, repo: reference.repo, name: skillName });
       await this.approve('edit', 'Install skill "' + installName + '"?', 'Source: ' + reference.owner + '/' + reference.repo + (folderPath ? ' (' + folderPath + ')' : '') + '\n\nThe skill will be installed into your global skills folder as \'' + installName + '\' and is available in every workspace. Its SKILL.md will be added to the agent\'s instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.');
       await installSkillFromRepository(this.skillsRoot(), { owner: reference.owner, repo: reference.repo, branch: reference.branch, folderPath, installName }, undefined, onProgress);
       const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};

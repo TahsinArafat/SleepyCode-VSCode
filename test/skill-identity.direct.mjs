@@ -28,16 +28,20 @@ test('a key survives a round trip', () => {
   assert.equal(identity.parseSkillKey(undefined), undefined);
 });
 
-test('two vendors of the same skill get different folders', () => {
-  assert.equal(identity.skillFolderName(acme), 'review--acme--skills');
-  assert.equal(identity.skillFolderName(other), 'review--other--agent-skills');
-  assert.notEqual(identity.skillFolderName(acme), identity.skillFolderName(other));
-  // Still reads as the skill it holds, and stays one safe path segment.
-  assert.match(identity.skillFolderName(acme), /^[a-z0-9-]+$/);
+test('a skill is stored as provider/skill, so two vendors coexist', () => {
+  assert.equal(identity.skillInstallPath(acme), 'acme--skills/review');
+  assert.equal(identity.skillInstallPath(other), 'other--agent-skills/review');
+  assert.notEqual(identity.skillInstallPath(acme), identity.skillInstallPath(other));
+  // Two safe path segments, no traversal.
+  for (const segment of identity.skillInstallPath(acme).split('/')) assert.match(segment, /^[a-z0-9-]+$/);
+  // The pre-namespacing slot is still readable, so installs from before this
+  // change keep working.
+  assert.equal(identity.legacySkillFolder(acme), 'review--acme--skills');
 });
 
 test('the display name stays the plain skill name', () => {
   // `/skill review` and the model's inventory read names, not vendors.
+  assert.equal(identity.skillDisplayName('acme--skills/review'), 'review');
   assert.equal(identity.skillDisplayName('review--acme--skills'), 'review');
   assert.equal(identity.skillDisplayName('review--acme--skills', 'Code Review'), 'Code Review');
   assert.equal(identity.skillDisplayName('plain'), 'plain');
@@ -77,7 +81,8 @@ test('a name only one vendor publishes still resolves', () => {
   assert.equal(identity.findSkill(installed, '  ').kind, 'missing');
 });
 test('the install folder alone recovers which vendor a skill came from', () => {
-  // No side table to drift: the identity is in the folder name.
+  // No side table to drift: the identity is in the path.
+  assert.deepEqual(identity.parseFolderName('acme--skills/review'), { name: 'review', key: 'acme/skills:review' });
   assert.deepEqual(identity.parseFolderName('review--acme--skills'), { name: 'review', key: 'acme/skills:review' });
   assert.deepEqual(identity.parseFolderName('docs--acme--my-skills'), { name: 'docs', key: 'acme/my-skills:docs' });
   // A skill installed before namespacing has no vendor, and must still resolve.

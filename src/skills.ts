@@ -201,10 +201,21 @@ export function parseSkillFrontmatter(markdown: string): { name?: string; descri
 export async function listInstalledSkills(skillsDir: vscode.Uri): Promise<InstalledSkill[]> {
   const result: InstalledSkill[] = [];
   try {
-    const folders = await vscode.workspace.fs.readDirectory(skillsDir);
-    for (const [folder, type] of folders) {
+    // Skills live at `<provider>/<skill>`, with installs from before namespacing
+    // sitting loose at the top level. Both are scanned so an existing install does
+    // not disappear from the list.
+    const entries: string[] = [];
+    for (const [name, type] of await vscode.workspace.fs.readDirectory(skillsDir)) {
       if ((type & vscode.FileType.Directory) === 0) continue;
-      const folderUri = vscode.Uri.joinPath(skillsDir, folder);
+      entries.push(name);
+      let nested: [string, vscode.FileType][] = [];
+      try { nested = await vscode.workspace.fs.readDirectory(vscode.Uri.joinPath(skillsDir, name)); } catch { /* a skill folder is not a provider folder */ }
+      for (const [child, childType] of nested) {
+        if (childType & vscode.FileType.Directory) entries.push(`${name}/${child}`);
+      }
+    }
+    for (const folder of entries) {
+      const folderUri = vscode.Uri.joinPath(skillsDir, ...folder.split('/'));
       let skillMdPath = '';
       let content = '';
       for (const fileName of SKILL_FILE_NAMES) {
@@ -261,8 +272,10 @@ export async function installSkillFromRepository(skillsDir: vscode.Uri, spec: { 
     totalBytes += entry.size ?? 0;
     if (totalBytes > MAX_DOWNLOAD_BYTES) throw new Error(`Skill '${spec.installName}' is too large to install (over ${Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024)} MB).`);
   }
-  const installName = sanitizeSkillName(spec.installName);
-  const targetDir = vscode.Uri.joinPath(skillsDir, installName);
+  // The install path is `<provider>/<skill>`; each segment is sanitized, so a
+  // repository name can never place files somewhere else.
+  const installPath = spec.installName.split('/').map(segment => sanitizeSkillName(segment)).filter(Boolean).join('/') || sanitizeSkillName(spec.installName);
+  const targetDir = vscode.Uri.joinPath(skillsDir, ...installPath.split('/'));
   await vscode.workspace.fs.createDirectory(targetDir);
   let writtenBytes = 0;
   for (let index = 0; index < files.length; index++) {
@@ -282,16 +295,17 @@ export async function installSkillFromRepository(skillsDir: vscode.Uri, spec: { 
     await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(content));
     onProgress?.(index + 1, files.length);
   }
-  const skillMdPath = `${SKILLS_GLOBAL_DIR}/${installName}/${SKILL_FILE_NAMES[0]}`;
-  return { name: installName, files: files.length, bytes: writtenBytes, skillMdPath };
+  const skillMdPath = `${SKILLS_GLOBAL_DIR}/${installPath}/${SKILL_FILE_NAMES[0]}`;
+  return { name: installPath, files: files.length, bytes: writtenBytes, skillMdPath };
 }
 
 export async function uninstallSkill(skillsDir: vscode.Uri, folder: string): Promise<void> {
   const raw = (folder || '').trim();
   if (!raw) throw new Error('No skill specified.');
-  const safeName = sanitizeSkillName(raw);
+  // `<provider>/<skill>`, or a single segment for an install from before that.
+  const safeName = raw.split('/').map(segment => sanitizeSkillName(segment)).filter(Boolean).join('/');
   if (!safeName) throw new Error(`Invalid skill folder '${raw}'.`);
-  const target = vscode.Uri.joinPath(skillsDir, safeName);
+  const target = vscode.Uri.joinPath(skillsDir, ...safeName.split('/'));
   const skillsPath = path.resolve(skillsDir.fsPath);
   const targetPath = path.resolve(target.fsPath);
   if (targetPath !== skillsPath && !targetPath.startsWith(skillsPath + path.sep)) throw new Error('Skill path escapes the skills directory.');
