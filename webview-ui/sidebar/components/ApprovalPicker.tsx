@@ -32,10 +32,14 @@ export function approvalPreset(policy?: ApprovalPolicy): Preset | undefined {
   return (mode === "ask" || mode === "review" || mode === "allow") && rules.every((rule) => rule.mode === mode) ? mode : "custom";
 }
 
-export function ApprovalPicker({ policy, disabled = false }: { policy?: ApprovalPolicy; disabled?: boolean }) {
+export function ApprovalPicker({ policy, disabled = false, openSignal }: { policy?: ApprovalPolicy; disabled?: boolean; openSignal?: number }) {
   const preset = approvalPreset(policy);
   const selected = OPTIONS.find((option) => option.id === preset);
   const [open, setOpen] = React.useState(false);
+  // `/permissions` asks for this menu; the token changes, so it opens.
+  React.useEffect(() => {
+    if (openSignal !== undefined) setOpen(true);
+  }, [openSignal]);
   const { present, exiting } = usePresence(open);
   const [position, setPosition] = React.useState<React.CSSProperties>({ left: 8, top: 8 });
   const triggerRef = React.useRef<HTMLButtonElement>(null);

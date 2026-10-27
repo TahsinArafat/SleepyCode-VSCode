@@ -871,6 +871,9 @@ export function App() {
   // preferences about the workspace.
   const [contextState, setContextState] = React.useState(DEFAULT_CONTEXT);
   // What this conversation has cost and consumed, computed host-side.
+  // A slash command can ask for a composer control; the token makes the request
+  // observable, so opening the same control twice works.
+  const [openControl, setOpenControl] = React.useState<{ name: string; token: number } | null>(null);
   const [sessionStats, setSessionStats] = React.useState<{ convId: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number } | undefined>(undefined);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
@@ -2365,12 +2368,12 @@ export function App() {
           // Slash commands post their own messages: they are the user's intent,
           // not text the model reads.
           onCommand={(message) => post(message)}
-          onOpenControl={(control) => {
-            // The four controls a command can open. `/model` and `/agent` are
-            // pills, and the others are panels — none of them is faked here.
-            if (control === "context") setContextState((state) => ({ ...state }));
-            post({ type: "openSettings", section: control === "approval" ? "behavior" : undefined });
-          }}
+          // `/model`, `/agent`, `/effort`, `/context` and `/permissions` open the
+          // control they name. They used to post `openSettings`, so all five
+          // landed on the settings home and looked broken.
+          openControl={openControl}
+          onNotice={(text) => setToasts((list) => [...list, { id: Date.now(), title: "Command", message: text, kind: "info" }])}
+          onOpenControl={(control) => setOpenControl({ name: control, token: Date.now() })}
           agentId={agentId}
           agentOptions={agentOptions}
           onSelectAgent={(id) => { setAgentId(id); post({ type: "selectAgent", agentId: id }); }}

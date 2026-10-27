@@ -61,8 +61,7 @@ export function RulesPanel({
           <Icon name="plus" size={12} /> New
         </button>
       </div>
-      <p className="panel-hint">Skills are specialized capabilities that help the agent accomplish specific tasks. Skills will be invoked by the agent when relevant.</p>
-      <p className="panel-hint">Skills are installed from the Skill Marketplace, or created here.</p>
+      <p className="panel-hint">Skills are specialized capabilities the agent loads when a task matches. Install them from the Skill Marketplace, or create one here.</p>
       {skills.length === 0 ? (
         <div className="rss-empty">
           <div className="rss-empty-title">No Skills Yet</div>

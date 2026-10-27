@@ -1100,14 +1100,12 @@ export function App() {
             <>
               <h1 className="page-title">Advanced</h1>
               <div className="section-label">Custom Instructions</div>
-              <Row title="System Prompt" desc="Prepended to the agent's system prompt for every request." stacked>
-                <textarea rows={6} value={s.systemPrompt} onChange={(e) => set("systemPrompt", e.target.value)} />
-              </Row>
-            </>
-          )}
+              <Group>
+                <Row title="System Prompt" desc="Prepended to the agent's system prompt for every request." stacked>
+                  <textarea rows={6} value={s.systemPrompt} onChange={(e) => set("systemPrompt", e.target.value)} />
+                </Row>
+              </Group>
 
-          {section === "advanced" && (
-            <>
               <div className="section-label">Extension log</div>
               <p className="panel-hint">
                 {logTally(logs).total === 0
@@ -1187,11 +1185,16 @@ export function App() {
 
         </div>
         </div>
-        <footer className="settings-actions" aria-label="Settings actions">
-          <div className="settings-actions-inner">
-            <button className="btn-save" onClick={save}>Save</button>
-          </div>
-        </footer>
+        {(section === "behavior" || section === "advanced") && (
+          <footer className="settings-actions" aria-label="Settings actions">
+            <div className="settings-actions-inner">
+              {/* Only where there is something to save: every other page either
+                  writes immediately or has nothing to write, and a Save button
+                  that does nothing reads as a broken app. */}
+              <button className="btn-save" onClick={save}>Save</button>
+            </div>
+          </footer>
+        )}
       </main>
     </div>
   );

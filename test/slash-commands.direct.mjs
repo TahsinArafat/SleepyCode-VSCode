@@ -183,3 +183,16 @@ test('the palette is only offered for a slash at the very start', () => {
   assert.equal(slash.slashOpen('/usr/local'), true, 'a bare slash word is still a command being typed');
   assert.equal(slash.slashOpen(' /plan'), false, 'leading space means it is prose');
 });
+test('a known command that cannot run is distinguishable from an unknown one', () => {
+  // `/compact` mid-run returns null, and the caller has to know the difference:
+  // swallowing an unknown word would eat the user's message, while letting a
+  // known-but-blocked one through sent the literal "/compact" to the model.
+  assert.equal(slash.isSlashCommand('/compact'), true);
+  assert.equal(slash.isSlashCommand('/nope'), false);
+  const running = { conversationId: 'c1', running: true };
+  assert.equal(slash.runSlashCommand('/compact', '', running), null);
+  assert.match(slash.slashBlockedReason('/compact', running), /turn is running/i);
+  assert.match(slash.slashBlockedReason('/compact', {}), /open conversation/i);
+  // An unknown word still produces nothing at all.
+  assert.equal(slash.runSlashCommand('/nope', '', {}), null);
+});

@@ -397,7 +397,8 @@ body {
 .modal-overlay {
 	position: fixed;
 	inset: 0;
-	z-index: 100;
+	/* Above menus and toasts: a blocking prompt must not be covered. */
+	z-index: 300;
 	background: color-mix(in srgb, #000 55%, transparent);
 	backdrop-filter: blur(3px);
 	-webkit-backdrop-filter: blur(3px);
@@ -3631,7 +3632,7 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	border-radius: 8px;
 	padding: 4px 0;
 	box-shadow: 0 8px 24px var(--shadow);
-	z-index: 60;
+	z-index: 240;
 	animation: pop-up 0.12s ease;
 }
 .model-item {
@@ -4224,6 +4225,7 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .composer-approval-trigger:hover { background: var(--surface-3); color: var(--fg); }
 .composer-approval-trigger.is-full-access { color: var(--warn); }
 .composer-approval-trigger:disabled { cursor: default; }
+/* Ladder: content < menus (200) < toasts (240) < modals (300). */
 .approval-menu { position: fixed; z-index: 80; max-width: calc(100vw - 16px); padding: 6px; border: 1px solid var(--line-soft); border-radius: 16px; background: var(--dropdown-bg); color: var(--fg); box-shadow: 0 8px 24px #00000026; font-size: 12px; }
 .approval-menu { width: 386px; overflow-y: auto; }
 .approval-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 6px 6px; font-weight: 400; }
@@ -4823,4 +4825,64 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	letter-spacing: .05em;
 	text-transform: uppercase;
 	color: var(--fg-faint, var(--fg-dim));
+}
+
+/* ============================================================ small gaps
+ * Classes the components reference that had no rule at all. Each is small, but a
+ * referenced-but-undefined class is a control rendering with no treatment — the
+ * defect class that produced the unstyled dialogs.
+ */
+/* The model-options switches sit in their own group; without spacing they collide
+   with the option rows above them. */
+.mo-thinking {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line-soft, var(--line));
+}
+/* The composer is in edit mode: tint it so it cannot be mistaken for a new message. */
+.chat-input.is-editing {
+	border-color: color-mix(in srgb, var(--accent, #6c7086) 55%, transparent);
+	background: color-mix(in srgb, var(--accent, #6c7086) 7%, transparent);
+}
+/* The label inside a mention pill; the parent sets colour, this keeps it from
+   inheriting a bare span rule later. */
+.mention-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The spark on a retrying card: accent, and it should read as "working". */
+.error-spark { color: var(--warn-line, var(--vscode-editorWarning-foreground, #d7ba7d)); flex: 0 0 auto; }
+/* An info toast is the ordinary one; the attention variant is the exception. */
+.toast-info { border-color: var(--line-strong, var(--line)); }
+/* A stopped subagent is not a failed one: it is finished by request, so it reads
+   as neutral-done rather than as the least important state. */
+.sub-status-cancelled {
+	color: var(--fg-dim);
+	background: var(--surface-2);
+	border-color: var(--line, transparent);
+}
+/* Step count beside the type/model chips — separated so it does not read as part
+   of the model name. */
+.sub-steps { flex: 0 0 auto; opacity: .75; }
+/* "Other…" in the question card opens a field; a chevron-ish cue says so. */
+.qc-option-custom { border-style: dashed; }
+.qc-option-custom::after { content: "…"; margin-left: auto; opacity: .6; }
+/* The outer modifier for an edit card; the header already has its own treatment. */
+.tool-card.edit-card { border-color: var(--line-soft, var(--line)); }
+/* Live output: a subtle tint is enough to say "still arriving". */
+.tool-result.streaming, .terminal-output.streaming { opacity: .92; }
+/* The h/m/s suffix under a duration. */
+.working-time-unit { font-size: .85em; color: var(--fg-dim); margin-left: 1px; }
+
+/* A queued row that is being steered into the running turn: visibly pending, and
+   not clickable again while it is. */
+.q-btn.queue-steering {
+	color: var(--fg-dim);
+	background: var(--surface-2);
+	cursor: default;
+}
+/* The selected row in the approval menu; `.is-full-access` already had a rule, the
+   ordinary selected state did not. */
+.approval-menu-option.is-selected {
+	background: color-mix(in srgb, var(--accent, #6c7086) 16%, transparent);
 }

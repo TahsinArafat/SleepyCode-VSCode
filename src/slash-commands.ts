@@ -214,3 +214,22 @@ export function matchSlashCommands(value: unknown): SlashCommand[] {
   const prefix = query.toLowerCase();
   return SLASH_COMMANDS.filter(command => command.id.startsWith(prefix));
 }
+/** True when this is a command this build knows, whether or not it can run now. */
+export function isSlashCommand(name: string): boolean {
+  return SLASH_COMMANDS.some(command => command.id === name);
+}
+
+/**
+ * Why a known command cannot run right now, for the case where the keystroke must
+ * be consumed anyway.
+ *
+ * Consuming it silently would be a dead menu row; letting it through sent the
+ * literal text `/compact` to the model, which is worse. So the caller shows this.
+ */
+export function slashBlockedReason(name: string, context: SlashContext): string {
+  if (name === '/compact') {
+    if (!context.conversationId) return 'Compaction needs an open conversation.';
+    if (context.running) return 'Compaction cannot start while a turn is running.';
+  }
+  return `${name} cannot run right now.`;
+}

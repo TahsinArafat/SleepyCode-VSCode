@@ -28,7 +28,7 @@ import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/w
 import { IDLE, canRecallAtEdge, recallNewer, recallOlder, type RecallState } from "../../../src/prompt-history.ts";
 import { CONTEXT_TOGGLES, contextCount, contextCountLabel } from "../../../src/context-panel.ts";
 import { contextLevel, contextPercent, formatCost, formatSpeed, formatTokens } from "../../../src/cost-core.ts";
-import { matchSlashCommands, parseSlash, runSlashCommand, slashOpen } from "../../../src/slash-commands.ts";
+import { isSlashCommand, matchSlashCommands, parseSlash, runSlashCommand, slashBlockedReason, slashOpen } from "../../../src/slash-commands.ts";
 
 /** Top-level @ menu categories. */
 /**
@@ -427,7 +427,10 @@ function SessionInfo({
   const menuRef = React.useRef<HTMLDivElement>(null);
   const menuId = React.useId();
   const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
-  const percent = contextPercent(usedTokens, contextLimit);
+  // A zero limit means "not reported", not "divided by zero": the readout would
+  // otherwise say Infinity% and paint a full bar.
+  const limit = contextLimit > 0 ? contextLimit : 128_000;
+  const percent = contextPercent(usedTokens, limit);
   const level = contextLevel(percent);
   const speedLabel = formatSpeed(speed);
   const total = formatTokens(tokens.input + tokens.output);
@@ -468,7 +471,7 @@ function SessionInfo({
           <div className="session-info-context">
             <div className="session-info-context-head">
               <span>Context</span>
-              <span>{formatTokens(usedTokens)} / {formatTokens(contextLimit)} · {percent}%</span>
+              <span>{formatTokens(usedTokens)} / {formatTokens(limit)} · {percent}%</span>
             </div>
             <div className="limit-track">
               <div className={"limit-fill " + level} style={{ width: percent + "%" }} />
@@ -485,6 +488,7 @@ function SessionInfo({
  * reindex action. The count is a promise about the request, so it counts only what
  * is actually sent. */
 function ContextPanel({
+  openSignal,
   state,
   onToggle,
   attachments,
@@ -496,8 +500,13 @@ function ContextPanel({
   attachments: Attachment[];
   onRemoveAttachment: (index: number) => void;
   onReindex: () => void;
+  openSignal?: number;
 }) {
   const [open, setOpen] = React.useState(false);
+  // A slash command asks for this picker; the signal changes, so it opens.
+  React.useEffect(() => {
+    if (openSignal !== undefined) setOpen(true);
+  }, [openSignal]);
   const { present, exiting } = usePresence(open);
   useOutsideClose(open, () => setOpen(false));
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -563,6 +572,7 @@ function ContextPanel({
 /** Agent pill. The list and the selection both come from the host, so the menu
  * cannot offer an agent that does not exist. */
 function AgentPicker({
+  openSignal,
   value,
   options,
   onSelect,
@@ -570,8 +580,13 @@ function AgentPicker({
   value: string;
   options: { id: string; name: string; role: string; description: string }[];
   onSelect: (id: string) => void;
+  openSignal?: number;
 }) {
   const [open, setOpen] = React.useState(false);
+  // A slash command asks for this picker; the signal changes, so it opens.
+  React.useEffect(() => {
+    if (openSignal !== undefined) setOpen(true);
+  }, [openSignal]);
   const { present, exiting } = usePresence(open);
   useOutsideClose(open, () => setOpen(false));
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -633,6 +648,7 @@ function AgentPicker({
 /** Reasoning-effort pill. Levels come from the host, so the menu cannot list a
  * level the request body does not understand. */
 function EffortPicker({
+  openSignal,
   value,
   options,
   onSelect,
@@ -640,8 +656,13 @@ function EffortPicker({
   value: string;
   options: { id: string; label: string; hint: string }[];
   onSelect: (id: string) => void;
+  openSignal?: number;
 }) {
   const [open, setOpen] = React.useState(false);
+  // A slash command asks for this picker; the signal changes, so it opens.
+  React.useEffect(() => {
+    if (openSignal !== undefined) setOpen(true);
+  }, [openSignal]);
   const { present, exiting } = usePresence(open);
   useOutsideClose(open, () => setOpen(false));
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -1016,6 +1037,7 @@ function HeadReset({ onReset }: { onReset: () => void }) {
 }
 
 function ModelPicker({
+  openSignal,
   models,
   modelList,
   selected,
@@ -1029,8 +1051,13 @@ function ModelPicker({
   onSelect: (m: string) => void;
   onSaveOptions: (modelId: string, options: ModelOption[]) => void;
   onResetOptions: (modelId: string) => void;
+  openSignal?: number;
 }) {
   const [open, setOpen] = React.useState(false);
+  // A slash command asks for this picker; the signal changes, so it opens.
+  React.useEffect(() => {
+    if (openSignal !== undefined) setOpen(true);
+  }, [openSignal]);
   const { present, exiting } = usePresence(open);
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
@@ -1234,6 +1261,8 @@ export function Composer({
   onOpenControl,
   activeConversationId,
   sessionStats,
+  openControl,
+  onNotice,
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -1299,6 +1328,11 @@ export function Composer({
   /** Slash commands that open a composer control instead of posting anything. */
   onOpenControl?: (control: "context" | "model" | "agent" | "approval") => void;
   activeConversationId?: string;
+  /** Which composer control a slash command asked to open, and a token that changes
+   * each time — the pickers open on the token rather than guessing. */
+  openControl?: { name: string; token: number } | null;
+  /** A one-line explanation of something the composer refused to do. */
+  onNotice?: (text: string) => void;
   /** Session readout, computed host-side. */
   sessionStats?: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: { input: number; cacheRead: number; cacheWrite: number; output: number; total: number | null }; speed?: number; contextLimit: number };
   /** Tokens consumed by the conversation so far (drives the context ring). */
@@ -1702,7 +1736,15 @@ export function Composer({
     const typed = parseSlash(slashText);
     const args = typed && typed.name === parsed.name ? typed.args : "";
     const outcome = runSlashCommand(parsed.name, args, { conversationId: activeConversationId, running: !!isRunning });
-    if (!outcome) return false;
+    if (!outcome) {
+      // `/compact` mid-run, for instance. Consume the keystroke either way: letting
+      // it through posted `/compact` as a chat message, which the model then read.
+      if (isSlashCommand(parsed.name) && !mentionOpenRef.current) {
+        onNotice?.(slashBlockedReason(parsed.name, { conversationId: activeConversationId, running: !!isRunning }));
+        return true;
+      }
+      return false;
+    }
     if (outcome.kind === "messages") {
       for (const message of outcome.messages ?? []) onCommand?.(message as OutMessage);
       clear();
@@ -2179,14 +2221,19 @@ export function Composer({
           <div className="composer-row">
             <ModePicker mode={mode} onMode={onMode} />
             {!editing && agentOptions.length > 0 && (
-              <AgentPicker value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
+              <AgentPicker openSignal={openControl?.name === "agent" ? openControl.token : undefined} value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
             )}
             {!editing && reasoningEfforts.length > 0 && (
-              <EffortPicker value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
+              <EffortPicker openSignal={openControl?.name === "effort" ? openControl.token : undefined} value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
             )}
-            {!editing && approvalAppliesInMode(mode) && <ApprovalPicker policy={approvalPolicy} />}
+            {!editing && approvalAppliesInMode(mode) && (
+              <ApprovalPicker openSignal={openControl?.name === "approval" ? openControl.token : undefined} policy={approvalPolicy} />
+            )}
             <span className="composer-spacer" />
-            <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
+            <ModelPicker
+              openSignal={openControl?.name === "model" ? openControl.token : undefined}
+              models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions}
+            />
           </div>
 
           {/* Row 2 — what goes in, and the action. */}
@@ -2199,6 +2246,7 @@ export function Composer({
             }} />
             {!editing && context && (
               <ContextPanel
+                openSignal={openControl?.name === "context" ? openControl.token : undefined}
                 state={context}
                 onToggle={(id, value) => onToggleContext?.(id, value)}
                 attachments={attachments}
