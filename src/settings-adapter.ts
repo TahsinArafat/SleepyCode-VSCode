@@ -374,6 +374,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // cleared the stored token, so there was no way to leave an account.
   'getAccount',
   'signOut',
+  // Hooks. The ported page edited shell commands that nothing ran; this build
+  // edits the rules the host actually evaluates.
+  'getHooks',
+  'saveHooks',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -540,7 +544,6 @@ export const HIDDEN_SETTINGS_SECTIONS = [
   'personas',
   'subagents',
   'indexing',
-  'hooks',
   // Backed by the base UI's own stores, which SleepyCode does not have: showing
   // them would present controls that write nowhere.
   'models',
@@ -563,6 +566,8 @@ export const VISIBLE_SETTINGS_SECTIONS = [
   'usage',
   'behavior',
   'rules',
+  // Backed now: the page edits the rules the host evaluates.
+  'hooks',
   'marketplace',
   'mcp',
   'advanced',

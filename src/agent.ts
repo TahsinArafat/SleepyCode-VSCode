@@ -1,3 +1,4 @@
+import * as hookRules from './hook-rules';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
@@ -1338,6 +1339,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private settingsPanelHost(): SettingsPanelHost {
     return {
       signIn: () => this.signIn(),
+      readHooks: async () => this.hookRules(),
+      writeHooks: async (rules) => {
+        // Validate on the way in: a rule the host cannot evaluate would sit in the
+        // list looking active while having no effect.
+        const next = hookRules.normalizeHookRules(rules);
+        await this.context.globalState.update('sleepycode.hooks', next);
+      },
       sleepyAccount: async () => {
         // The stored config is the truth about being signed in; the dashboard is
         // the only place the limits live, and it is allowed to be unreachable.

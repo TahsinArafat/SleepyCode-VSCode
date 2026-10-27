@@ -51,6 +51,10 @@ export interface SettingsPanelHost {
   sleepyAccount(): Promise<unknown>;
   /** Forget the stored first-party token: sign out. */
   signOut(): Promise<void>;
+  /** The hook rules this build evaluates, in the order they are checked. */
+  readHooks(): Promise<unknown[]>;
+  /** Replace the hook rules. */
+  writeHooks(rules: unknown): Promise<void>;
   /** Open a panel-supplied path after resolving and authorising it. */
   openPanelFile(path: unknown): Promise<boolean>;
   /** Scaffold a skill and open it. */
@@ -408,6 +412,14 @@ export class SettingsPanel {
       case 'completeSetup':
         await this.host.completeSetup();
         return;
+      case 'getHooks':
+        this.post({ type: 'hooks', hooks: await this.host.readHooks().catch(() => []) });
+        return;
+      case 'saveHooks': {
+        await this.host.writeHooks(message.hooks).catch(() => undefined);
+        this.post({ type: 'hooks', hooks: await this.host.readHooks().catch(() => []) });
+        return;
+      }
       case 'getAccount':
         this.post({ type: 'account', account: await this.host.sleepyAccount().catch(() => ({ loggedIn: false })) });
         return;

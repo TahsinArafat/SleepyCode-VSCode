@@ -1062,7 +1062,7 @@ export function App() {
             />
           )}
 
-          {section === "hooks" && !isSectionHidden("hooks") && <HooksPanel features={features} setFeatures={setFeatures} />}
+          {section === "hooks" && <HooksPanel />}
 
           {section === "behavior" && (
             <>

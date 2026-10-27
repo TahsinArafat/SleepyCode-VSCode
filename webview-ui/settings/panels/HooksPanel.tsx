@@ -1,216 +1,186 @@
 /*
- * Copyright (c) 2026 Pawan Osman <https://github.com/PawanOsman>
+ * Hook rules, as the host actually evaluates them.
  *
- * This file is part of OpenCursor — AI coding agent chat inside VS Code.
- * https://github.com/PawanOsman/OpenCursor
+ * This replaces a ported page that edited `{ event, command }` shell commands.
+ * Nothing ran those: the host has no command runner for hooks, and the values were
+ * not persisted at all — so every control on that page wrote nowhere. What is
+ * edited here is the rule shape `evaluateHooks` reads, so a rule saved in this
+ * window fires on the next request.
  *
- * Licensed under the MIT License. See LICENSE file in the project root.
+ * The rules, their validation and the field list come from `src/hook-rules.ts`,
+ * where they are tested without a browser.
  */
 
 import * as React from "react";
 import { Select } from "../../shared/Select";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
-import { FeatureConfig, HOOK_EVENTS, HookDef, HookEvent, uid } from "../features";
 import { Toggle } from "./Toggle";
+import {
+  HOOK_ACTIONS,
+  HOOK_ACTION_HINTS,
+  HOOK_ACTION_LABELS,
+  HOOK_EVENT_LABELS,
+  HOOK_EVENT_NAMES,
+  hookRuleProblem,
+  hookRuleSummary,
+  matcherFields,
+  newHookRule,
+  normalizeHookRules,
+} from "../../../src/hook-rules.ts";
+import type { HookRule } from "../../../src/hooks.ts";
 
-/** Unified label for a native (Cursor/Claude) event name; falls back to the raw name. */
-function unifiedLabel(nativeEvent: string, matcher?: string): string {
-  const hit = HOOK_EVENTS.find(
-    (e) => (e.cursor === nativeEvent || e.claude === nativeEvent) && (!e.claudeMatcher || !matcher || e.claudeMatcher === matcher)
-  );
-  return hit ? hit.label : nativeEvent;
-}
+type MatcherField = "tool" | "pathGlob" | "contains";
 
-// External hooks (Cursor hooks.json / Claude Code settings.json), CRUD via backend.
-interface ExternalHook {
-  source: "cursor-user" | "cursor-project" | "claude-user" | "claude-project";
-  event: string;
-  command: string;
-  matcher?: string;
-  ref: string;
-}
+const MATCHER_LABELS: Record<MatcherField, { label: string; hint: string; placeholder: string }> = {
+  tool: { label: "Tool", hint: "Only this tool, e.g. writeFile.", placeholder: "writeFile" },
+  pathGlob: { label: "Path", hint: "Glob the edit path must match.", placeholder: "**/*.env" },
+  contains: { label: "Contains", hint: "Text the command or message must contain.", placeholder: "rm -rf" },
+};
 
-const EXT_SOURCES: { id: ExternalHook["source"]; label: string; claude: boolean }[] = [
-  { id: "cursor-user", label: "Cursor — User (~/.cursor/hooks.json)", claude: false },
-  { id: "cursor-project", label: "Cursor — Project (.cursor/hooks.json)", claude: false },
-  { id: "claude-user", label: "Claude Code — User (~/.claude/settings.json)", claude: true },
-  { id: "claude-project", label: "Claude Code — Project (.claude/settings.json)", claude: true },
-];
-
-function ExternalHookEditor({
-  source,
-  initial,
-  onClose,
-}: {
-  source: (typeof EXT_SOURCES)[number];
-  initial?: ExternalHook;
-  onClose: () => void;
-}) {
-  // Unified events this source supports (Cursor or Claude has a native name for it).
-  const events = HOOK_EVENTS.filter((e) => (source.claude ? e.claude : e.cursor));
-  const initialUnified = initial
-    ? events.find((e) => (source.claude ? e.claude === initial.event : e.cursor === initial.event) && (!e.claudeMatcher || !initial.matcher || e.claudeMatcher === initial.matcher))?.id
-    : undefined;
-  const [event, setEvent] = React.useState<HookEvent>(initialUnified || events[0].id);
-  const [command, setCommand] = React.useState(initial?.command || "");
-  // Keep any custom Claude matcher the user had (unless it was just the unified default).
-  const [matcher, setMatcher] = React.useState(initial?.matcher || "");
-  const save = () => {
-    if (!command.trim()) return;
-    const spec = HOOK_EVENTS.find((e) => e.id === event)!;
-    const nativeEvent = source.claude ? spec.claude! : spec.cursor!;
-    const nativeMatcher = source.claude ? (matcher.trim() || spec.claudeMatcher) : undefined;
-    vscode.postMessage({
-      type: "saveExternalHook",
-      source: source.id,
-      hook: { ref: initial?.ref, event: nativeEvent, command: command.trim(), matcher: nativeMatcher },
-    });
-    onClose();
-  };
-  return (
-    <div className="feature-card">
-      <div className="fc-body">
-        <label className="fc-field">
-          <span>Event</span>
-          <Select value={event} onChange={(e) => setEvent(e.target.value as HookEvent)}>
-            {events.map((ev) => (
-              <option key={ev.id} value={ev.id}>{ev.label}</option>
-            ))}
-          </Select>
-        </label>
-        {source.claude && (
-          <label className="fc-field">
-            <span>Matcher (optional, e.g. Bash or Edit|Write)</span>
-            <input value={matcher} onChange={(e) => setMatcher(e.target.value)} placeholder={HOOK_EVENTS.find((e) => e.id === event)?.claudeMatcher || "*"} />
-          </label>
-        )}
-        <label className="fc-field">
-          <span>Command</span>
-          <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="node hook.js" autoFocus />
-        </label>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-secondary" onClick={save} disabled={!command.trim()}>Save</button>
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ExternalHooksSection({ hooks, error }: { hooks: ExternalHook[]; error?: string }) {
-  // editing: source id → editing existing hook or adding ("new")
-  const [editing, setEditing] = React.useState<{ source: ExternalHook["source"]; hook?: ExternalHook } | null>(null);
-  return (
-    <>
-      {error && <p className="panel-hint" style={{ color: "var(--vscode-errorForeground)" }}>{error}</p>}
-      {EXT_SOURCES.map((src) => {
-        const list = hooks.filter((h) => h.source === src.id);
-        return (
-          <div key={src.id} style={{ marginBottom: 16 }}>
-            <div className="section-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ flex: 1 }}>{src.label}</span>
-              <button className="icon-btn" title="Add hook" onClick={() => setEditing({ source: src.id })}>
-                <Icon name="plus" size={14} />
-              </button>
-            </div>
-            {list.length === 0 && !(editing && editing.source === src.id && !editing.hook) && (
-              <p className="panel-hint">No hooks configured.</p>
-            )}
-            {list.map((h) =>
-              editing && editing.hook?.ref === h.ref && editing.source === src.id ? (
-                <ExternalHookEditor key={h.ref} source={src} initial={h} onClose={() => setEditing(null)} />
-              ) : (
-                <div className="feature-card" key={h.ref}>
-                  <div className="fc-head">
-                    <span className="badge">{unifiedLabel(h.event, h.matcher)}</span>
-                    {h.matcher && <span className="badge">{h.matcher}</span>}
-                    <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.command}</code>
-                    <button className="icon-btn" title="Edit" onClick={() => setEditing({ source: src.id, hook: h })}>
-                      <Icon name="edit" size={14} />
-                    </button>
-                    <button
-                      className="icon-btn"
-                      title="Delete"
-                      onClick={() => vscode.postMessage({ type: "deleteExternalHook", source: src.id, ref: h.ref })}
-                    >
-                      <Icon name="trash" size={14} />
-                    </button>
-                  </div>
-                </div>
-              )
-            )}
-            {editing && editing.source === src.id && !editing.hook && (
-              <ExternalHookEditor source={src} onClose={() => setEditing(null)} />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
-export function HooksPanel({ features, setFeatures }: { features: FeatureConfig; setFeatures: (f: Partial<FeatureConfig>) => void }) {
-  const [external, setExternal] = React.useState<ExternalHook[]>([]);
-  const [extError, setExtError] = React.useState<string | undefined>();
+export function HooksPanel() {
+  const [rules, setRules] = React.useState<HookRule[]>([]);
+  const [loaded, setLoaded] = React.useState(false);
+  const [notice, setNotice] = React.useState<string>();
 
   React.useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      const m = e.data;
-      if (m?.type === "externalHooks") {
-        setExternal(m.hooks || []);
-        setExtError(m.error);
-      }
+    const handler = (event: MessageEvent) => {
+      const message = event.data;
+      if (message?.type !== "hooks") return;
+      setRules(normalizeHookRules(message.hooks));
+      setLoaded(true);
     };
     window.addEventListener("message", handler);
-    vscode.postMessage({ type: "getExternalHooks" });
+    vscode.postMessage({ type: "getHooks" });
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  const update = (i: number, patch: Partial<HookDef>) => {
-    const next = features.hooks.map((h, idx) => (idx === i ? { ...h, ...patch } : h));
-    setFeatures({ hooks: next });
+  /** Save, unless a rule is incomplete — then say which and leave the list alone. */
+  const save = (next: HookRule[]) => {
+    const problem = next.map(hookRuleProblem).find(Boolean);
+    if (problem) {
+      setNotice(problem);
+      return;
+    }
+    setNotice(undefined);
+    setRules(next);
+    vscode.postMessage({ type: "saveHooks", hooks: next });
   };
-  const remove = (i: number) => setFeatures({ hooks: features.hooks.filter((_, idx) => idx !== i) });
-  const add = () => setFeatures({ hooks: [...features.hooks, { id: uid("hook"), event: "afterRun", command: "", enabled: true }] });
+
+  const patch = (index: number, change: Partial<HookRule>) => {
+    setRules((current) => current.map((rule, i) => (i === index ? { ...rule, ...change } : rule)));
+  };
 
   return (
     <>
       <h1 className="page-title">Hooks</h1>
-      <div className="section-label">Lifecycle Hooks</div>
-      <p className="panel-hint">Rules evaluated on agent lifecycle events. A rule can log, warn, block, or require approval when it matches the event, tool, path or text it is given.</p>
-      {features.hooks.map((h, i) => (
-        <div className="feature-card" key={h.id}>
-          <div className="fc-head">
-            <Select aria-label="Hook event" value={h.event} onChange={(e) => update(i, { event: e.target.value as HookDef["event"] })}>
-              {HOOK_EVENTS.map((ev) => (
-                <option key={ev.id} value={ev.id}>
-                  {ev.label}
-                </option>
+      <p className="panel-hint">
+        Rules checked on agent lifecycle events. A matching rule can log, warn, block, or ask before continuing. Rules
+        are evaluated in order, and the first one that blocks stops the action.
+      </p>
+
+      {loaded && rules.length === 0 && (
+        <div className="empty-card">No hook rules yet. Add one to warn, log or block on a lifecycle event.</div>
+      )}
+
+      {rules.map((rule, index) => {
+        const fields = matcherFields(rule.event);
+        return (
+          <div className="feature-card" key={rule.id}>
+            <div className="fc-head">
+              <div className="fc-title-input" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Icon name="infinity" size={14} />
+                <span>{hookRuleSummary(rule)}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Toggle checked={rule.enabled !== false} onChange={(enabled) => save(rules.map((item, i) => (i === index ? { ...item, enabled } : item)))} />
+                <button
+                  className="btn-ghost sm"
+                  title="Remove this rule"
+                  onClick={() => save(rules.filter((_, i) => i !== index))}
+                >
+                  <Icon name="trash" size={13} />
+                </button>
+              </div>
+            </div>
+
+            <div className="fc-body" style={{ display: "grid", gap: 10 }}>
+              <label>
+                Name
+                <input value={rule.name} onChange={(event) => patch(index, { name: event.target.value })} onBlur={() => save(rules)} />
+              </label>
+              <label>
+                Event
+                <Select
+                  aria-label="Hook event"
+                  value={rule.event}
+                  onChange={(event) => {
+                    const next = event.target.value as HookRule["event"];
+                    // Matchers an event cannot carry would look active and never fire.
+                    const allowed = matcherFields(next);
+                    const matcher = rule.matcher
+                      ? Object.fromEntries(Object.entries(rule.matcher).filter(([key]) => allowed.includes(key as MatcherField)))
+                      : undefined;
+                    save(rules.map((item, i) => (i === index ? { ...item, event: next, matcher: matcher && Object.keys(matcher).length ? (matcher as HookRule["matcher"]) : undefined } : item)));
+                  }}
+                >
+                  {HOOK_EVENT_NAMES.map((name) => (
+                    <option key={name} value={name}>{HOOK_EVENT_LABELS[name]}</option>
+                  ))}
+                </Select>
+              </label>
+              {fields.map((field) => (
+                <label key={field}>
+                  {MATCHER_LABELS[field].label}
+                  <input
+                    value={rule.matcher?.[field] ?? ""}
+                    placeholder={MATCHER_LABELS[field].placeholder}
+                    title={MATCHER_LABELS[field].hint}
+                    onChange={(event) => {
+                      const matcher = { ...(rule.matcher ?? {}) };
+                      const value = event.target.value.trim();
+                      if (value) matcher[field] = value;
+                      else delete matcher[field];
+                      patch(index, { matcher: Object.keys(matcher).length ? matcher : undefined });
+                    }}
+                    onBlur={() => save(rules)}
+                  />
+                </label>
               ))}
-            </Select>
-            <Toggle label={`Enable ${HOOK_EVENTS.find(event => event.id === h.event)?.label ?? h.event} hook`} checked={h.enabled} onChange={(v) => update(i, { enabled: v })} />
-            <button className="icon-btn" onClick={() => remove(i)} title="Remove">
-              <Icon name="trash" size={14} />
-            </button>
+              <label>
+                Action
+                <Select
+                  aria-label="Hook action"
+                  value={rule.action}
+                  onChange={(event) => save(rules.map((item, i) => (i === index ? { ...item, action: event.target.value as HookRule["action"] } : item)))}
+                >
+                  {HOOK_ACTIONS.map((action) => (
+                    <option key={action} value={action}>{HOOK_ACTION_LABELS[action]}</option>
+                  ))}
+                </Select>
+              </label>
+              <p className="row-desc" style={{ margin: 0 }}>{HOOK_ACTION_HINTS[rule.action]}</p>
+              <label>
+                Message
+                <input
+                  value={rule.message ?? ""}
+                  placeholder={rule.action === "block" || rule.action === "requireApproval" ? "Required: what is wrong and what to do instead" : "Shown or logged when the rule matches"}
+                  onChange={(event) => patch(index, { message: event.target.value })}
+                  onBlur={() => save(rules)}
+                />
+              </label>
+            </div>
           </div>
-          <div className="fc-body">
-            <label className="fc-field">
-              <span>Command</span>
-              <input value={h.command} onChange={(e) => update(i, { command: e.target.value })} placeholder="pnpm lint" />
-            </label>
-          </div>
-        </div>
-      ))}
-      <div className="panel-actions">
-        <button className="btn-ghost" onClick={add}>
-          <Icon name="plus" size={14} /> Add Hook
+        );
+      })}
+
+      {notice && <p className="row-desc" role="alert">{notice}</p>}
+
+      <div className="index-actions">
+        <button className="btn-secondary" onClick={() => save([...rules, newHookRule(rules)])}>
+          <Icon name="plus" /> Add a rule
         </button>
       </div>
-
-      <div className="section-label" style={{ marginTop: 24 }}>External Hooks</div>
-      <p className="panel-hint">Hooks from Cursor (<code>hooks.json</code>) and Claude Code (<code>settings.json</code>), user and project level. Changes write directly to those files.</p>
-      <ExternalHooksSection hooks={external} error={extError} />
     </>
   );
 }
