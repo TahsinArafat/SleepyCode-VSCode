@@ -53,6 +53,14 @@ export interface SettingsPanelHost {
   createSkill(): Promise<{ ok: boolean; text: string }>;
   /** Remove an installed skill, named by its SKILL.md path. */
   deleteSkill(path: unknown): Promise<{ ok: boolean; text: string }>;
+  /** Recent extension log entries, newest last. */
+  readLogs(): Promise<unknown[]>;
+  /** Clear the recorded extension log. */
+  clearLogs(): Promise<void>;
+  /** Return every setting to its default. Irreversible. */
+  resetAll(): Promise<void>;
+  /** Remember that first-run setup has been dealt with. */
+  completeSetup(): Promise<void>;
   /** Clear the recorded local usage. */
   resetUsage(): Promise<void>;
   /** Store chat preferences for this workspace. */
@@ -86,11 +94,12 @@ export class SettingsPanel {
   }
 
   /** Open the settings window, revealing the existing one if it is already up. */
-  static show(context: vscode.ExtensionContext, host: SettingsPanelHost, section?: string): SettingsPanel {
+  static show(context: vscode.ExtensionContext, host: SettingsPanelHost, section?: string, firstRun = false): SettingsPanel {
     if (SettingsPanel.current) {
       SettingsPanel.current.panel.reveal();
       void SettingsPanel.current.pushAll();
       if (section) SettingsPanel.current.post({ type: 'navigate', section });
+      if (firstRun) SettingsPanel.current.post({ type: 'firstRun' });
       return SettingsPanel.current;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -115,6 +124,7 @@ export class SettingsPanel {
     // Posted after the HTML is set: the app only starts listening on mount, so
     // an earlier navigate would be lost.
     if (section) setTimeout(() => instance.post({ type: 'navigate', section }), 150);
+    if (firstRun) setTimeout(() => instance.post({ type: 'firstRun' }), 160);
     return instance;
   }
 
@@ -342,6 +352,24 @@ export class SettingsPanel {
         if (result.ok) await this.pushFeatures();
         return;
       }
+      case 'getLogs':
+        // The host has always kept these; nothing could read them from the window.
+        this.post({ type: 'logs', entries: await this.host.readLogs().catch(() => []) });
+        return;
+      case 'clearLogs':
+        await this.host.clearLogs();
+        this.post({ type: 'logs', entries: [] });
+        return;
+      case 'resetAllSettings':
+        await this.host.resetAll();
+        // Re-read everything: the window is now showing values that were just
+        // replaced, and leaving them on screen would be a lie.
+        await this.pushAll();
+        this.post({ type: 'resetDone' });
+        return;
+      case 'completeSetup':
+        await this.host.completeSetup();
+        return;
       case 'signIn':
         // The window's only provider action. Compatibility-endpoint API keys have
         // no editor here (that section is hidden), so this is what a signed-out

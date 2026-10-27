@@ -356,6 +356,11 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   'openEditorSettings',
   'openKeyboardShortcuts',
   'openExternal',
+  // The three settings surfaces the window gained alongside the classic ones.
+  'getLogs',
+  'clearLogs',
+  'resetAllSettings',
+  'completeSetup',
 ]);
 
 /** True when the settings window asked for something this build can serve. */

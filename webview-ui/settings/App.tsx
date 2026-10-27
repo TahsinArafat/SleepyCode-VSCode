@@ -20,6 +20,19 @@ import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
 import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
+import {
+  FIRST_RUN_ACTION,
+  FIRST_RUN_BODY,
+  FIRST_RUN_DISMISS,
+  FIRST_RUN_TITLE,
+  RESET_CONSEQUENCE,
+  isResetArmed,
+  logEmptyText,
+  logLines,
+  logTally,
+  nextResetClicks,
+  resetLabel,
+} from "../../src/settings-extras.ts";
 import { MarketplacePanel } from "./panels/MarketplacePanel";
 
 interface Settings {
@@ -617,6 +630,11 @@ export function App() {
   // installed skill, a name already taken), and a refusal that shows nowhere
   // reads as a button that did nothing.
   const [panelNotice, setPanelNotice] = React.useState<{ text: string; error: boolean } | null>(null);
+  // First-run setup, the danger-zone counter, and the log viewer.
+  const [firstRun, setFirstRun] = React.useState(false);
+  const [resetClicks, setResetClicks] = React.useState(0);
+  const [resetArmed, setResetArmed] = React.useState(false);
+  const [logs, setLogs] = React.useState<unknown[]>([]);
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
@@ -698,6 +716,14 @@ export function App() {
         setOllamaStatus(msg.status);
       } else if (msg.type === "ollamaModels") {
         setOllamaModels(msg.models || []);
+      } else if (msg.type === "firstRun") {
+        setFirstRun(true);
+      } else if (msg.type === "logs") {
+        setLogs(msg.entries || []);
+      } else if (msg.type === "resetDone") {
+        setResetArmed(false);
+        setResetClicks(0);
+        setPanelNotice({ text: "Every setting is back to its default.", error: false });
       } else if (msg.type === "panelNotice") {
         setPanelNotice({ text: msg.text || "", error: !!msg.error });
       } else if (msg.type === "oauthStatus") {
@@ -718,6 +744,8 @@ export function App() {
   // Refresh usage numbers whenever the Usage & Quota page is opened.
   React.useEffect(() => {
     if (section === "usage") vscode.postMessage({ type: "getUsage" });
+    // Logs are only useful fresh; read them when the page is opened.
+    if (section === "advanced") vscode.postMessage({ type: "getLogs" });
   }, [section]);
 
   // Fetch models across every enabled provider (grouped). Disabled providers are skipped.
@@ -778,6 +806,16 @@ export function App() {
         <div className="settings-page">
         <div className="content-inner" key={section}>
           {sectionNotice && <div className="panel-hint" role="status" style={{ marginTop: 0 }}>{sectionNotice}</div>}
+          {firstRun && (
+            <div className="first-run" role="dialog" aria-label={FIRST_RUN_TITLE}>
+              <div className="first-run-title">{FIRST_RUN_TITLE}</div>
+              <p className="first-run-body">{FIRST_RUN_BODY}</p>
+              <div className="first-run-actions">
+                <button className="btn-primary" onClick={() => { setFirstRun(false); vscode.postMessage({ type: "completeSetup" }); vscode.postMessage({ type: "signIn" }); }}>{FIRST_RUN_ACTION}</button>
+                <button className="btn-ghost" onClick={() => { setFirstRun(false); vscode.postMessage({ type: "completeSetup" }); }}>{FIRST_RUN_DISMISS}</button>
+              </div>
+            </div>
+          )}
           {panelNotice?.text && (
             <div className="panel-hint" role={panelNotice.error ? "alert" : "status"} style={{ marginTop: 0 }}>{panelNotice.text}</div>
           )}
@@ -1054,6 +1092,43 @@ export function App() {
             </>
           )}
 
+          {section === "advanced" && (
+            <>
+              <div className="section-label">Extension log</div>
+              <p className="panel-hint">
+                {logTally(logs).total === 0
+                  ? logEmptyText()
+                  : `${logTally(logs).total} entries · ${logTally(logs).error} error${logTally(logs).error === 1 ? "" : "s"}, ${logTally(logs).warn} warning${logTally(logs).warn === 1 ? "" : "s"}.`}
+              </p>
+              <div className="log-actions">
+                <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "getLogs" })}>Refresh</button>
+                <button className="btn-ghost" onClick={() => vscode.postMessage({ type: "clearLogs" })}>Clear</button>
+              </div>
+              {logLines(logs).length > 0 && (
+                <pre className="log-view" aria-label="Extension log">{logLines(logs).join("\n")}</pre>
+              )}
+
+              <div className="section-label">Danger zone</div>
+              <p className="panel-hint">{RESET_CONSEQUENCE}</p>
+              {/* Three clicks, and leaving the button disarms it: a single press
+                  that wipes every setting is a trap. */}
+              <button
+                className={"btn-secondary danger" + (resetArmed ? " armed" : "")}
+                onClick={() => {
+                  const next = nextResetClicks(resetClicks, "click");
+                  setResetClicks(next);
+                  if (isResetArmed(next)) {
+                    setResetArmed(true);
+                    vscode.postMessage({ type: "resetAllSettings" });
+                  }
+                }}
+                onMouseLeave={() => setResetClicks(0)}
+                onBlur={() => setResetClicks(0)}
+              >
+                {resetLabel(resetClicks)}
+              </button>
+            </>
+          )}
           {section === "about" && (
             <>
               <h1 className="page-title">About</h1>

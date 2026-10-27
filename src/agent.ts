@@ -1388,6 +1388,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           return { ok: false, text: `Could not delete the skill: ${errorMessage(error)}` };
         }
       },
+      readLogs: async () => this.context.globalState.get<unknown[]>(AgentViewProvider.LOG_KEY, []),
+      clearLogs: async () => {
+        await this.context.globalState.update(AgentViewProvider.LOG_KEY, []);
+      },
+      resetAll: async () => {
+        // Reuse the handler the classic webview's reset posted, so there is one
+        // definition of what "default" means.
+        await this.onMessage({ type: 'resetSettings' } as WebMessage);
+      },
+      completeSetup: async () => {
+        await this.context.globalState.update('sleepycode.setupComplete', true);
+      },
       resetUsage: async () => {
         await this.context.globalState.update('sleepycode.usage', []);
         this.log('info', 'usage.reset', 'local usage cleared');
@@ -1941,11 +1953,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // In React mode the OpenCursor settings window is the real surface: it is
     // the only structured editor for MCP servers. The classic webview keeps its
     // own settings view for the fallback path.
-    if (this.reactMode && !initialSetup) {
+    if (this.reactMode) {
       // The section is forwarded, not resolved here: the window owns which
       // sections exist, so a hidden or unknown id falls back there and can say
       // so on screen.
-      SettingsPanel.show(this.context, this.settingsPanelHost(), section);
+      //
+      // First run used to skip this branch and post the CLASSIC settings payload,
+      // which the React view has no handler for — so a new user's setup screen
+      // rendered nothing at all. The window shows its own first-run step now.
+      SettingsPanel.show(this.context, this.settingsPanelHost(), section, initialSetup);
       return;
     }
     const config = this.config();
