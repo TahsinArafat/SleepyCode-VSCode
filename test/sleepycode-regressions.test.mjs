@@ -946,3 +946,24 @@ test('the context ring is fed occupancy, and the session readout lives on it', (
   assert.doesNotMatch(composer, /className=\{"pill session-pill/);
   assert.match(composer, /<ContextRing[\s\S]{0,1400}cost=\{sessionStats\?\.cost\}/);
 });
+
+test('a portal popup is positioned where it is anchored', () => {
+  // `useAnchoredMenu` places portals with inline left/top, which does nothing
+  // without `position: fixed` — the element then lays out in normal flow after
+  // #root, below the fold, and the control that opens it looks dead. The session
+  // readout shipped that way: clicking the ring appeared to do nothing at all.
+  const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+  const rule = sidebarCss.match(/\.session-popover\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(rule, '.session-popover has a rule');
+  assert.match(rule, /position:\s*fixed/);
+});
+
+test('the webview follows the host when a run suppresses the transcript snapshot', () => {
+  const adapter = read('src/webview-adapter.ts');
+  const app = read('webview-ui/sidebar/App.tsx');
+  // Withholding the snapshot must not withhold the switch: clicking another tab
+  // during a run has to move the view.
+  assert.match(adapter, /return \{ type: 'conversationActive', activeId: message\.id \}/);
+  assertSource(app, /case "conversationActive":/);
+  assertSource(app, /setActiveId\(msg\.activeId\)/);
+});

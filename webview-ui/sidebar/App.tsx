@@ -1432,6 +1432,19 @@ export function App() {
           if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
           markRunning(msg.runningConvIds);
           break;
+        case "conversationActive":
+          // The host withholds a transcript snapshot while that conversation is
+          // streaming, and used to drop the switch with it — so clicking another
+          // tab mid-run changed nothing. The turn it lands on is already in
+          // `sessionsRef`: this webview has been receiving that run's events all
+          // along, keyed by conversation.
+          if (msg.activeId && msg.activeId !== activeIdRef.current) {
+            activeIdRef.current = msg.activeId;
+            setActiveId(msg.activeId);
+            setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
+            force();
+          }
+          break;
         case "loadConversation":
           setWorkspaceRoot(msg.workspaceRoot);
           setCompactionUndoable(msg.compactionUndoable === true);

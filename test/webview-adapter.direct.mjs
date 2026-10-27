@@ -411,10 +411,17 @@ test('requestAccepted passes through to the webview', () => {
 
 // ---------------------------------------------------------------- streaming guard
 
-test('transcript snapshots are skipped while the conversation is streaming', () => {
+test('a transcript snapshot suppressed mid-run still says which conversation is active', () => {
   const snapshot = { type: 'conversation', id: 'c1', items: [{ id: 'i', role: 'user', text: 'x', timestamp: 1 }] };
-  // A mid-run snapshot would replace the live turns and erase streamed text.
-  assert.equal(adapter.toReactMessageWhileStreaming(snapshot, true), null);
+  // The transcript is withheld — replaying it mid-run would replace the live
+  // turns and erase text that streamed but was never committed.
+  const out = adapter.toReactMessageWhileStreaming(snapshot, true);
+  assert.equal(out.type, 'conversationActive');
+  assert.equal(out.turns, undefined);
+  // ...but `activeId` is not a replay. Dropping the whole message meant clicking
+  // another tab during a run changed nothing: the webview never learned which
+  // conversation the host had switched to.
+  assert.equal(out.activeId, 'c1');
 });
 
 test('transcript snapshots flow once the run is over', () => {
@@ -2133,3 +2140,4 @@ test('starting a review is not a request to reveal a turn changes', () => {
   assert.equal(adapter.toSleepyMessage({ type: 'startReview', target: { type: 'commit', commit: '' } }), null);
   assert.equal(adapter.toSleepyMessage({ type: 'startReview' }), null);
 });
+

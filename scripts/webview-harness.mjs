@@ -1,87 +1,148 @@
-/**
- * Shared scaffolding for running the chat webview outside VS Code.
+/*
+ * Load the real, built sidebar bundle in a real browser.
  *
- * The webview is plain browser JS (`src/webview/runtime.ts`) wrapped in a shell
- * (`src/webview.ts`), so it can be rendered in a real browser: bundle the runtime, take the
- * real stylesheet and real body markup, stub `acquireVsCodeApi`, then drive it.
- * `scripts/ui-shots.mjs` screenshots the result; `scripts/perf-probe.mjs` measures it.
+ * Every UI bug reported against the React chat is webview code, and the webview
+ * only needs three things from VS Code: `acquireVsCodeApi`, a `message` event in,
+ * and `postMessage` out. That is small enough to stand in for, so a bug can be
+ * reproduced and re-tested without launching an editor:
+ *
+ *   import { openSidebar } from './webview-harness.mjs';
+ *   const app = await openSidebar();
+ *   await app.boot();                       // the host's opening payload
+ *   await app.click('.tab:nth-child(2)');
+ *   console.log(await app.sent());          // what the webview posted
+ *   await app.shot('/tmp/tabs.png');        // and what it looked like
+ *
+ * Requires `npm run build` first: it loads `dist/webview/sidebar.{js,css}`, so it
+ * always exercises the same bundle the extension ships.
  */
-import * as esbuild from 'esbuild';
-import { createRequire } from 'node:module';
+
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import path from 'node:path';
+import { chromium } from 'playwright';
 
-export const root = fileURLToPath(new URL('..', import.meta.url));
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** VS Code Dark Modern. The real host injects these; the harness has to supply them. */
-export const THEME = `:root{
---vscode-font-family:-apple-system,BlinkMacSystemFont,"Segoe WPC","Segoe UI",system-ui,"Ubuntu","Droid Sans",sans-serif;
---vscode-font-size:13px;--vscode-editor-font-family:Menlo,Consolas,"Liberation Mono",monospace;
---vscode-foreground:#cccccc;--vscode-editor-background:#1f1f1f;--vscode-editor-foreground:#cccccc;
---vscode-sideBar-background:#181818;--vscode-sideBar-foreground:#cccccc;
---vscode-editorWidget-background:#202020;--vscode-editorWidget-foreground:#cccccc;--vscode-editorWidget-border:#313131;
---vscode-input-background:#313131;--vscode-input-foreground:#cccccc;--vscode-input-border:#3c3c3c;--vscode-input-placeholderForeground:#7f7f7f;
---vscode-button-background:#0078d4;--vscode-button-foreground:#ffffff;--vscode-button-hoverBackground:#026ec1;
---vscode-list-hoverBackground:#2a2d2e;--vscode-list-activeSelectionBackground:#04395e;--vscode-list-activeSelectionForeground:#fff;
---vscode-focusBorder:#0078d4;--vscode-panel-background:#181818;--vscode-panel-border:#2b2b2b;
---vscode-textLink-foreground:#4daafc;--vscode-textLink-activeForeground:#4daafc;--vscode-textPreformat-foreground:#d7ba7d;
---vscode-textBlockQuote-background:#222222;--vscode-textBlockQuote-border:#454545;--vscode-textCodeBlock-background:#0d0d0d;
---vscode-errorForeground:#f85149;--vscode-descriptionForeground:#9d9d9d;--vscode-errorBackground:#5a1d1d;
---vscode-successBackground:#1c3b20;--vscode-statusBarItem-warningBackground:#7a6400;--vscode-statusBarItem-warningForeground:#fff;
---vscode-badge-background:#4d4d4d;--vscode-badge-foreground:#fff;--vscode-scrollbarSlider-background:#79797966;
---vscode-widget-shadow:#0000005c;--vscode-charts-blue:#3794ff;--vscode-charts-green:#89d185;--vscode-charts-red:#f14c4c;
---vscode-charts-yellow:#cca700;--vscode-charts-purple:#b180d7;--vscode-dropdown-background:#313131;--vscode-dropdown-border:#3c3c3c;
---vscode-progressBar-background:#0078d4;--vscode-contrastBorder:#fff;--vscode-contrastActiveBorder:#0078d4;
---vscode-menu-background:#1f1f1f;--vscode-menu-foreground:#cccccc;--vscode-menu-selectionBackground:#0078d4;
---vscode-menu-selectionForeground:#fff;--vscode-button-secondaryBackground:#313131;--vscode-button-secondaryHoverBackground:#3c3c3c;
-}`;
-
-/** Render the shipping webview (real runtime, real CSS, real markup) to a standalone HTML string. */
-export async function buildPage() {
-  const bundled = await esbuild.build({
-    entryPoints: [join(root, 'src/webview/runtime.ts')],
-    bundle: true, format: 'cjs', platform: 'neutral', write: false, target: 'es2022',
-  });
-  // Evaluating the CJS bundle by hand is deliberate: importing a generated .cjs from an
-  // ESM script wraps it in a module namespace, so the named export is not on the top level.
-  const cjsModule = { exports: {} };
-  new Function('module', 'exports', 'require', bundled.outputFiles[0].text)(cjsModule, cjsModule.exports, createRequire(import.meta.url));
-  const { getWebviewRuntime } = cjsModule.exports;
-  const runtime = getWebviewRuntime('MARK_URI.svg', true);
-  const stylesSrc = readFileSync(join(root, 'src/webview/styles.ts'), 'utf8');
-  const css = stylesSrc.match(/String\.raw`([\s\S]*?)`/)?.[1];
-  if (!css) throw new Error('could not extract WEBVIEW_STYLES from src/webview/styles.ts');
-
-  const shell = readFileSync(join(root, 'src/webview.ts'), 'utf8');
-  let body = shell.slice(shell.indexOf('<body>') + 6);
-  body = body.split('<script')[0].replace(/\$\{[^}]*\}/g, 'X');
-
-  return `<!doctype html><html><head><meta charset="UTF-8">
-<style>${THEME}</style><style>${css}</style>
-<style>html,body{height:100%;margin:0}</style></head><body>${body}
-<script>
-window.__posted=[];
-window.acquireVsCodeApi=()=>({postMessage:m=>window.__posted.push(m),getState:()=>undefined,setState:s=>window.__state=s});
-window.__emit=m=>window.dispatchEvent(new MessageEvent('message',{data:m}));
-window.__bootAt=performance.now();
-</script><script>${runtime}</script></body></html>`;
+/** A conversation summary as the host posts it. */
+export function conversation(id, title, extra = {}) {
+  return { id, title, updatedAt: Date.now(), archived: false, pinned: false, hasMessages: true, messageCount: 2, status: 'done', running: false, ...extra };
 }
 
-/** A transcript of `turns` user/assistant pairs, long enough to show superlinear cost. */
-export function transcript(turns) {
-  const items = [];
-  for (let i = 0; i < turns; i++) {
-    items.push({ id: `u${i}`, role: 'user', text: `Question ${i}: why does the auth refresh fire twice?`, timestamp: i * 2 });
-    items.push({
-      id: `a${i}`, role: 'assistant', timestamp: i * 2 + 1, model: 'claude-sonnet',
-      text: `Because \`refreshIfStale()\` is called from two paths.\n\n`
-        + `In \`src/sleepyai.ts:212\` the handler awaits the refresh, while the provider constructor fires it without awaiting.\n\n`
-        + `\`\`\`ts\nasync function refreshIfStale() {\n  if (!isStale()) return;\n  await refresh();\n}\n\`\`\`\n\n`
-        + `| path | awaits | result |\n| --- | --- | --- |\n| activation | yes | ok |\n| constructor | no | races |\n`,
-      work: [{ kind: 'task', tool: 'read_file', name: `src/sleepyai.ts:${i}`, done: true }],
-      seconds: 3,
-    });
-  }
-  return items;
+/** A transcript item pair, so a conversation has something to render. */
+export function turns(text) {
+  return [
+    { role: 'user', text: `${text} request` },
+    { role: 'assistant', blocks: [{ kind: 'text', text: `${text} answer` }] },
+  ];
+}
+
+export async function openSidebar({ width = 460, height = 820, headless = true } = {}) {
+  const browser = await chromium.launch({ headless });
+  const page = await browser.newPage({ viewport: { width, height } });
+
+  const css = readFileSync(path.join(root, 'dist/webview/sidebar.css'), 'utf8');
+  const js = readFileSync(path.join(root, 'dist/webview/sidebar.js'), 'utf8');
+  await page.setContent(`<!doctype html><html data-theme="dark" class="vscode-dark" style="--vscode-font-family: system-ui"><head><style>${css}</style></head><body class="vscode-dark"><div id="root"></div></body></html>`);
+  // The three things the webview needs from its host. Injected as a script tag
+  // rather than an init script: `setContent` reuses the document, so an init
+  // script never runs and the bundle dies on `acquireVsCodeApi is not defined`.
+  await page.addScriptTag({
+    content: `window.__sent = []; window.__state = undefined;
+      window.acquireVsCodeApi = function () {
+        return {
+          postMessage: function (message) { window.__sent.push(message); },
+          getState: function () { return window.__state; },
+          setState: function (state) { window.__state = state; },
+        };
+      };`,
+  });
+  await page.addScriptTag({ content: js });
+  await page.waitForSelector('#root > *', { timeout: 10_000 });
+
+  const app = {
+    page,
+    browser,
+
+    /** Post one host -> webview message and let React commit. */
+    async send(message, settle = 60) {
+      await page.evaluate((m) => window.postMessage(m, '*'), message);
+      await page.waitForTimeout(settle);
+      return app;
+    },
+
+    /** Everything the webview has posted since the last call, and clear it. */
+    async sent() {
+      return page.evaluate(() => window.__sent.splice(0));
+    },
+
+    async click(selector, settle = 80) {
+      await page.click(selector);
+      await page.waitForTimeout(settle);
+      return app;
+    },
+
+    async exists(selector) {
+      return (await page.$(selector)) !== null;
+    },
+
+    async text(selector) {
+      return page.evaluate((s) => document.querySelector(s)?.textContent ?? null, selector);
+    },
+
+    async count(selector) {
+      return page.evaluate((s) => document.querySelectorAll(s).length, selector);
+    },
+
+    /** The opening payload the host sends on `ready`. */
+    async boot({
+      activeId,
+      conversations = [],
+      mode = 'agent',
+      selectedModel = 'test-model',
+      workspaceRoot = '/tmp/workspace',
+      usedTokens = 0,
+      sessionStats,
+      /** Tabs the host restored from workspace storage. */
+      openTabs = conversations.map((entry) => entry.id),
+    } = {}) {
+      const active = conversations.find((entry) => entry.id === activeId);
+      await app.send({
+        type: 'initialState',
+        mode,
+        selectedModel,
+        activeId,
+        turns: active ? turns(active.title) : [],
+        personas: [],
+        activePersonaId: '',
+        hasProviders: true,
+        usedTokens,
+        workspaceRoot,
+        workspaceState: { openTabs, drafts: {} },
+        approvalPolicy: 'ask',
+        reasoningEffort: 'medium',
+        reasoningEfforts: [{ id: 'low', label: 'Low', hint: 'Faster' }, { id: 'medium', label: 'Medium', hint: 'Balanced' }, { id: 'high', label: 'High', hint: 'Slower' }],
+      }, 140);
+      await app.send({ type: 'configState', personas: [], activePersonaId: '', hasProviders: true, approvalPolicy: 'ask' });
+      await app.send({ type: 'modelsFetched', models: [selectedModel] });
+      if (conversations.length) {
+        await app.send({ type: 'conversations', list: conversations, activeId, runningConvIds: [] });
+        await app.send({ type: 'loadConversation', activeId, turns: active ? turns(active.title) : [], usedTokens, running: false, workspaceRoot });
+      }
+      if (sessionStats) await app.send({ type: 'sessionStats', ...sessionStats });
+      await app.sent();
+      return app;
+    },
+
+    async shot(file) {
+      await page.screenshot({ path: file, fullPage: false });
+      return file;
+    },
+
+    async close() {
+      await browser.close();
+    },
+  };
+
+  return app;
 }

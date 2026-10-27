@@ -4638,6 +4638,9 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
    figure in the popover behind it. The separate usage pill it replaced is gone,
    so the pill-only rules went with it. */
 .session-popover {
+	/* A portal is positioned with inline left/top, so without this it lays out in
+	   normal flow after #root — below the fold, i.e. "nothing pops up". */
+	position: fixed;
 	z-index: 40;
 	min-width: 210px;
 	padding: 10px 12px;

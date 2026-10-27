@@ -1056,7 +1056,11 @@ function panelPayload(message: SleepyMsg): { type: 'panel'; panel: string; rows:
  * run settles while every streaming event still goes straight through.
  */
 export function toReactMessageWhileStreaming(message: SleepyMsg, streaming: boolean): ReactMsg | null {
-  if (streaming && message?.type === 'conversation') return null;
+  // The transcript is withheld, not the switch: `activeId` is the only part of the
+  // snapshot that is not a replay. Dropping the whole message meant that clicking
+  // another tab during a run changed nothing, because the webview never learned
+  // which conversation the host had made active.
+  if (streaming && message?.type === 'conversation') return { type: 'conversationActive', activeId: message.id };
   return toReactMessage(message);
 }
 

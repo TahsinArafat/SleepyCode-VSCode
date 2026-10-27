@@ -123,6 +123,8 @@ export type InMessage =
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
   | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string; compactionUndoable?: boolean; compactionRedoable?: boolean }
+  /** Which conversation the host made active, with no transcript replayed. */
+  | { type: "conversationActive"; activeId: string }
   | { type: "error"; convId?: string; message: string }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
   | { type: "fileSearchResults"; requestId: number; items: MentionItem[] }
