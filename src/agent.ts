@@ -1403,8 +1403,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       resetModelOptions: async (modelId) => {
         await this.onMessage({ type: 'resetModelOptions', modelId } as WebMessage);
       },
-      indexReport: async () => indexReport.indexReport(this.projectIndex.snapshot),
-      rebuildIndex: async () => indexReport.indexReport(await this.ensureProjectIntelligence(true)),
+      indexReport: async () => this.publishIndexReport(),
+      rebuildIndex: async () => indexReport.indexReport(await this.ensureProjectIntelligence(true), Date.now(), { enabled: this.indexEnabled() }),
+      deleteIndex: async () => {
+        const root = this.workspaceRoot();
+        // Deleting has to reach the file, not just the in-memory copy: the next
+        // read would load the same index back and the button would look inert.
+        if (root) await this.projectIndex.clear(root.fsPath);
+        this.log('info', 'index.deleted', root?.fsPath ?? '(no workspace)');
+        return this.publishIndexReport();
+      },
+      setIndexEnabled: async (enabled) => {
+        const config = vscode.workspace.getConfiguration('sleepycode');
+        await config.update('repoIndex', Boolean(enabled), vscode.ConfigurationTarget.Global);
+        // Off means the cached copy must not answer the next question.
+        if (!enabled) this.projectIndex.invalidate();
+        this.postConfig();
+        return this.publishIndexReport();
+      },
       readPersonas: async () => ({ personas: this.allPersonas(), activePersonaId: this.defaultPersonaId() }),
       savePersona: async (persona) => {
         const draft = persona as { id?: unknown; name?: unknown; description?: unknown; prompt?: unknown };
@@ -6843,6 +6859,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** The persona a specific chat runs on: its own choice, else the default. */
   private personaIdFor(conversation: { personaId?: string } | undefined): string {
     return conversation?.personaId ? personas.personaById(this.allPersonas(), conversation.personaId).id : this.defaultPersonaId();
+  }
+
+  /** Whether the project index is switched on, for the Indexing page and the readout. */
+  private indexEnabled(): boolean {
+    return vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true) !== false;
+  }
+
+  /** The index readout the settings window renders: report plus whether it is on. */
+  private publishIndexReport(): unknown {
+    return indexReport.indexReport(this.projectIndex.snapshot, Date.now(), { enabled: this.indexEnabled() });
   }
 
   private async systemPrompt(root: vscode.Uri, agentId: string, personaId?: string): Promise<string> {

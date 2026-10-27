@@ -21,6 +21,8 @@ export interface IndexSnapshotLike {
 
 export interface IndexReport {
   state: 'empty' | 'ready';
+  /** False when indexing is switched off entirely: the index is not consulted. */
+  enabled: boolean;
   /** "12 of 340 files" — what was read, against what was found. */
   files: string;
   /** How old the index is, in words. */
@@ -52,9 +54,10 @@ function ageText(generatedAt: number | undefined, now: number): string {
  * An index that was never built and one that was built from nothing are different
  * facts, and both look like "0 files" — the headline says which.
  */
-export function indexReport(snapshot: IndexSnapshotLike | undefined, now = Date.now()): IndexReport {
+export function indexReport(snapshot: IndexSnapshotLike | undefined, now = Date.now(), options: { enabled?: boolean } = {}): IndexReport {
+  const enabled = options.enabled !== false;
   if (!snapshot || typeof snapshot !== 'object') {
-    return { state: 'empty', files: 'Not built yet', age: 'never built', stale: true, languages: [], frameworks: [], importantFiles: [] };
+    return { state: 'empty', enabled, files: 'Not built yet', age: 'never built', stale: true, languages: [], frameworks: [], importantFiles: [] };
   }
   const indexed = typeof snapshot.indexedFileCount === 'number' ? snapshot.indexedFileCount : 0;
   const total = typeof snapshot.fileCount === 'number' ? snapshot.fileCount : 0;
@@ -67,6 +70,7 @@ export function indexReport(snapshot: IndexSnapshotLike | undefined, now = Date.
   const generatedAt = snapshot.generatedAt;
   return {
     state: indexed > 0 ? 'ready' : 'empty',
+    enabled,
     files: indexed > 0 ? `${indexed} of ${total} files read` : `${total} files found, none read`,
     age: ageText(generatedAt, now),
     stale: typeof generatedAt !== 'number' || now - generatedAt > INDEX_FRESH_MS,

@@ -15,10 +15,13 @@ import * as React from "react";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
 import { indexReport, type IndexReport } from "../../../src/index-report.ts";
+import type { FeatureConfig } from "../features";
+import { Toggle } from "./Toggle";
 
-export function IndexPanel() {
+export function IndexPanel({ features, setFeatures }: { features: FeatureConfig; setFeatures: (patch: Partial<FeatureConfig>) => void }) {
   const [report, setReport] = React.useState<IndexReport | undefined>(undefined);
-  const [busy, setBusy] = React.useState(false);
+  const [busy, setBusy] = React.useState<false | "rebuild" | "delete">(false);
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
 
   React.useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -29,7 +32,7 @@ export function IndexPanel() {
       // quietly report "none read" for an index that is fine. The snapshot itself
       // never crosses the boundary: it carries every indexed file.
       const status = message.status;
-      setReport(status && typeof status.files === "string" ? (status as IndexReport) : indexReport(undefined));
+      setReport(status && typeof status.files === "string" ? (status as IndexReport) : indexReport(undefined, Date.now(), { enabled: features.indexingEnabled !== false }));
       setBusy(false);
     };
     window.addEventListener("message", handler);
@@ -38,8 +41,18 @@ export function IndexPanel() {
   }, []);
 
   const rebuild = () => {
-    setBusy(true);
+    setBusy("rebuild");
     vscode.postMessage({ type: "reindexIndex" });
+  };
+
+  const remove = () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setConfirmDelete(false);
+    setBusy("delete");
+    vscode.postMessage({ type: "deleteIndex" });
   };
 
   return (
@@ -56,11 +69,40 @@ export function IndexPanel() {
         <div className="fc-head">
           <div className="fc-title-input" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Icon name="database" size={14} />
+            <span>Index this workspace</span>
+          </div>
+          <Toggle
+            checked={features.indexingEnabled !== false}
+            onChange={(value) => setFeatures({ indexingEnabled: value })}
+            label="Enable indexing"
+          />
+        </div>
+        <div className="fc-body">
+          <p className="row-desc" style={{ margin: 0 }}>
+            Off means the agent reads files as it needs them, and nothing is indexed in the background.
+          </p>
+        </div>
+      </div>
+
+      <div className="feature-card" style={{ marginTop: 12 }}>
+        <div className="fc-head">
+          <div className="fc-title-input" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Icon name="database" size={14} />
             <span>{report ? report.files : "Reading the index…"}</span>
           </div>
-          <button className="btn-secondary" disabled={busy} onClick={rebuild}>
-            <Icon name="reset" /> {busy ? "Rebuilding…" : "Rebuild index"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn-secondary" disabled={!!busy || features.indexingEnabled === false} onClick={rebuild}>
+              <Icon name="reset" /> {busy === "rebuild" ? "Rebuilding…" : "Rebuild"}
+            </button>
+            <button
+              className={"btn-secondary" + (confirmDelete ? " danger" : "")}
+              disabled={!!busy || report?.state !== "ready"}
+              title={confirmDelete ? "Click again to delete the index for this workspace" : "Delete the index; it rebuilds on the next request"}
+              onClick={remove}
+            >
+              <Icon name="trash" /> {busy === "delete" ? "Deleting…" : confirmDelete ? "Delete?" : "Delete index"}
+            </button>
+          </div>
         </div>
         {report && (
           <div className="fc-body">

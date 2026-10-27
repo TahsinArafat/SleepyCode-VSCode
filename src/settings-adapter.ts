@@ -385,6 +385,8 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // its rebuild talked to an embedding store that does not exist here.
   'getIndexStatus',
   'reindexIndex',
+  'deleteIndex',
+  'setIndexEnabled',
   // Models: the same option store the chat's own model menu writes.
   'saveModelOptions',
   'resetModelOptions',

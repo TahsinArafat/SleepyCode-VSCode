@@ -803,7 +803,7 @@ export function App() {
             </>
           )}
 
-          {section === "indexing" && <IndexPanel />}
+          {section === "indexing" && <IndexPanel features={features} setFeatures={setFeatures} />}
 
           {section === "advanced" && (
             <>

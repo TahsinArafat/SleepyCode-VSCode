@@ -83,6 +83,10 @@ export interface SettingsPanelHost {
   indexReport(): Promise<unknown>;
   /** Rebuild the index now, and return the fresh report. */
   rebuildIndex(): Promise<unknown>;
+  /** Forget the index for this workspace, on disk as well as in memory. */
+  deleteIndex(): Promise<unknown>;
+  /** Switch the project index on or off, returning the fresh report. */
+  setIndexEnabled(enabled: boolean): Promise<unknown>;
   /** Open a panel-supplied path after resolving and authorising it. */
   openPanelFile(path: unknown): Promise<boolean>;
   /** Scaffold a skill and open it. */
@@ -473,6 +477,12 @@ export class SettingsPanel {
         return;
       case 'reindexIndex':
         this.post({ type: 'indexStatus', status: await this.host.rebuildIndex().catch(() => null) });
+        return;
+      case 'deleteIndex':
+        this.post({ type: 'indexStatus', status: await this.host.deleteIndex().catch(() => null) });
+        return;
+      case 'setIndexEnabled':
+        this.post({ type: 'indexStatus', status: await this.host.setIndexEnabled(message.enabled === true).catch(() => null) });
         return;
       case 'setActiveProvider':
         await this.host.setActiveProvider(String(message.id ?? '')).catch(() => undefined);

@@ -1101,3 +1101,22 @@ test('a persona is a prompt layer the host applies, not a label', () => {
   assertSource(composer, /<PersonaPicker value=\{personaId\} options=\{personas\}/);
   assertSource(read('webview-ui/sidebar/App.tsx'), /post\(\{ type: "setPersona", convId: activeId, personaId: id \}\)/);
 });
+
+test('the Indexing page controls the index it describes', () => {
+  // The page used to be a readout: it described a real index and offered nothing
+  // but Rebuild. Every control it now has must reach the thing it names.
+  const panel = read('webview-ui/settings/panels/IndexPanel.tsx');
+  assertSource(panel, /setFeatures\(\{ indexingEnabled: value \}\)/);
+  assert.match(panel, /vscode\.postMessage\(\{ type: "deleteIndex" \}\)/);
+  // The toggle's value already had a counterpart: `indexingEnabled` is
+  // `repoIndex`, the setting the indexer is actually gated on.
+  assert.match(read('src/feature-prefs.ts'), /if \(typeof input\.indexingEnabled === 'boolean'\) patch\.repoIndex = input\.indexingEnabled;/);
+  // Deleting must reach the file, or the next read loads the same index back and
+  // the button looks inert.
+  assert.match(read('src/project-index.ts'), /async clear\(rootPath: string\): Promise<void> \{/);
+  assert.match(agent, /await this\.projectIndex\.clear\(root\.fsPath\)/);
+  // Off means the cached copy must not answer the next question.
+  assert.match(agent, /if \(!enabled\) this\.projectIndex\.invalidate\(\);/);
+  // And the readout says which of those two states it is in.
+  assert.match(read('src/index-report.ts'), /enabled: boolean;/);
+});

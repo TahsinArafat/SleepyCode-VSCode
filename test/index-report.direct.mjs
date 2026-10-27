@@ -66,3 +66,15 @@ test('malformed snapshot fields are ignored rather than rendered', () => {
   assert.deepEqual(report.frameworks, ['Vue']);
   assert.deepEqual(report.importantFiles, []);
 });
+test('the report says whether indexing is on at all', () => {
+  // A read-only page that shows a healthy index while indexing is switched off
+  // would be describing something the agent never consults.
+  assert.equal(indexReport({ indexedFileCount: 3, fileCount: 9 }).enabled, true);
+  assert.equal(indexReport({ indexedFileCount: 3, fileCount: 9 }, Date.now(), { enabled: false }).enabled, false);
+  // …and a disabled index still reports what is on disk, so turning it back on
+  // does not look like data loss.
+  const disabled = indexReport({ indexedFileCount: 3, fileCount: 9 }, Date.now(), { enabled: false });
+  assert.equal(disabled.state, 'ready');
+  assert.match(disabled.files, /3 of 9 files read/);
+  assert.equal(indexReport(undefined, Date.now(), { enabled: false }).files, 'Not built yet');
+});

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import {
   detectFrameworks,
   extractImports,
@@ -156,6 +156,18 @@ export class ProjectIndexService {
       this.post({ type: 'projectIndex', status: 'error', text });
       throw error;
     }
+  }
+
+  /**
+   * Forget the index for one workspace: drop the in-memory copy and delete the
+   * file it was loaded from. Without this, "Delete index" could only clear the
+   * screen — the next read would load the same file back.
+   */
+  async clear(rootPath: string): Promise<void> {
+    this.invalidate(rootPath);
+    const file = this.storageFile(rootPath);
+    if (!file) return;
+    await rm(file, { force: true }).catch(() => undefined);
   }
 
   private storageFile(rootPath: string): string | undefined {

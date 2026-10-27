@@ -10,7 +10,9 @@ const adapter = await import('../src/settings-adapter.ts');
  */
 // Posts no reachable page makes: the embedding store and its ignore file belong to
 // a page this build no longer renders.
-const UNSUPPORTED_PANEL_POSTS = new Set(['setEmbedModel', 'syncIndex', 'deleteIndex', 'openCursorignore']);
+// `deleteIndex` left this set: the Indexing page now deletes the index the host
+// built, on disk as well as in memory.
+const UNSUPPORTED_PANEL_POSTS = new Set(['setEmbedModel', 'syncIndex', 'openCursorignore']);
 
 // The settings window is OpenCursor's, so its MCP page speaks OpenCursor's
 // config shape. SleepyCode stores its own. These tests pin both directions,
@@ -167,7 +169,7 @@ test('MCP sign-in messages are routed, not ignored', () => {
 
 test('unknown panel messages are ignored rather than forwarded', () => {
   assert.equal(adapter.isPanelMessage({ type: 'getSettings' }), true);
-  assert.equal(adapter.isPanelMessage({ type: 'deleteIndex' }), false);
+  assert.equal(adapter.isPanelMessage({ type: 'syncIndex' }), false);
   assert.equal(adapter.isPanelMessage({ type: 'llamacppStart' }), false);
   assert.equal(adapter.isPanelMessage(null), false);
 });
@@ -647,14 +649,16 @@ test('every message the settings window posts is allowed through', async () => {
 test('the embedding store is the only thing left unsupported', () => {
   // If this set ever grows, a reachable page is posting something the host drops.
   assert.deepEqual([...UNSUPPORTED_PANEL_POSTS].sort(), [
-    'deleteIndex', 'openCursorignore', 'setEmbedModel', 'syncIndex',
+    'openCursorignore', 'setEmbedModel', 'syncIndex',
   ]);
   for (const type of UNSUPPORTED_PANEL_POSTS) {
     assert.equal(adapter.isPanelMessage({ type }), false, `${type} should still be unsupported`);
   }
-  // Indexing answers now, so its page is reachable and its status is served.
+  // Indexing answers now, so its page is reachable and its controls are served.
   assert.equal(adapter.isPanelMessage({ type: 'getIndexStatus' }), true);
   assert.equal(adapter.isPanelMessage({ type: 'reindexIndex' }), true);
+  assert.equal(adapter.isPanelMessage({ type: 'deleteIndex' }), true);
+  assert.equal(adapter.isPanelMessage({ type: 'setIndexEnabled' }), true);
 });
 
 test('signIn reaches the host, because it is the only sign-in control in the window', () => {
