@@ -164,6 +164,12 @@ export type ApprovalMode = "allow" | "ask" | "review" | "deny";
 export interface ApprovalRequestInfo {
   requestId: string;
   convId: string;
+  /**
+   * Set once the user has answered. The card keeps its place and says what
+   * happened; deleting it left no record that an action was ever approved, and
+   * leaving it unanswered asked for a decision already made.
+   */
+  resolution?: "approved" | "rejected";
   /** Tool call this approval belongs to, so the prompt renders on that tool card. */
   callId?: string;
   toolName: string;

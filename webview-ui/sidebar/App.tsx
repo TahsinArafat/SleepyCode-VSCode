@@ -243,6 +243,7 @@ function ExploringSection({
   onImplement,
   onOpenSubagent,
   approvals,
+  onDecide,
 }: {
   tools: ToolBlock[];
   /** True when this is the trailing group of an in-flight run (keeps the
@@ -252,6 +253,7 @@ function ExploringSection({
   onOpenSubagent?: (callId: string) => void;
   /** Pending approval requests keyed by tool callId (rendered on the tool card). */
   approvals?: Record<string, ApprovalRequestInfo>;
+  onDecide?: (requestId: string, approved: boolean) => void;
 }) {
   const running = tools.some((t) => t.status === "running") || !!live;
   // Expanded while exploring, collapsed into the summary once the group settles.
@@ -291,7 +293,7 @@ function ExploringSection({
                 onOpenSubagent={onOpenSubagent}
                 awaitingApproval={!!(t.callId && approvals?.[t.callId])}
               />
-              {t.callId && approvals?.[t.callId] && <ApprovalCard request={approvals[t.callId]} inline />}
+              {t.callId && approvals?.[t.callId] && <ApprovalCard request={approvals[t.callId]} inline onDecide={(id, approved) => onDecide?.(id, approved)} />}
             </div>
           ))}
         </div>
@@ -532,12 +534,14 @@ function parentTaskCallId(turns: Turn[], nestedCallId: string): string | undefin
   return undefined;
 }
 
-const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, compaction }: {
+const AssistantContent = React.memo(function AssistantContent({ turn, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, compaction, onDecide }: {
   turn: AssistantTurn; running: boolean; phase?: string;
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
   /** Undo/redo availability and the handler, for the compaction marker. */
   compaction?: { undoable: boolean; redoable: boolean; onAction: (id: string) => void };
+  /** Records an approval decision so its prompt is replaced by the outcome. */
+  onDecide?: (requestId: string, approved: boolean) => void;
 }) {
   // Collapse duplicate plan cards before anything is rendered: SleepyCode's
   // stateful plan tool is re-called for progress, and the plan file is a second
@@ -564,8 +568,8 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
       if (block.kind === "verification") return <VerificationCard key={index} summary={block.summary} />;
       return <div className="block-group" key={index}>
         <ToolCard block={block} onImplement={onImplement} onOpenSubagent={onOpenSubagent} awaitingApproval={!!taskApprovals[block.callId]?.length} />
-        {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline />}
-        {taskApprovals[block.callId]?.map(request => <ApprovalCard key={request.requestId} request={request} />)}
+        {approvals[block.callId] && <ApprovalCard request={approvals[block.callId]} inline onDecide={(id, approved) => onDecide?.(id, approved)} />}
+        {taskApprovals[block.callId]?.map(request => <ApprovalCard key={request.requestId} request={request} onDecide={(id, approved) => onDecide?.(id, approved)} />)}
       </div>;
     });
   };
@@ -578,9 +582,11 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
 function SubagentChat({
   block,
   approvals,
+  onDecide,
 }: {
   block: import("./types").ToolBlock;
   approvals?: Record<string, ApprovalRequestInfo>;
+  onDecide?: (requestId: string, approved: boolean) => void;
 }) {
   const parentRunning = React.useContext(TaskActivityContext);
   const subDone = block.subStatus === "finished" || block.subStatus === "cancelled" || block.subStatus === "error";
@@ -685,7 +691,7 @@ const ACTION_LABEL: Record<ApprovalRequestInfo["actionType"], string> = {
 /** In-chat approval prompt rendered on the tool/action card. Approve has a
  *  dropdown mirroring the Behavior settings for this action type (options
  *  update the global policy too). The agent stays blocked until resolved. */
-function ApprovalCard({ request, inline }: { request: ApprovalRequestInfo; inline?: boolean }) {
+function ApprovalCard({ request, inline, onDecide }: { request: ApprovalRequestInfo; inline?: boolean; onDecide?: (requestId: string, approved: boolean) => void }) {
   const [menu, setMenu] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
@@ -696,8 +702,26 @@ function ApprovalCard({ request, inline }: { request: ApprovalRequestInfo; inlin
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [menu]);
-  const resolve = (msg: Omit<Extract<OutMessage, { type: "resolveApproval" }>, "type" | "requestId">) =>
+  // Optimistic: the prompt goes the instant it is answered, and the host's
+  // confirmation is what makes it permanent.
+  const resolve = (msg: Omit<Extract<OutMessage, { type: "resolveApproval" }>, "type" | "requestId">) => {
+    onDecide?.(request.requestId, msg.approve !== false);
     post({ type: "resolveApproval", requestId: request.requestId, ...msg });
+  };
+  // A decided prompt keeps its place in the transcript and says what happened,
+  // which is what the classic approval history card did.
+  if (request.resolution) {
+    const approved = request.resolution === "approved";
+    return (
+      <div className={"approval-card decided " + request.resolution} role="status">
+        <div className="approval-decided">
+          <Icon name={approved ? "check" : "close"} size={13} />
+          <span>{approved ? "Approved" : "Rejected"}</span>
+          <span className="approval-decided-subject">{ACTION_LABEL[request.actionType]}: {request.subject}</span>
+        </div>
+      </div>
+    );
+  }
   const label = ACTION_LABEL[request.actionType].toLowerCase();
   return (
     <div className={"approval-card" + (inline ? " inline" : "")} onClick={(e) => e.stopPropagation()}>
@@ -1433,7 +1457,15 @@ export function App() {
           });
           break;
         case "approvalResolved":
-          setApprovals((a) => ({ ...a, [msg.convId]: (a[msg.convId] || []).filter((r) => r.requestId !== msg.requestId) }));
+          // Marked, not removed: the card keeps its place and says what happened.
+          // Deleting it left no record an action was approved, and nothing
+          // removed it at all until the host started reporting the decision.
+          setApprovals((a) => ({
+            ...a,
+            [msg.convId]: (a[msg.convId] || []).map((r) =>
+              r.requestId === msg.requestId ? { ...r, resolution: msg.approved ? "approved" : "rejected" } : r,
+            ),
+          }));
           break;
         case "agentEvent": {
           const ev = msg.event;
@@ -1724,6 +1756,16 @@ export function App() {
     [compactionUndoable, compactionRedoable, activeId, isRunning],
   );
 
+  /** Mark an approval decided locally, so its prompt goes the moment it is answered. */
+  const decideApproval = React.useCallback((conversationId: string, requestId: string, approved: boolean) => {
+    setApprovals((a) => ({
+      ...a,
+      [conversationId]: (a[conversationId] || []).map((r) =>
+        r.requestId === requestId ? { ...r, resolution: approved ? "approved" : "rejected" } : r,
+      ),
+    }));
+  }, []);
+
   const closeTab = (id: string) => {
     if (uiPrefsRef.current.perTabDrafts) draftsRef.current.delete(id);
     setOpenTabs((tabs) => {
@@ -1950,7 +1992,7 @@ export function App() {
       >
         <TaskActivityContext.Provider value={isRunning}>
         {subBlock ? (
-          <SubagentChat block={subBlock} approvals={approvalsByCall} />
+          <SubagentChat block={subBlock} approvals={approvalsByCall} onDecide={(id, approved) => decideApproval(activeId ?? "", id, approved)} />
         ) : !hasProviders ? (
           <div className="setup-screen">
             <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="SleepyCode" />
@@ -2115,7 +2157,8 @@ export function App() {
                       <AssistantContent turn={turn} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
                         phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
                         onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
-                        compaction={compactionControls} />
+                        compaction={compactionControls}
+                        onDecide={(id, approved) => decideApproval(activeId ?? "", id, approved)} />
                     </div>
                     <div className="message-footer">
                       <span className="message-footer-meta">
@@ -2144,7 +2187,7 @@ export function App() {
           </button>
         )}
         {orphanApprovals.map((r) => (
-          <ApprovalCard key={r.requestId} request={r} />
+          <ApprovalCard key={r.requestId} request={r} onDecide={(id, approved) => decideApproval(activeId ?? "", id, approved)} />
         ))}
         {status.error && (
           <div className="status" style={{ padding: "0 14px" }}>

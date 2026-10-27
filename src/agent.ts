@@ -334,7 +334,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Timestamp of the last coalesced mid-run checkpoint write, per conversation. */
   private checkpointAtByConversation = new Map<string, number>();
   private notifySeq = 0;
-  private pendingNotifies = new Map<number, (choice: 'ok' | 'secondary' | 'cancel') => void>();
+  /**
+   * Prompts awaiting an answer. The approval context rides along so the decision
+   * can be reported back to the card it came from — without it nothing removed the
+   * card, and an answered approval asked for a decision already made.
+   */
+  private pendingNotifies = new Map<number, { resolve: (choice: 'ok' | 'secondary' | 'cancel') => void; approval?: { conversationId: string } }>();
   /**
    * Questions waiting on the user, keyed by tool call id. A run blocks on one of
    * these, so every entry must be resolved: by an answer, by abort, or by the
@@ -2458,10 +2463,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private async onMessage(message: WebMessage): Promise<void> {
     if (message.type === 'notifyResponse') {
-      const resolve = this.pendingNotifies.get(message.id);
-      if (resolve) {
+      const pending = this.pendingNotifies.get(message.id);
+      if (pending) {
         this.pendingNotifies.delete(message.id);
-        resolve(message.choice);
+        pending.resolve(message.choice);
+        // Tell the card it was answered. Without this nothing ever removed it, so
+        // an approval prompt stayed on screen asking for a decision already made.
+        if (pending.approval) {
+          this.post({
+            type: 'approvalResolved',
+            conversationId: pending.approval.conversationId,
+            requestId: String(message.id),
+            // "Allow once" is `ok`; everything else — reject, or a dismissal —
+            // is a refusal, which is what the card should say happened.
+            approved: message.choice === 'ok',
+          });
+        }
       }
       return;
     }
@@ -5922,7 +5939,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!this.view) return 'cancel';
     const id = ++this.notifySeq;
     return new Promise(resolve => {
-      this.pendingNotifies.set(id, resolve);
+      this.pendingNotifies.set(id, { resolve, approval: options.approval });
       this.post({
         type: 'notify',
         id,
@@ -5940,7 +5957,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private disposePendingNotifies(): void {
-    for (const resolve of this.pendingNotifies.values()) resolve('cancel');
+    for (const [id, pending] of this.pendingNotifies) {
+      pending.resolve('cancel');
+      if (pending.approval) {
+        this.post({ type: 'approvalResolved', conversationId: pending.approval.conversationId, requestId: String(id), approved: false });
+      }
+    }
     this.pendingNotifies.clear();
     // A question nobody can answer would otherwise leave the run blocked.
     for (const resolve of this.pendingQuestions.values()) resolve({});

@@ -4644,3 +4644,16 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .message-footer-meta { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-dim); min-width: 0; }
 .message-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
 .message-time { flex: 0 0 auto; }
+
+/* A decided approval keeps its place and states the outcome. */
+.approval-card.decided { padding: 4px 0; }
+.approval-decided {
+	display: inline-flex; align-items: center; gap: 6px;
+	font-size: 11px; color: var(--fg-dim);
+}
+.approval-card.decided.approved .approval-decided { color: var(--vscode-charts-green, #14b8a6); }
+.approval-card.decided.rejected .approval-decided { color: var(--fg-dim); }
+.approval-decided-subject {
+	color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	max-width: 46ch;
+}
