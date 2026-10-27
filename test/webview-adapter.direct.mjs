@@ -1758,3 +1758,44 @@ test('choosing a level posts the message the host already handles', () => {
     { type: 'selectReasoningEffort', effort: 'xhigh' },
   );
 });
+
+// ---------------------------------------------------------------- agent picker
+//
+// The classic composer had an agent menu; the React one had no selector at all,
+// so changing agent meant the Agents panel (a command) or typing @agent-id blind.
+
+test('the agent list and the selected agent reach the composer', () => {
+  const out = adapter.toReactMessage({
+    type: 'config',
+    agentId: 'apex',
+    agents: [{ id: 'default', name: 'SleepyCode' }, { id: 'apex', name: 'Apex (Builder)' }],
+  });
+  assert.equal(out.agentId, 'apex');
+  assert.deepEqual(out.agentOptions.map(o => o.id), ['default', 'apex']);
+  // The label is the short one the menu shows, not the stored name.
+  assert.equal(out.agentOptions[1].name, 'Apex');
+  assert.equal(out.agentOptions[1].role, 'Build');
+});
+
+test('a missing agent list is an empty list, not undefined', () => {
+  // A picker that receives undefined renders nothing at all, which reads as a
+  // missing feature rather than an empty one.
+  const out = adapter.toReactMessage({ type: 'config', agentId: 'default' });
+  assert.deepEqual(out.agentOptions, []);
+  assert.equal(out.agentId, 'default');
+});
+
+test('initialState carries the agents so the first paint has a picker', () => {
+  const out = adapter.buildInitialState({
+    agentId: 'forge',
+    agents: [{ id: 'forge', name: 'Forge (Reviewer)' }],
+  });
+  assert.equal(out.agentId, 'forge');
+  assert.equal(out.agentOptions[0].name, 'Forge');
+  assert.equal(out.agentOptions[0].role, 'Review');
+});
+
+test('selecting an agent posts the message the host already handles', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'selectAgent', agentId: 'pivot' }), { type: 'selectAgent', agentId: 'pivot' });
+  assert.equal(adapter.toSleepyMessage({ type: 'selectAgent', agentId: '' }), null);
+});

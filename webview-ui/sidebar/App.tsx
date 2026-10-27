@@ -766,6 +766,9 @@ export function App() {
   // accepts, so the menu cannot offer one the request body does not understand.
   const [reasoningEffort, setReasoningEffort] = React.useState("none");
   const [reasoningEfforts, setReasoningEfforts] = React.useState<{ id: string; label: string; hint: string }[]>([]);
+  // The agent in force and the agents to choose from, both from the host.
+  const [agentId, setAgentId] = React.useState("");
+  const [agentOptions, setAgentOptions] = React.useState<{ id: string; name: string; role: string; description: string; builtIn: boolean }[]>([]);
   const [workflowDialog, setWorkflowDialog] = React.useState<"goal" | "review" | "steer" | null>(null);
   const [historyResults, setHistoryResults] = React.useState<{ requestId: number; list: ConversationSummary[] }>();
   // Per-tab composer drafts. Key "" = brand-new chat (no backend id yet).
@@ -1170,6 +1173,8 @@ export function App() {
           setWorkspaceRoot(msg.workspaceRoot);
           if (msg.reasoningEffort) setReasoningEffort(msg.reasoningEffort);
           if (msg.reasoningEfforts) setReasoningEfforts(msg.reasoningEfforts);
+          if (msg.agentId) setAgentId(msg.agentId);
+          if (msg.agentOptions) setAgentOptions(msg.agentOptions);
           setApprovalPolicy(msg.approvalPolicy);
           setMode(msg.mode);
           setSelectedModel(msg.selectedModel || "");
@@ -1265,6 +1270,8 @@ export function App() {
         case "configState":
           if (msg.reasoningEffort) setReasoningEffort(msg.reasoningEffort);
           if (msg.reasoningEfforts) setReasoningEfforts(msg.reasoningEfforts);
+          if (msg.agentId) setAgentId(msg.agentId);
+          if (msg.agentOptions) setAgentOptions(msg.agentOptions);
           if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
           setPersonas(msg.personas || []);
           setHasProviders(!!msg.hasProviders);
@@ -2085,6 +2092,9 @@ export function App() {
           onRunNextQueued={() => runQueuedNow(queued.findIndex(item => !isQueuedSteering(item)))}
           draft={draft}
           prompts={promptsFromTurns(turns)}
+          agentId={agentId}
+          agentOptions={agentOptions}
+          onSelectAgent={(id) => { setAgentId(id); post({ type: "selectAgent", agentId: id }); }}
           reasoningEffort={reasoningEffort}
           reasoningEfforts={reasoningEfforts}
           onSelectReasoningEffort={(id) => { setReasoningEffort(id); post({ type: "selectReasoningEffort", effort: id }); }}

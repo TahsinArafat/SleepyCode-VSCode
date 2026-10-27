@@ -914,6 +914,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       workspaceState: this.readChatWorkspace(),
       uiPrefs: this.readChatPrefs(),
       reasoningEffort: selection?.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      agentId: selection?.agentId,
+      agents: this.allAgents(),
     }));
     // Queued prompts and goals are host state the webview holds a copy of. They
     // must be re-sent here or a reload shows an empty queue while the host still
@@ -6013,6 +6015,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       provider: selection.provider,
       approvalMode: this.config().approvalMode,
       agentId: selection.agentId,
+      // Built-ins then user agents, in the order the Agents panel shows them.
+      agents: this.allAgents(),
       reasoningEffort: selection.reasoningEffort,
       // Lets the composer say a folder is needed before the user types, rather
       // than after a message silently goes nowhere.

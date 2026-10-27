@@ -402,6 +402,76 @@ function usePickerNavigation(open: boolean, setOpen: React.Dispatch<React.SetSta
   return { focused, setFocused, close, show, triggerKey, menuKey };
 }
 
+/** Agent pill. The list and the selection both come from the host, so the menu
+ * cannot offer an agent that does not exist. */
+function AgentPicker({
+  value,
+  options,
+  onSelect,
+}: {
+  value: string;
+  options: { id: string; name: string; role: string; description: string }[];
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  useOutsideClose(open, () => setOpen(false));
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, menuRef);
+  const nav = usePickerNavigation(open, setOpen, triggerRef, menuRef, options.findIndex(o => o.id === value), options.length, maxH);
+  const meta = options.find(o => o.id === value) ?? options[0];
+  const pick = (id: string) => { if (!open) return; onSelect(id); nav.close(true); };
+  if (!options.length) return null;
+  return (
+    <button
+      type="button"
+      ref={triggerRef}
+      className="pill agent-pill"
+      aria-label={"Agent: " + (meta?.name ?? "default")}
+      aria-expanded={open}
+      aria-haspopup="menu"
+      aria-controls={open ? menuId : undefined}
+      title={meta?.description || meta?.name}
+      onKeyDown={nav.triggerKey}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (open) nav.close(); else nav.show();
+      }}
+    >
+      <Icon name="agent" />
+      <span>{meta?.name ?? "Agent"}</span>
+      <Icon name="chevD" className="cd" />
+      {present && createPortal(
+        <div ref={menuRef} id={menuId} role="menu" aria-label="Agent" className="mode-dropdown agent-dropdown"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, maxHeight: maxH, overflowY: "auto", pointerEvents: exiting ? "none" : undefined }} onKeyDown={nav.menuKey} onClick={event => event.stopPropagation()}>
+          {options.map((option, index) => (
+            <div
+              key={option.id}
+              className={"mode-item agent-item" + (option.id === value ? " active" : "")}
+              role="menuitemradio"
+              aria-checked={option.id === value}
+              tabIndex={index === nav.focused ? 0 : -1}
+              onFocus={() => nav.setFocused(index)}
+              onKeyDown={(e) => { activateFromKeyboard(e, () => pick(option.id)); }}
+              onClick={(e) => { e.stopPropagation(); pick(option.id); }}
+            >
+              <span className="mi-main">
+                <span className="mi-label">{option.name} — {option.role}</span>
+                {option.description && <span className="mi-hint">{option.description}</span>}
+              </span>
+              {option.id === value && (<span className="mi-check"><Icon name="check" /></span>)}
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
+    </button>
+  );
+}
+
 /** Reasoning-effort pill. Levels come from the host, so the menu cannot list a
  * level the request body does not understand. */
 function EffortPicker({
@@ -996,6 +1066,9 @@ export function Composer({
   reasoningEffort = "none",
   reasoningEfforts = [],
   onSelectReasoningEffort,
+  agentId = "",
+  agentOptions = [],
+  onSelectAgent,
   onTabDraft,
   usedTokens,
   queuedCount,
@@ -1048,6 +1121,10 @@ export function Composer({
   reasoningEffort?: string;
   reasoningEfforts?: { id: string; label: string; hint: string }[];
   onSelectReasoningEffort?: (id: string) => void;
+  /** Agent in force, and the agents to route the next message to. */
+  agentId?: string;
+  agentOptions?: { id: string; name: string; role: string; description: string }[];
+  onSelectAgent?: (id: string) => void;
   /** Tokens consumed by the conversation so far (drives the context ring). */
   usedTokens?: number;
   /** Queued messages count; Enter on an empty editor fires the next one now. */
@@ -1845,6 +1922,9 @@ export function Composer({
           {/* Approval governs edits and commands, which only agent mode can
               perform. Showing the control in a read-only mode implied a gate
               that was never consulted. */}
+          {!editing && agentOptions.length > 0 && (
+            <AgentPicker value={agentId} options={agentOptions} onSelect={(id) => onSelectAgent?.(id)} />
+          )}
           {!editing && reasoningEfforts.length > 0 && (
             <EffortPicker value={reasoningEffort} options={reasoningEfforts} onSelect={(id) => onSelectReasoningEffort?.(id)} />
           )}

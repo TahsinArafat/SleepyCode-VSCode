@@ -16,6 +16,7 @@
 
 import { MENTION_TAG_RE, parseMentionTokens } from "./shared/turns.ts";
 import * as modelOptions from './model-options.ts';
+import { agentOptions } from './agent-options.ts';
 import { REASONING_EFFORTS, REASONING_EFFORT_HINTS, REASONING_EFFORT_LABELS, normalizeReasoningEffort } from './reasoning-effort.ts';
 
 export type SleepyMsg = { type: string; [key: string]: any };
@@ -369,6 +370,10 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
         // selected reads as broken.
         reasoningEffort: normalizeReasoningEffort(message.reasoningEffort),
         reasoningEfforts: effortOptions(),
+        // The picker needs the list and the selection together; a list without
+        // the current id cannot show which agent is active.
+        agentId: message.agentId,
+        agentOptions: agentOptions(message.agents),
         // A send cannot work without a folder; say so before the user types.
         workspaceRoot: message.workspaceRoot,
         canSend: Boolean(message.workspaceRoot ?? message.canSend),
@@ -854,6 +859,9 @@ export function buildInitialState(input: {
   uiPrefs?: unknown;
   /** Reasoning level in force, so the composer's picker starts on the truth. */
   reasoningEffort?: unknown;
+  /** Agent in force, and the agents to choose from. */
+  agentId?: string;
+  agents?: readonly unknown[];
 }): ReactMsg {
   return {
     type: 'initialState',
@@ -870,6 +878,8 @@ export function buildInitialState(input: {
     approvalPolicy: approvalPolicyForMode(input.approvalMode),
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort),
     reasoningEfforts: effortOptions(),
+    agentId: input.agentId,
+    agentOptions: agentOptions(input.agents),
     ...(input.workspaceState ? { workspaceState: input.workspaceState } : {}),
     ...(input.uiPrefs ? { uiPrefs: input.uiPrefs } : {}),
   };

@@ -108,15 +108,17 @@ export type TeamInfo = { id: string; name: string; description: string; members:
 /** A reasoning level the composer may pick. Supplied by the host so the menu
  * cannot list a level the request body does not understand. */
 export type EffortOption = { id: string; label: string; hint: string };
+/** An agent the composer can route the next message to. */
+export type AgentOption = { id: string; name: string; role: string; description: string; builtIn: boolean };
 export type InMessage =
-  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[] }
+  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[]; agentId?: string; agentOptions?: AgentOption[] }
   | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
   | { type: "steeringAccepted"; convId: string }
   | { type: "queueDraft"; convId: string; draft: { text: string; attachments: Attachment[] } }
   | { type: "conversationSearchResults"; requestId: number; list: ConversationSummary[] }
-  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[] }
+  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[]; agentId?: string; agentOptions?: AgentOption[] }
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
