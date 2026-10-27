@@ -46,6 +46,8 @@ export interface ConversationSummary {
   title: string;
   updatedAt: number;
   archivedAt?: number;
+  /** Kept at the top of the list; the host sorts pinned threads first. */
+  pinned?: boolean;
   excerpt?: string;
 }
 
@@ -164,6 +166,9 @@ export type OutMessage =
   | { type: "steerMessage"; convId: string; text: string }
   | { type: "forkConversation"; id: string }
   | { type: "archiveConversation"; id: string; archived: boolean }
+  /** Rename a thread. With no title the host prompts, pre-filled. */
+  | { type: "renameConversation"; id: string; title?: string }
+  | { type: "togglePinConversation"; id: string }
   | { type: "searchConversations"; query: string; archived: boolean; requestId: number }
   | { type: "setGoal"; convId?: string; objective: string; tokenBudget?: number }
   | { type: "setGoalStatus"; convId: string; status: GoalStatus }

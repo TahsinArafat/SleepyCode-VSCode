@@ -1662,3 +1662,53 @@ test('recovery tolerates junk', () => {
   assert.deepEqual(adapter.turnsToItems(undefined), []);
   assert.deepEqual(adapter.turnsToItems([null, {}]), []);
 });
+
+// ---------------------------------------------------------------- rename & pin
+//
+// The host has implemented both for a while; the React conversation list simply
+// never offered them, so a thread could be archived but not named or kept.
+// `pinned` also had to travel, or the list cannot show which ones are kept.
+
+test('the conversation list carries the pinned flag', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversations',
+    activeId: 'c1',
+    conversations: [
+      { id: 'c1', title: 'Kept', updatedAt: 2, pinned: true },
+      { id: 'c2', title: 'Not kept', updatedAt: 1 },
+    ],
+  });
+  assert.equal(out.list[0].pinned, true);
+  // Absent must read as false rather than undefined, so the star has one shape.
+  assert.equal(out.list[1].pinned, false);
+  // Archiving still travels independently.
+  const archived = adapter.toReactMessage({ type: 'conversations', conversations: [{ id: 'c3', archived: true, updatedAt: 5 }] });
+  assert.equal(archived.list[0].archivedAt, 5);
+  assert.equal(archived.list[0].pinned, false);
+});
+
+test('rename and pin translate to the host messages that already exist', () => {
+  // With a title: the page supplies it. Without: the host opens its own input
+  // box, so an empty title must not be sent as an empty rename.
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'renameConversation', id: 'c1', title: 'New name' }),
+    { type: 'renameConversation', id: 'c1', title: 'New name' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'renameConversation', id: 'c1' }),
+    { type: 'renameConversation', id: 'c1', title: undefined },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'togglePinConversation', id: 'c1' }),
+    { type: 'togglePinConversation', id: 'c1' },
+  );
+});
+
+test('a rename or pin with no conversation named is refused', () => {
+  // Renaming "" would silently do nothing host-side; refusing here keeps the
+  // "posts a message that cannot work" class closed.
+  assert.equal(adapter.toSleepyMessage({ type: 'renameConversation' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'renameConversation', id: '' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'togglePinConversation' }), null);
+  assert.equal(adapter.toSleepyMessage({ type: 'togglePinConversation', id: '' }), null);
+});

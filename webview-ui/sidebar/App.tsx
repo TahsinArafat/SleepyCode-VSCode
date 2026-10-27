@@ -1759,6 +1759,10 @@ export function App() {
           onDelete={(id) => post({ type: "deleteConversation", id })}
           onArchive={(id, archived) => post({ type: "archiveConversation", id, archived })}
           onFork={(id) => post({ type: "forkConversation", id })}
+          // No title is sent: the host prompts with the current name prefilled,
+          // which beats re-implementing a rename dialog in the webview.
+          onRename={(id) => post({ type: "renameConversation", id })}
+          onPin={(id) => post({ type: "togglePinConversation", id })}
           onSearch={(query, archived, requestId) => post({ type: "searchConversations", query, archived, requestId })}
           results={historyResults}
           onClose={() => setHistoryOpen(false)}

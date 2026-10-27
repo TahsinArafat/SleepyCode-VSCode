@@ -4472,3 +4472,8 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	text-align: center;
 }
 .code-block:not(.collapsed) .code-block-expand { display: block; }
+
+/* Pin marker in the thread list: the host already sorts kept threads first, so
+   this only labels the row rather than reordering it here. */
+.hi-pin { flex: 0 0 auto; color: var(--accent, #d7ba7d); font-size: 11px; }
+.hi-pin-glyph { font-size: 13px; line-height: 1; }

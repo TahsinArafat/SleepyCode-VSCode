@@ -77,6 +77,17 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'archiveConversation':
       return { type: 'archiveConversation', id: message.id };
 
+    case 'renameConversation':
+      // With no title the host opens its own input box, which is the better
+      // prompt — native, and it pre-fills the current name. An empty id would
+      // rename nothing, so it is refused rather than posted.
+      return message.id
+        ? { type: 'renameConversation', id: message.id, title: message.title }
+        : null;
+
+    case 'togglePinConversation':
+      return message.id ? { type: 'togglePinConversation', id: message.id } : null;
+
     case 'forkConversation':
       return { type: 'branchConversation', conversationId: message.id, itemId: '' };
 
@@ -672,6 +683,8 @@ function conversationsPayload(message: SleepyMsg): ReactMsg {
     title: conversation.title || 'New conversation',
     updatedAt: conversation.updatedAt ?? 0,
     archivedAt: conversation.archived ? conversation.updatedAt : undefined,
+    // `false`, not `undefined`: the star renders from one shape.
+    pinned: conversation.pinned === true,
     excerpt: conversation.excerpt,
   }));
   const runningConvIds = conversations.filter(conversation => conversation.running).map(conversation => conversation.id);

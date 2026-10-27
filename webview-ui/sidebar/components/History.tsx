@@ -30,6 +30,8 @@ export function History({
   onClose,
   onArchive,
   onFork,
+  onRename,
+  onPin,
   onSearch,
   results,
 }: {
@@ -40,6 +42,9 @@ export function History({
   onClose: () => void;
   onArchive?: (id: string, archived: boolean) => void;
   onFork?: (id: string) => void;
+  /** Rename with no title: the host prompts, pre-filled with the current name. */
+  onRename?: (id: string) => void;
+  onPin?: (id: string, pinned: boolean) => void;
   onSearch?: (query: string, archived: boolean, requestId: number) => void;
   results?: { requestId: number; list: ConversationSummary[] };
 }) {
@@ -118,10 +123,13 @@ export function History({
                 {group.items.map((c) => (
                   <div key={c.id} className={"history-item" + (c.id === activeId ? " active" : "")}>
                     <button className="hi-text" aria-current={c.id === activeId ? "true" : undefined} onClick={() => { onSelect(c.id); onClose(); }}>
+                      {c.pinned && <span className="hi-pin" title="Kept at the top" aria-label="Kept at the top">★</span>}
                       <span className="hi-title">{c.title}</span>
                       <span className="hi-time">{timeAgo(c.updatedAt)}</span>
                       {c.excerpt && <span className="hi-excerpt">{c.excerpt}</span>}
                     </button>
+                    {onPin && <button className="hi-del" title={c.pinned ? "Stop keeping this conversation at the top" : "Keep this conversation at the top"} aria-label={c.pinned ? "Unpin conversation" : "Pin conversation"} aria-pressed={!!c.pinned} onClick={() => onPin(c.id, !c.pinned)}><span className="hi-pin-glyph" aria-hidden="true">{c.pinned ? "★" : "☆"}</span></button>}
+                    {onRename && <button className="hi-del" title="Rename conversation" aria-label="Rename conversation" onClick={() => onRename(c.id)}><Icon name="edit" size={14} /></button>}
                     {onFork && <button className="hi-del" title="Fork conversation" aria-label="Fork conversation" onClick={() => onFork(c.id)}><Icon name="fork" size={14} /></button>}
                     {onArchive && <button className="hi-del" title={archived ? "Restore conversation" : "Archive conversation"} aria-label={archived ? "Restore conversation" : "Archive conversation"} onClick={() => onArchive(c.id, !archived)}>{archived ? <Icon name="reset" size={14} /> : <Icon name="archive" size={14} />}</button>}
                     <button
