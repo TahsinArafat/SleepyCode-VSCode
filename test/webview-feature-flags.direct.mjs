@@ -79,3 +79,45 @@ test('the rail never offers a section the host will not route to', async () => {
     }
   }
 });
+
+test('every @ category the composer offers is one the host can answer', async () => {
+  // The composer listed Files & Folders, Docs, Terminals and Past Chats, but the
+  // adapter answers only `files` — so three categories always said "No matches".
+  // Worse than useless: every mention pill serialises its path as a FILE
+  // attachment, so a chat id or terminal name would reach the model as a bogus
+  // file path. A category is only offered when the host answers it, and the
+  // offered list is derived from that predicate rather than restated.
+  const host = await import('../src/webview-adapter.ts');
+  const composer = await import('node:fs/promises')
+    .then(fs => fs.readFile(new URL('../webview-ui/sidebar/components/Composer.tsx', import.meta.url), 'utf8'));
+
+  const declared = composer.match(/const ALL_MENTION_CATEGORIES[\s\S]*?=\s*\[([\s\S]*?)\];/)?.[1] ?? '';
+  const ids = [...declared.matchAll(/id:\s*"([a-zA-Z]+)"/g)].map(m => m[1]);
+  assert.ok(ids.length > 0, 'the composer should still declare mention categories');
+
+  // The offered list must be the declared list filtered by the host's predicate,
+  // not a hand-maintained second copy that can drift.
+  assert.match(
+    composer,
+    /const MENTION_CATEGORIES = ALL_MENTION_CATEGORIES\.filter\(\(c\) => isMentionCategoryAnswered\(c\.id\)\)/,
+    'the offered categories must be filtered by isMentionCategoryAnswered',
+  );
+
+  // Applying that predicate must leave only answerable categories, and at least
+  // one must survive or the @ menu would be empty.
+  const offered = ids.filter(id => host.isMentionCategoryAnswered(id));
+  assert.ok(offered.length > 0, 'the @ menu would have nothing to offer');
+  for (const id of offered) assert.equal(host.isMentionCategoryAnswered(id), true, `${id} is offered but unanswered`);
+  // The categories that must NOT survive.
+  for (const id of ['docs', 'terminals', 'chats']) {
+    assert.equal(offered.includes(id), false, `${id} must not be offered`);
+  }
+});
+
+test('the adapter answers files and refuses what it cannot serve', async () => {
+  const host = await import('../src/webview-adapter.ts');
+  assert.equal(host.isMentionCategoryAnswered('files'), true);
+  for (const id of ['docs', 'terminals', 'chats', 'git', 'rules', 'code', 'branch', 'link']) {
+    assert.equal(host.isMentionCategoryAnswered(id), false, `${id} has no SleepyCode source`);
+  }
+});

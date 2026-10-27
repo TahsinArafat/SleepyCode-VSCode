@@ -24,15 +24,24 @@ import { CodeLanguagePicker } from "./CodeLanguagePicker";
 import { getCodeLanguage } from "../../shared/codeLanguages";
 import type { ApprovalPolicy, Attachment, FileIconInfo, MentionCategory, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PersonaInfo, TeamInfo } from "../types";
 import { filterModes } from "../../shared/featureFlags";
-import { approvalAppliesInMode } from "../../../src/webview-adapter";
+import { approvalAppliesInMode, isMentionCategoryAnswered } from "../../../src/webview-adapter";
 
 /** Top-level @ menu categories. */
-const MENTION_CATEGORIES: { id: MentionCategory; label: string; icon: IconName; leaf?: boolean }[] = [
+/**
+ * The `@` categories this build offers. Only the ones the host can answer are
+ * listed: an unanswered category always showed "No matches", and because a
+ * mention pill serialises its path as a file attachment, a conversation id or a
+ * terminal name would have reached the model as a bogus file path. Add a
+ * category back here only once the host answers it — the guard in
+ * test/webview-feature-flags.direct.mjs asserts the two agree.
+ */
+const ALL_MENTION_CATEGORIES: { id: MentionCategory; label: string; icon: IconName; leaf?: boolean }[] = [
   { id: "files", label: "Files & Folders", icon: "file" },
   { id: "docs", label: "Docs", icon: "book" },
   { id: "terminals", label: "Terminals", icon: "terminal" },
   { id: "chats", label: "Past Chats", icon: "chat" },
 ];
+const MENTION_CATEGORIES = ALL_MENTION_CATEGORIES.filter((c) => isMentionCategoryAnswered(c.id));
 
 const KIND_ICON: Record<string, IconName> = {
   file: "file",

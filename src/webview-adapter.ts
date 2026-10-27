@@ -978,6 +978,23 @@ export function reactAttachmentsOf(attachments: unknown): { images: { name: stri
 // ---------------------------------------------------------------- mentions
 
 /**
+ * The `@` categories this build can actually answer.
+ *
+ * Only file and folder search has a SleepyCode source. Docs, terminals and past
+ * chats are OpenCursor features whose data SleepyCode does not have, and a
+ * mention is not harmless when unanswered: every pill serialises its `path` as a
+ * FILE attachment, so a conversation id or terminal name would reach the model as
+ * a bogus file path. The composer therefore offers a category only when this
+ * returns true.
+ */
+const ANSWERED_MENTION_CATEGORIES = new Set(['files']);
+
+/** True when the host can answer a `searchMentions` for this category. */
+export function isMentionCategoryAnswered(kind: string): boolean {
+  return ANSWERED_MENTION_CATEGORIES.has(kind);
+}
+
+/**
  * Pull OpenCursor's inline context tags out of a message. The tags remain the
  * source of truth for the model in OpenCursor; here they become file
  * attachments, which is how SleepyCode supplies the same context.
