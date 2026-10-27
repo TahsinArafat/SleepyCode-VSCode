@@ -14,6 +14,7 @@ import { Icon } from "../shared/icons";
 import { Select } from "../shared/Select";
 import { ImagePreview } from "../shared/ImagePreview";
 import { MarkdownView } from "../shared/MarkdownView";
+import { responseText } from "../../src/response-text.ts";
 import { copyText } from "../shared/clipboard";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
@@ -217,9 +218,9 @@ function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
   return groups;
 }
 
-function responseText(blocks: AssistantBlock[]): string {
-  return blocks.flatMap(block => block.kind === "text" ? [block.text] : block.kind === "error" ? [block.message] : []).join("\n\n");
-}
+// Settled turns keep their blocks array, so joining every response's text on
+// each streaming frame (O(transcript) string building) is avoided by the cache in
+// `src/response-text.ts`.
 
 // Summarize a finished explore group, e.g. "Explored 3 files · 2 searches".
 function exploreSummary(tools: ToolBlock[]): string {
@@ -821,6 +822,119 @@ function playCompletionSound() {
   } catch { /* audio unavailable */ }
 }
 
+/** User message bubble that flags content overflowing its clamp height. It
+ *  measures when its message changes or it resizes, instead of forcing a
+ *  layout read for every user message on every streaming frame. */
+function ClampedBubble({ measureKey, ...props }: React.ComponentProps<"div"> & { measureKey: unknown }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => { element.classList.toggle("clamped", element.scrollHeight > element.clientHeight + 1); };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [measureKey]);
+  return <div ref={ref} {...props} />;
+}
+
+/** Latest-value callback with a stable identity, so memoized children are not
+ *  invalidated by inline handlers on every render. */
+function useStableCallback<Args extends unknown[], Result>(callback: (...args: Args) => Result): (...args: Args) => Result {
+  const latest = React.useRef(callback);
+  latest.current = callback;
+  return React.useCallback((...args: Args) => latest.current(...args), []);
+}
+
+/** A sent user message. Memoized with stable handlers so settled messages are
+ *  not re-rendered on every streaming frame of a long conversation. */
+const UserMessage = React.memo(function UserMessage({ turn, index, isRunning, onEdit, onResend, onRevert, onPreviewImage }: {
+  turn: UserTurn; index: number; isRunning: boolean;
+  onEdit: (index: number, turn: UserTurn) => void; onResend: (index: number, turn: UserTurn) => void;
+  onRevert: (index: number, turn: UserTurn) => void; onPreviewImage: (images: Attachment[], id: string) => void;
+}) {
+  return (
+    <div className="msg user message-shell" data-turn-index={index}>
+      <ClampedBubble
+        measureKey={turn}
+        className="bubble"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault(); event.currentTarget.click();
+          }
+        }}
+        onClick={() => onEdit(index, turn)}
+        aria-disabled={isRunning || undefined}
+        title={isRunning ? "User message" : "Click to edit & resend"}
+      >
+        {turn.attachments && turn.attachments.length > 0 && (
+          <div className="msg-attachments">
+            {turn.attachments.map((a) =>
+              a.kind === "image" ? (
+                <button key={a.id} type="button" className="image-attachment-trigger"
+                  aria-label={`Preview image ${a.name}`} aria-haspopup="dialog" title={a.name}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onPreviewImage(turn.attachments!.filter(attachment => attachment.kind === "image"), a.id);
+                  }}>
+                  <img className="msg-attach-img" src={a.data} alt="" />
+                </button>
+              ) : (
+                <span key={a.id} className="msg-attach-file">
+                  <Icon name="file" /> {a.name}
+                </span>
+              )
+            )}
+          </div>
+        )}
+        {turn.text && <MentionText text={turn.text} />}
+      </ClampedBubble>
+      <MessageActions variant="user" text={turn.text} disabled={isRunning}
+        onEdit={() => onEdit(index, turn)}
+        onRetry={() => onResend(index, turn)}
+        onRevert={() => onRevert(index, turn)} />
+    </div>
+  );
+});
+
+/** An assistant response with its model/time footer and actions; memoized like
+ *  {@link UserMessage}. */
+const AssistantMessage = React.memo(function AssistantMessage({ turn, index, isRunning, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, compaction, onDecide, modelList, onRetry }: {
+  turn: AssistantTurn; index: number; isRunning: boolean; running: boolean; phase?: string;
+  onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
+  approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
+  compaction: React.ComponentProps<typeof AssistantContent>["compaction"];
+  onDecide: (id: string, approved: boolean) => void;
+  modelList: ModelDef[];
+  onRetry?: (index: number) => void;
+}) {
+  return (
+    <div className="msg assistant message-shell" data-turn-index={index}>
+      <div className="role">
+        <Icon name="bot" /> Agent
+      </div>
+      <div className="bubble">
+        <AssistantContent turn={turn} running={running} phase={phase}
+          onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} taskApprovals={taskApprovals}
+          compaction={compaction} onDecide={onDecide} />
+      </div>
+      <div className="message-footer">
+        <span className="message-footer-meta">
+          {modelLabel(modelList, turn.model) && (
+            <span className="message-model" title={turn.model}>{modelLabel(modelList, turn.model)}</span>
+          )}
+          {footerTime(turn.startedAt) && <span className="message-time">{footerTime(turn.startedAt)}</span>}
+        </span>
+        <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
+          onRetry={onRetry ? () => onRetry(index) : undefined} />
+      </div>
+    </div>
+  );
+});
+
 export function App() {
   const [mode, setMode] = React.useState<Mode>("agent");
   const [models, setModels] = React.useState<string[]>([]);
@@ -1016,6 +1130,9 @@ export function App() {
   // extra scrollable height beyond one viewport). Set imperatively so it tracks
   // the scroll area size. Never applied to the first group (already at top).
   const lastGroupRef = React.useRef<HTMLDivElement>(null);
+  // The group currently carrying that virtual space (tracked so clearing it
+  // never has to query every group in the transcript on each frame).
+  const spacedGroupRef = React.useRef<HTMLElement | null>(null);
 
   // Give the last group a min-height of one viewport so its user message can be
   // scrolled to the top ("virtual space") without adding real extra scroll beyond
@@ -1023,10 +1140,12 @@ export function App() {
   const sizeSpacer = React.useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Clear stale virtual space from groups that are no longer last.
-    el.querySelectorAll<HTMLElement>(".chat-turn-group").forEach((g) => {
-      if (g !== lastGroupRef.current && g.style.minHeight) g.style.minHeight = "";
-    });
+    // Clear stale virtual space from the group that carried it before.
+    const spaced = spacedGroupRef.current;
+    if (spaced && spaced !== lastGroupRef.current) {
+      spaced.style.minHeight = "";
+      spacedGroupRef.current = null;
+    }
     const group = lastGroupRef.current;
     if (!group) return;
     // Grow the last group so the max scroll position lands exactly with the
@@ -1038,6 +1157,7 @@ export function App() {
     const minH = Math.max(0, Math.round(el.clientHeight - trailing));
     const target = `${minH}px`;
     if (group.style.minHeight !== target) group.style.minHeight = target;
+    spacedGroupRef.current = group;
   }, []);
 
   React.useEffect(() => {
@@ -1841,6 +1961,14 @@ export function App() {
     });
   };
 
+  // Stable handlers for memoized transcript messages (always the latest closure).
+  const onUserEdit = useStableCallback((index: number, turn: UserTurn) => startEdit(index, turn));
+  const onUserResend = useStableCallback((index: number, turn: UserTurn) => requestEditSubmit(index, turn.text, turn.attachments ?? []));
+  const onUserRevert = useStableCallback((index: number, turn: UserTurn) => requestRevert(index, turn));
+  const onRetryResponse = useStableCallback((index: number) => retryResponse(index));
+  const onDecideApproval = useStableCallback((id: string, approved: boolean) => decideApproval(activeIdRef.current ?? "", id, approved));
+  const onPreviewImage = React.useCallback((images: Attachment[], id: string) => setImagePreview({ images, activeId: id }), []);
+
   return (
     <div className={"app" + (uiPrefs.chatTextSize !== "default" ? ` text-${uiPrefs.chatTextSize}` : "")}>
       <div className="chat-header">
@@ -2172,72 +2300,16 @@ export function App() {
                       />
                     </div>
                   ) : (
-                    <div className="msg user message-shell" key={index} data-turn-index={index}>
-                      <div
-                        className="bubble"
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-                            event.preventDefault(); event.currentTarget.click();
-                          }
-                        }}
-                        onClick={() => startEdit(index, turn)}
-                        aria-disabled={isRunning || undefined}
-                        title={isRunning ? "User message" : "Click to edit & resend"}
-                        ref={(el) => { if (el) el.classList.toggle("clamped", el.scrollHeight > el.clientHeight + 1); }}
-                      >
-                        {turn.attachments && turn.attachments.length > 0 && (
-                          <div className="msg-attachments">
-                            {turn.attachments.map((a) =>
-                              a.kind === "image" ? (
-                                <button key={a.id} type="button" className="image-attachment-trigger"
-                                  aria-label={`Preview image ${a.name}`} aria-haspopup="dialog" title={a.name}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setImagePreview({ images: turn.attachments!.filter(attachment => attachment.kind === "image"), activeId: a.id });
-                                  }}>
-                                  <img className="msg-attach-img" src={a.data} alt="" />
-                                </button>
-                              ) : (
-                                <span key={a.id} className="msg-attach-file">
-                                  <Icon name="file" /> {a.name}
-                                </span>
-                              )
-                            )}
-                          </div>
-                        )}
-                        {turn.text && <MentionText text={turn.text} />}
-                      </div>
-                      <MessageActions variant="user" text={turn.text} disabled={isRunning}
-                        onEdit={() => startEdit(index, turn)}
-                        onRetry={() => requestEditSubmit(index, turn.text, turn.attachments ?? [])}
-                        onRevert={() => requestRevert(index, turn)} />
-                    </div>
+                    <UserMessage key={index} turn={turn} index={index} isRunning={isRunning}
+                      onEdit={onUserEdit} onResend={onUserResend} onRevert={onUserRevert} onPreviewImage={onPreviewImage} />
                   )
                 ) : (
-                  <div className="msg assistant message-shell" key={index} data-turn-index={index}>
-                    <div className="role">
-                      <Icon name="bot" /> Agent
-                    </div>
-                    <div className="bubble">
-                      <AssistantContent turn={turn} running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
-                        phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
-                        onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
-                        compaction={compactionControls}
-                        onDecide={(id, approved) => decideApproval(activeId ?? "", id, approved)} />
-                    </div>
-                    <div className="message-footer">
-                      <span className="message-footer-meta">
-                        {modelLabel(modelList, turn.model) && (
-                          <span className="message-model" title={turn.model}>{modelLabel(modelList, turn.model)}</span>
-                        )}
-                        {footerTime(turn.startedAt) && <span className="message-time">{footerTime(turn.startedAt)}</span>}
-                      </span>
-                      <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
-                        onRetry={group[0].turn.role === "user" ? () => retryResponse(index) : undefined} />
-                    </div>
-                  </div>
+                  <AssistantMessage key={index} turn={turn} index={index} isRunning={isRunning}
+                    running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
+                    phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
+                    onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
+                    compaction={compactionControls} onDecide={onDecideApproval} modelList={modelList}
+                    onRetry={group[0].turn.role === "user" ? onRetryResponse : undefined} />
                 )
               )}
 
