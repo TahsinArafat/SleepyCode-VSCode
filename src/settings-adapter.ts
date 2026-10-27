@@ -370,6 +370,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // The window's only sign-in control, and the first-run CTA. The host had a case
   // for it but it was never listed, so every click was dropped.
   'signIn',
+  // The account section. `signOut` had no counterpart anywhere: the host never
+  // cleared the stored token, so there was no way to leave an account.
+  'getAccount',
+  'signOut',
 ]);
 
 /** True when the settings window asked for something this build can serve. */
@@ -552,6 +556,8 @@ const hiddenSections = new Set<string>(HIDDEN_SETTINGS_SECTIONS);
  */
 export const VISIBLE_SETTINGS_SECTIONS = [
   'general',
+  // The SleepyAI account: who is signed in, what the plan allows, and sign out.
+  'account',
   // Served now: adding a compatibility endpoint and setting its key.
   'providers',
   'usage',

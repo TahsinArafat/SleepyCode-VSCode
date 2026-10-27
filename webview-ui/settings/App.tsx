@@ -20,6 +20,7 @@ import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { filterSections, isSectionHidden } from "../shared/featureFlags";
 import { shouldShowAccountQuota, visibleSection } from "../../src/settings-adapter.ts";
+import { AccountPanel } from "./panels/AccountPanel";
 import { ProviderKeysPanel } from "./panels/ProviderKeysPanel";
 import {
   FIRST_RUN_ACTION,
@@ -55,7 +56,7 @@ const DEFAULTS: Settings = {
   systemPrompt: "",
 };
 
-type Section = "general" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
+type Section = "general" | "account" | "usage" | "agents" | "providers" | "models" | "llamacpp" | "ollama" | "behavior" | "personas" | "rules" | "marketplace" | "subagents" | "mcp" | "hooks" | "indexing" | "advanced" | "about";
 
 interface IndexStatus {
   indexing: boolean;
@@ -85,6 +86,7 @@ interface EmbedModel {
 // Group connection, agent, and workspace settings in the navigation rail.
 const NAV: { id: Section; label: string; icon: IconName; sep?: boolean }[] = [
   { id: "general", label: "General", icon: "settings" },
+  { id: "account", label: "SleepyAI Account", icon: "shieldWarning" },
   { id: "providers", label: "Providers", icon: "globe", sep: true },
   { id: "llamacpp", label: "llama.cpp", icon: "database" },
   { id: "ollama", label: "Ollama", icon: "database" },
@@ -1006,6 +1008,8 @@ export function App() {
               </p>
             </>
           )}
+
+          {section === "account" && <AccountPanel />}
 
           {section === "usage" && (
             <UsagePanel usage={usage} oauthStatus={oauthStatus} features={features} setFeatures={setFeatures} />

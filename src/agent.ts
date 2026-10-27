@@ -1338,6 +1338,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private settingsPanelHost(): SettingsPanelHost {
     return {
       signIn: () => this.signIn(),
+      sleepyAccount: async () => {
+        // The stored config is the truth about being signed in; the dashboard is
+        // the only place the limits live, and it is allowed to be unreachable.
+        const account = getSleepyAccount();
+        if (!account.loggedIn) return account;
+        const token = await getSleepyToken().catch(() => null);
+        if (!token) return account;
+        const usage = await fetchSleepyAccountData(token).catch(() => null);
+        return usage ? { ...account, ...usage } : account;
+      },
+      signOut: async () => {
+        await clearGatewayConfig();
+        // The chat's own banner reads this status, so signing out here has to
+        // reach it too — otherwise one surface says signed in and the other out.
+        this.post({ type: 'sleepyStatus', loggedIn: false, busy: false, text: '' });
+      },
       writeChatPrefs: (patch) => this.writeChatPrefs(patch),
       openPanelFile: async (rawPath) => {
         const root = this.workspaceRoot();

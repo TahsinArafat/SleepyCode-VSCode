@@ -47,6 +47,10 @@ export interface SettingsPanelHost {
   refreshModels(): Promise<string[]>;
   /** Start the first-party sign-in flow. */
   signIn(): void;
+  /** Who is signed in, and what their plan allows. Never includes the token. */
+  sleepyAccount(): Promise<unknown>;
+  /** Forget the stored first-party token: sign out. */
+  signOut(): Promise<void>;
   /** Open a panel-supplied path after resolving and authorising it. */
   openPanelFile(path: unknown): Promise<boolean>;
   /** Scaffold a skill and open it. */
@@ -403,6 +407,13 @@ export class SettingsPanel {
         return;
       case 'completeSetup':
         await this.host.completeSetup();
+        return;
+      case 'getAccount':
+        this.post({ type: 'account', account: await this.host.sleepyAccount().catch(() => ({ loggedIn: false })) });
+        return;
+      case 'signOut':
+        await this.host.signOut().catch(() => undefined);
+        this.post({ type: 'account', account: await this.host.sleepyAccount().catch(() => ({ loggedIn: false })) });
         return;
       case 'signIn':
         // The window's only provider action. Compatibility-endpoint API keys have

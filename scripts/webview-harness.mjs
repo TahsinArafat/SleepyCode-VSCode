@@ -43,12 +43,12 @@ export function turns(text) {
   ];
 }
 
-export async function openSidebar({ width = 460, height = 820, headless = true } = {}) {
+export async function openSidebar({ width = 460, height = 820, headless = true, entry = 'sidebar' } = {}) {
   const browser = await chromium.launch({ headless });
   const page = await browser.newPage({ viewport: { width, height } });
 
-  const css = readFileSync(path.join(root, 'dist/webview/sidebar.css'), 'utf8');
-  const js = readFileSync(path.join(root, 'dist/webview/sidebar.js'), 'utf8');
+  const css = readFileSync(path.join(root, `dist/webview/${entry}.css`), 'utf8');
+  const js = readFileSync(path.join(root, `dist/webview/${entry}.js`), 'utf8');
   await page.setContent(`<!doctype html><html data-theme="dark" class="vscode-dark" style="--vscode-font-family: system-ui"><head><style>${css}</style></head><body class="vscode-dark"><div id="root"></div></body></html>`);
   // The three things the webview needs from its host. Injected as a script tag
   // rather than an init script: `setContent` reuses the document, so an init
