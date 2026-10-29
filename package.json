@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -198,7 +198,7 @@
           "default": 32000,
           "minimum": 3000,
           "maximum": 200000,
-          "description": "Maximum characters of previous thinking kept for later model requests. Some reasoning models need this history. Default 32000. Configurable from Settings → Advanced."
+          "description": "Maximum characters of previous thinking kept for later model requests. Some reasoning models need this history. Default 32000. Configurable from Settings \u2192 Advanced."
         },
         "sleepycode.approvalMode": {
           "type": "string",
@@ -263,7 +263,7 @@
         "sleepycode.useCli": {
           "type": "boolean",
           "default": false,
-          "description": "Experimental: run chats on the SleepyCode CLI when it is installed and can serve this workspace, and list the CLI's own models in the composer. Off by default so the stable local agent stays in charge. Configure from Settings → Advanced."
+          "description": "Experimental: run chats on the SleepyCode CLI when it is installed and can serve this workspace, and list the CLI's own models in the composer. Off by default so the stable local agent stays in charge. Configure from Settings \u2192 Advanced."
         }
       }
     }

@@ -45,6 +45,7 @@ import * as goalCore from './goal-core';
 import * as modelOptions from './model-options';
 import * as worktreeNaming from './worktree-naming';
 import * as queueCore from './queue-core';
+import { warmDelayMs, warmVerdict } from './mcp-warm-core';
 import * as featurePrefs from './feature-prefs';
 import * as costCore from './cost-core';
 import * as providersCore from './providers-core';
@@ -90,10 +91,15 @@ type PlanState = {
 
 const MAX_CONCURRENT_RUNS = 3;
 
-/** How many times the startup MCP warm-up retries a server that is not up yet. */
-const MCP_WARM_ATTEMPTS = 5;
-/** Delay before each warm-up retry, in order (the last value repeats). */
+/**
+ * The startup MCP warm-up's retry ladder (see `warmDelayMs`). Once these are
+ * spent it keeps going at `MCP_WARM_HEARTBEAT_MS` rather than giving up: a server
+ * started an hour after the window opened is still one the user expects to work
+ * without pressing Reconnect.
+ */
 const MCP_WARM_BACKOFF_MS = [5_000, 15_000, 45_000, 120_000, 120_000];
+/** Once the fast retries are spent, this is how often a still-down server is retried. */
+const MCP_WARM_HEARTBEAT_MS = 120_000;
 
 function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -462,6 +468,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private mcpCache: { key: string; connection: McpConnection } | undefined;
   /** Pending background MCP reconnect attempt (see `warmMcpConnections`). */
   private mcpWarmTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Set once the background warm-up has finished a pass and something is still
+   * down, so a later probe (Reconnect, a settings save) restarts the heartbeat
+   * instead of leaving the dead server to be noticed by hand next time.
+   */
+  private mcpWarmActive = false;
 
   /**
    * Which engine owns the run loop. The Sleepy CLI owns it whenever it is
@@ -1860,6 +1872,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // bypassed. Answering from a probe that ran before a server was
         // restarted is how the button appeared to do nothing: the row kept the
         // old failure for another minute.
+        //
+        // A background retry that had settled into a heartbeat is re-armed
+        // as a fast pass: after a deliberate Reconnect the rows should come back
+        // in seconds, not at the next two-minute tick.
+        if (this.mcpWarmActive) void this.warmMcpConnections();
         return this.probeMcpConnections();
       },
       mcpLogin: async (name) => {
@@ -6536,44 +6553,60 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Reconnect the saved MCP servers when the window opens, without waiting for
-   * someone to press Sync.
+   * Keep the saved MCP servers reachable for the whole session.
    *
-   * A server is only reachable while something is holding it open, and nothing did
-   * until a run started — so after a restart the panel showed every configured
-   * server as unknown until it was synced by hand.
+   * Two arithmetic bugs produced exactly the reported symptom — every row
+   * reading "idle" after a restart until Reconnect was pressed by hand:
+   *
+   *  1. The retry ran only while ZERO servers were connected, and stopped as
+   *     soon as ONE was. `2/4 connected (attempt 1)` was therefore the end of
+   *     the retries, with two servers still down and nothing left to notice
+   *     them coming back.
+   *  2. A server switched OFF counted as down. The probe only connects enabled
+   *     rows, so a disabled one is honestly `connected: false` — counted as a
+   *     failure it made a healthy set look broken forever.
+   *
+   * `warmVerdict`/`warmDelayMs` own both decisions (pure and tested): retry
+   * while ANY enabled server is down, ignore disabled rows, and fall back to a
+   * slow heartbeat rather than giving up — a server started an hour later is
+   * still one the user expects to work without pressing anything.
+   *
+   * This is a live probe. It holds nothing open between turns (a run connects on
+   * demand); it keeps the reported state honest and the next run's connect cheap.
    */
   private async warmMcpConnections(): Promise<void> {
     if (!this.reactMode) return;
-    // Retried in the background: a server that is not up yet when the window
-    // opens (a local process still starting, a laptop waking up, a flaky
-    // network) used to stay "idle" until someone pressed Reconnect by hand.
-    // Each attempt is a fresh probe, and the panel is told what it found, so a
-    // server that comes back becomes usable without any user action.
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
     let attempt = 0;
     const run = async (): Promise<void> => {
       attempt += 1;
+      let statuses: settingsAdapter.PanelMcpStatus[];
       try {
-        const statuses = await this.probeMcpConnections();
-        if (!statuses.length) return;
-        const connected = statuses.filter(row => row.connected).length;
-        this.log('info', 'mcp.warm.done', `${connected}/${statuses.length} connected (attempt ${attempt})`);
-        // Push the result so an open settings window shows reality without a
-        // manual sync, and so a row that came back stops reading "idle".
-        this.post({ type: 'mcpStatus', statuses });
-        const stillDown = statuses.filter(row => !row.connected && row.error !== 'Disabled').length;
-        if (connected === 0 && stillDown > 0 && attempt < MCP_WARM_ATTEMPTS) schedule();
+        statuses = await this.probeMcpConnections();
       } catch (error) {
         this.log('warn', 'mcp.warm.failed', errorMessage(error));
-        if (attempt < MCP_WARM_ATTEMPTS) schedule();
+        // A probe that threw is not evidence the servers are fine: keep trying.
+        this.mcpWarmActive = true;
+        schedule();
+        return;
       }
+      if (!statuses.length) {
+        this.mcpWarmActive = false;
+        return;
+      }
+      const verdict = warmVerdict(statuses);
+      this.log('info', 'mcp.warm.done',
+        `${verdict.connected}/${verdict.total} connected, ${verdict.down.length}/${verdict.enabled.length} enabled still down (attempt ${attempt})${verdict.down.length ? `: ${verdict.down.join(', ')}` : ''}`);
+      // Pushed so an open settings window shows reality without a manual sync.
+      this.post({ type: 'mcpStatus', statuses });
+      this.mcpWarmActive = verdict.retry;
+      if (verdict.retry) schedule();
     };
     const schedule = (): void => {
-      // 5s, 15s, 45s, 2m: long enough not to hammer a broken server, short
-      // enough that a restart is picked up while the user is still looking.
-      const delay = MCP_WARM_BACKOFF_MS[Math.min(attempt, MCP_WARM_BACKOFF_MS.length - 1)]!;
-      this.mcpWarmTimer = setTimeout(() => { void run(); }, delay);
+      this.mcpWarmTimer = setTimeout(() => { void run(); }, warmDelayMs(attempt, {
+        backoffMs: MCP_WARM_BACKOFF_MS,
+        heartbeatMs: MCP_WARM_HEARTBEAT_MS,
+      }));
       this.mcpWarmTimer.unref?.();
     };
     await run();

@@ -61,6 +61,12 @@ export interface PanelMcpStatus {
   tools?: string[];
   error?: string;
   authState?: 'none' | 'required' | 'authorizing' | 'authenticated';
+  /**
+   * Switched off by the user, so "not connected" is the correct state rather
+   * than a failure. The host's background reconnect reads this instead of
+   * matching on the human-readable `error` text, which the window may reword.
+   */
+  disabled?: boolean;
 }
 
 /** Stored connection -> the settings window's config. */
@@ -137,7 +143,7 @@ export function toMcpPanelStatus(status: StoredMcpStatus): PanelMcpStatus {
   };
   if (status.tools?.length) row.tools = status.tools;
   if (status.state === 'error' && status.error) row.error = status.error;
-  if (status.state === 'disabled') row.error = 'Disabled';
+  if (status.state === 'disabled') { row.error = 'Disabled'; row.disabled = true; }
   return row;
 }
 
@@ -469,6 +475,7 @@ export function completeMcpStatuses(
       toolCount: 0,
       authState: 'none',
       error: disabled ? 'Disabled' : reason || 'The server did not report a connection result.',
+      ...(disabled ? { disabled: true } : {}),
     };
   });
 }

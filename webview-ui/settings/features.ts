@@ -347,6 +347,8 @@ export interface McpStatus {
   tools?: string[];
   error?: string;
   authState?: "none" | "required" | "authorizing" | "authenticated";
+  /** Switched off by the user: "off", not a failure and not merely "idle". */
+  disabled?: boolean;
 }
 
 export interface RuleInfo {

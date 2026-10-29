@@ -78,8 +78,15 @@ export function McpPanel({
               <div className="fc-title-input" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Icon name="link" size={14} />
                 <span>{srv.name || "(unnamed)"}</span>
-                <span className={"mcp-status " + (st?.connected ? "ok" : st?.error ? "err" : "idle")}>
-                  {st?.connected ? `${st.toolCount} tools` : st?.authState === "required" ? "sign in" : st?.error ? "error" : "idle"}
+                {/* Four states, not three. A switched-off server used to render as
+                    "idle", which is exactly what an UNPROBED server rendered as — so a
+                    deliberate choice was indistinguishable from "SleepyCode has not
+                    checked yet", and every restart looked like a broken connection. */}
+                <span
+                  className={"mcp-status " + (st?.disabled ? "idle" : st?.connected ? "ok" : st?.error ? "err" : "idle")}
+                  title={st?.disabled ? "Switched off — enable it to connect" : st?.connected ? "Connected" : st?.error ?? "Not checked yet"}
+                >
+                  {st?.disabled ? "off" : st?.connected ? `${st.toolCount} tools` : st?.authState === "required" ? "sign in" : st?.error ? "error" : "checking…"}
                 </span>
               </div>
               <Toggle label={`Enable ${srv.name}`} checked={srv.enabled} onChange={(v) => toggle(i, v)} />
@@ -95,12 +102,19 @@ export function McpPanel({
             </div>
             <div className="fc-body">
               <div className="row-desc">{srv.transport === "stdio" ? `Local command: ${srv.command || ""}` : `${srv.transport === "http" ? "Streamable HTTP" : "SSE"}: ${srv.url || ""}`}{st?.authState && st.authState !== "none" ? ` · ${st.authState}` : ""}</div>
-              {st?.error ? (
+              {st?.disabled ? (
+                // A switched-off server is not an error, and it is not "not
+                // connected" either: saying so invited the user to press
+                // Reconnect on something they had deliberately turned off.
+                <div className="row-desc">Switched off. Enable it to connect.</div>
+              ) : st?.error ? (
                 <div className="fc-error">{st.error}</div>
               ) : tools.length === 0 ? (
                 <div className="row-desc">{
-                  !st?.connected
-                    ? "Not connected — enable and Reconnect."
+                  !st
+                    ? "Not checked yet — SleepyCode connects to saved servers when the window opens."
+                    : !st.connected
+                    ? "Not connected — SleepyCode keeps retrying in the background. Press Reconnect to retry now."
                     : st.toolCount > 0
                       // Connected with a count but no names: say what is true
                       // rather than claiming the server exposes nothing.
