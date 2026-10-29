@@ -484,8 +484,12 @@ test('a bare command is left alone', () => {
   assert.deepEqual(coreModule.splitCommandLine(''), []);
 });
 
-test('escaped spaces stay inside one argument', () => {
-  assert.deepEqual(coreModule.splitCommandLine('node my\\ script.js'), ['node', 'my script.js']);
+test('backslashes are literal, so Windows paths survive', () => {
+  // Backslash used to be treated as an escape, which rewrote a Windows
+  // `C:\tools\node.exe` into `C:toolsnode.exe`. Quotes are the supported way
+  // to keep a space inside one argument; a backslash needs no interpretation.
+  assert.deepEqual(coreModule.splitCommandLine('C:\\tools\\node.exe --print'), ['C:\\tools\\node.exe', '--print']);
+  assert.deepEqual(coreModule.splitCommandLine('node "my script.js"'), ['node', 'my script.js']);
 });
 
 test('a pasted command line actually starts the server', async () => {

@@ -155,13 +155,15 @@ test('a long stream repaints once per frame instead of once per token', async t 
   });
 
   // The coalescer's contract is "one DOM write per animation frame". Assert against measured frames
-  // so the bound holds on a slow CI box as well as a fast laptop, and keep a loose ratio as a second
-  // guard: a regression back to per-token painting blows straight through it.
+  // so the bound holds on a slow CI box as well as a fast laptop. A fixed ratio to the delta count
+  // is NOT a guard here: on a runner where each `setTimeout(0)` hop costs a whole frame, 3000
+  // deltas legitimately produce ~3000 frames and ~3000 writes — coalescing collapsed nothing
+  // because there was never more than one delta per frame to collapse. The per-frame bound above
+  // is the regression guard: painting per token means writing per delta, which blows through
+  // `writes <= frames` the moment any frame receives two deltas.
   assert.ok(painted.frames > 0, 'the frame ticker must observe at least one animation frame');
   assert.ok(painted.writes <= painted.frames + 2,
     `expected at most one repaint per frame across ${painted.frames} frames, saw ${painted.writes}`);
-  assert.ok(painted.writes < painted.total / 3,
-    `expected frame coalescing to collapse ${painted.total} deltas, saw ${painted.writes} repaints`);
 });
 
 test('a streamed answer renders exactly like the same answer replayed from history', async t => {

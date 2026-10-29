@@ -118,6 +118,25 @@ export function describeSpawnFailure(command: string, error: Error): string {
   return `${command}: ${error.message}`;
 }
 
+/**
+ * Windows shells resolve commands themselves, so a missing binary never
+ * surfaces as `ENOENT`: cmd.exe starts, reports "not recognized" on stderr and
+ * exits 1, which the exit handler would report as `exited (code 1)` — naming
+ * the cause only in the shell's own language. Folding the standard wordings
+ * into the not-found explanation gives the row the same actionable message on
+ * every platform.
+ */
+const WINDOWS_NOT_FOUND = /(is not recognized as an internal or external command|operable program or batch file|is not recognized as the name of a cmdlet|command not found)/i;
+
+/** The user-facing reason a stdio server never came up, from its exit. */
+export function describeServerExit(command: string, code: number, stderrTail: string): string {
+  const tail = stderrTail.trim().split('\n').pop() ?? '';
+  if (WINDOWS_NOT_FOUND.test(tail)) {
+    return `${command}: command not found. The shell reported: ${tail}`;
+  }
+  return `${command} exited (code ${code})${tail ? `: ${tail}` : ''}`;
+}
+
 interface JsonRpcResponse {
   id?: number | string;
   result?: any;
@@ -235,8 +254,7 @@ export class McpConnection {
       if (!isCurrent()) return;
       this.connected = false;
       if (code) {
-        const tail = stderrTail.trim().split('\n').pop();
-        this.lastError = `${this.config.command} exited (code ${code})${tail ? `: ${tail}` : ''}`;
+        this.lastError = describeServerExit(this.config.command ?? '', code, stderrTail);
       }
       const reason = this.lastError || 'MCP server closed';
       for (const { reject } of this.pending.values()) reject(new Error(reason));

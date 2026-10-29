@@ -121,7 +121,9 @@ test('continuation messages resume from partial output and preserve context', ()
   assert.match(agent, /function appendPartialAnswer\(/);
   // Anchored on the catch branch, which also guards against the abort that now
   // precedes the commit path (so this cannot latch onto that earlier check).
-  const catchStart = agent.indexOf('} catch (error) {\n      if (run.controller.signal.aborted) {');
+  // The needle is newline-agnostic: a Windows checkout hands the reader CRLF
+  // files, and a `\n`-built needle never matched there.
+  const catchStart = agent.indexOf('if (run.controller.signal.aborted) {', agent.indexOf('} catch (error) {', agent.lastIndexOf('catch (attemptError)')));
   assert.ok(catchStart > 0, 'the run catch branch is present');
   assert.match(agent.slice(catchStart, catchStart + 600), /appendPartialAnswer\(runMessages, partialAnswer \|\| resume\?\.partialText\)/);
   assert.match(agent, /appendPartialAnswer\(runMessages, fields\.partialText \|\| partialAnswer \|\| resume\?\.partialText\)/);

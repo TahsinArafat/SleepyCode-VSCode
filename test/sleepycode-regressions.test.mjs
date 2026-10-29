@@ -1572,3 +1572,16 @@ test('opening the MCP settings page probes the servers instead of promising to',
   // the chat renders these rows.
   assert.doesNotMatch(agent, /type: 'mcpStatus'/);
 });
+
+test('a Windows path and a Windows not-found read like any other command', () => {
+  // splitCommandLine used backslash as an escape, which silently rewrote
+  // `C:\tools\node.exe` into `C:toolsnode.exe`; and on Windows a missing
+  // binary never surfaces as ENOENT — cmd.exe exits 1 with "not recognized",
+  // which the row reported as a bare `exited (code 1)`. Both are folded here.
+  const core = read('src/mcp-core.ts');
+  const client = read('src/mcp-client.ts');
+  assert.doesNotMatch(core, /char === '\\\\' && i \+ 1 < input\.length/);
+  assert.match(client, /WINDOWS_NOT_FOUND/);
+  assert.match(client, /describeServerExit/);
+  assert.match(client, /describeServerExit\(this\.config\.command \?\? '', code, stderrTail\)/);
+});

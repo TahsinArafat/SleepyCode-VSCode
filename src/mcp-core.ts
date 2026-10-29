@@ -188,8 +188,15 @@ export function parseMcpServers(raw: string): Record<string, McpServer> {
  * "npx -y mcp-archiveorg" and fails with "command not found".
  *
  * Intentionally small: this is not a shell. No globbing, no variables, no
- * operators — just whitespace splitting with quotes and escapes, which is all a
- * command line in a settings field needs.
+ * operators — just whitespace splitting with quotes, which is all a command
+ * line in a settings field needs.
+ *
+ * Backslash is NOT an escape here. On POSIX it sometimes is, but on Windows it
+ * is the path separator, and treating it as one silently rewrote
+ * `C:\hostedtool\cache\windows\node.exe` into `C:hostedtoolcachewindowsnode.exe`
+ * (that exact mangling showed up in CI). A literal backslash needs no help — it
+ * survives this splitter untouched — and a space inside one argument is what
+ * quotes are for.
  */
 export function splitCommandLine(value: string | undefined): string[] {
   const input = (value ?? '').trim();
@@ -207,11 +214,6 @@ export function splitCommandLine(value: string | undefined): string[] {
     }
     if (char === '"' || char === "'") {
       quote = char;
-      started = true;
-      continue;
-    }
-    if (char === '\\' && i + 1 < input.length) {
-      current += input[++i];
       started = true;
       continue;
     }
