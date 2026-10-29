@@ -119,8 +119,11 @@ test('continuation messages resume from partial output and preserve context', ()
   assert.match(agent, /isContinuation = \/\^\(\?:continue\|keep going\|go on\|please continue\|continue from where you stopped\|proceed\|finish\)\\\.\?\$\/i/);
   // Both catch branches fold the streamed answer into history, including the deliberate stop.
   assert.match(agent, /function appendPartialAnswer\(/);
-  const aborted = agent.slice(agent.indexOf('if (run.controller.signal.aborted) {'));
-  assert.match(aborted.slice(0, 400), /appendPartialAnswer\(runMessages, partialAnswer \|\| resume\?\.partialText\)/);
+  // Anchored on the catch branch, which also guards against the abort that now
+  // precedes the commit path (so this cannot latch onto that earlier check).
+  const catchStart = agent.indexOf('} catch (error) {\n      if (run.controller.signal.aborted) {');
+  assert.ok(catchStart > 0, 'the run catch branch is present');
+  assert.match(agent.slice(catchStart, catchStart + 600), /appendPartialAnswer\(runMessages, partialAnswer \|\| resume\?\.partialText\)/);
   assert.match(agent, /appendPartialAnswer\(runMessages, fields\.partialText \|\| partialAnswer \|\| resume\?\.partialText\)/);
   assert.match(agent, /const historyUserText = resume \? \(resume\.originalUserText \|\| userText\) : userText;/);
 });

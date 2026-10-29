@@ -3,22 +3,25 @@ import assert from 'node:assert/strict';
 import * as review from '../src/review-actions.ts';
 
 /*
- * The classic changes card offered Stage all, Commit, Source Control and Restore
- * checkpoint. The React review bar offers only Keep All / Undo All plus per-file
- * Keep and Undo, so a response could be staged but never committed and never
- * rolled back to its checkpoint from the chat.
+ * The review bar's actions.
  *
- * These builders exist so each button posts a message the host already handles,
- * and so a button whose target is missing is disabled rather than dead. The host
- * resolves an edit through a conversation and the turn that made it, which is why
- * both ids are required for everything here.
+ * Two of the four the classic card offered are gone rather than left standing:
+ * "Stage all" duplicated Keep All (staging is what Keep All does), and "Restore
+ * checkpoint" rolled every file back to its pre-turn state — the opposite of the
+ * Keep All button beside it, and available where it belongs in Undo History. A
+ * button whose label promises a state change it should not make is worse than no
+ * button at all.
+ *
+ * These builders exist so each remaining button posts a message the host already
+ * handles, and so a button whose target is missing is disabled rather than dead.
+ * The host resolves an edit through a conversation and the turn that made it.
  */
 
 const ctx = { conversationId: 'c1', itemId: 'i1', paths: ['a.ts', 'b.ts'], running: false };
 
-test('the card offers the four actions the classic one had', () => {
+test('the bar offers Keep All, Undo All, Commit and Source Control, and nothing else', () => {
   const actions = review.changeActions(ctx);
-  assert.deepEqual(actions.map(a => a.id), ['stageAll', 'commit', 'sourceControl', 'restore']);
+  assert.deepEqual(actions.map(a => a.id), ['keepAll', 'undoAll', 'commit', 'sourceControl']);
   for (const action of actions) {
     assert.ok(action.label, `${action.id} needs a label`);
     assert.ok(action.hint.length > 10, `${action.id} needs a hint`);
@@ -26,11 +29,21 @@ test('the card offers the four actions the classic one had', () => {
   }
 });
 
-test('stage all posts the paths, without naming the turn', () => {
-  // React-level intent: the host resolves the turn, so the button works whether or
-  // not the webview knows the id.
-  assert.deepEqual(review.changeActionMessages('stageAll', ctx), [
-    { type: 'stageAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
+test('the two that duplicated or contradicted Keep All are gone', () => {
+  // "Stage all" staged — which is exactly what Keep All does — and "Restore
+  // checkpoint" reverted every file, the opposite of the button next to it.
+  assert.equal(review.changeActionMessages('stageAll', ctx).length, 0);
+  assert.equal(review.changeActionMessages('restore', ctx).length, 0);
+  assert.equal(review.changeActions(ctx).some(action => action.id === 'stageAll' || action.id === 'restore'), false);
+});
+
+test('keeping and undoing post the paths the bar is showing', () => {
+  // The host resolves the turn; the paths are what the user is looking at.
+  assert.deepEqual(review.changeActionMessages('keepAll', ctx), [
+    { type: 'acceptAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
+  ]);
+  assert.deepEqual(review.changeActionMessages('undoAll', ctx), [
+    { type: 'rejectAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
   ]);
 });
 
@@ -39,41 +52,39 @@ test('commit and source control post intents the adapter can translate', () => {
   // dropped — `toSleepyMessage` has no case for them — so both buttons did nothing.
   assert.deepEqual(review.changeActionMessages('commit', ctx), [{ type: 'commitChanges', conversationId: 'c1' }]);
   assert.deepEqual(review.changeActionMessages('sourceControl', ctx), [{ type: 'openSourceControl', conversationId: 'c1' }]);
-  assert.deepEqual(review.changeActionMessages('restore', ctx), [{ type: 'restoreCheckpoint', conversationId: 'c1' }]);
 });
 
 test('the turn id is optional, because the host tracks it', () => {
   // Requiring it left every one of these permanently disabled: turns carry no id
   // in the webview.
-  for (const action of ['stageAll', 'commit', 'sourceControl', 'restore']) {
+  for (const action of ['keepAll', 'undoAll', 'commit', 'sourceControl']) {
     assert.equal(review.changeActionMessages(action, { ...ctx, itemId: undefined }).length, 1, `${action} without a turn id`);
   }
 });
 
 test('nothing fires with no conversation and no changes at all', () => {
-  for (const action of ['stageAll', 'commit', 'sourceControl', 'restore']) {
+  for (const action of review.changeActions({}).map(a => a.id)) {
     assert.deepEqual(review.changeActionMessages(action, {}), [], `${action} with nothing`);
   }
 });
 
-test('stage all needs at least one path', () => {
-  // An empty list would post a stage request that stages nothing.
-  assert.deepEqual(review.changeActionMessages('stageAll', { ...ctx, paths: [] }), []);
-  assert.deepEqual(review.changeActionMessages('stageAll', { ...ctx, paths: undefined }), []);
-  // The others do not depend on the list, because the host resolves the files.
+test('keeping and undoing need at least one path', () => {
+  // An empty list would post a "keep everything" for nothing.
+  assert.deepEqual(review.changeActionMessages('keepAll', { ...ctx, paths: [] }), []);
+  assert.deepEqual(review.changeActionMessages('undoAll', { ...ctx, paths: undefined }), []);
+  // Commit and Source Control do not depend on the list: the host resolves
+  // the files from the turn.
   assert.equal(review.changeActionMessages('commit', { ...ctx, paths: [] }).length, 1);
 });
 
-test('actions that mutate files are disabled while a run is in flight', () => {
-  // The host refuses these mid-run; a disabled button beats a silent no-op.
+test('every action is disabled while a run is in flight', () => {
+  // The host refuses all of them mid-run — a revert racing a live edit is worse
+  // than a disabled button — so the bar must not offer one it cannot run.
   const running = { ...ctx, running: true };
-  for (const action of ['stageAll', 'commit', 'restore']) {
-    assert.equal(review.changeActions(running).find(a => a.id === action).enabled, false, `${action} while running`);
-    assert.deepEqual(review.changeActionMessages(action, running), [], `${action} while running`);
+  for (const action of review.changeActions(running)) {
+    assert.equal(action.enabled, false, `${action.id} while running`);
+    assert.deepEqual(review.changeActionMessages(action.id, running), [], `${action.id} while running`);
   }
-  // Opening Source Control only reveals a view, so it stays available.
-  assert.equal(review.changeActions(running).find(a => a.id === 'sourceControl').enabled, true);
-  assert.equal(review.changeActionMessages('sourceControl', running).length, 1);
 });
 
 test('an unknown action posts nothing', () => {

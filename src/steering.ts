@@ -22,6 +22,10 @@ export interface SteeringEntry {
   steering?: true;
 }
 
+/** Opening tag of the guidance frame. Exported so a step can recognise (and drop) a frame it already carries. */
+export const STEERING_OPEN_TAG = '<user_update>';
+export const STEERING_CLOSE_TAG = '</user_update>';
+
 /**
  * How mid-run guidance reaches the model.
  *
@@ -31,7 +35,7 @@ export interface SteeringEntry {
  * part of the payload, not decoration.
  */
 export function steeringGuidance(text: string): string {
-  return `<user_update>\nThe user added this while you were working. It is an update to the current task, not a new request: take it into account and continue from where you are.\n\n${text}\n</user_update>`;
+  return `${STEERING_OPEN_TAG}\nThe user added this while you were working. It is an update to the current task, not a new request: take it into account and continue from where you are.\n\n${text}\n${STEERING_CLOSE_TAG}`;
 }
 
 /** The steering entries waiting for this conversation, in arrival order. */

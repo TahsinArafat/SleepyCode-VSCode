@@ -3,7 +3,7 @@ import * as indexReport from './index-report';
 import * as hookRules from './hook-rules';
 import * as personas from './personas';
 import * as subagents from './subagents';
-import { steeringGuidance, takeSteering } from './steering';
+import { steeringGuidance, STEERING_CLOSE_TAG, STEERING_OPEN_TAG, takeSteering } from './steering';
 import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
@@ -63,7 +63,7 @@ import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
 import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
-import { fileChangeStats } from './line-diff';
+import { diffLines, fileChangeStats } from './line-diff';
 import { createWorktree, listWorktrees } from './worktrees';
 import { BrowserController } from './browser';
 import { CliClient, isPreferredCliModel, pickCliModel, type CliProviderCatalog } from './cli-client';
@@ -89,6 +89,11 @@ type PlanState = {
 };
 
 const MAX_CONCURRENT_RUNS = 3;
+
+/** How many times the startup MCP warm-up retries a server that is not up yet. */
+const MCP_WARM_ATTEMPTS = 5;
+/** Delay before each warm-up retry, in order (the last value repeats). */
+const MCP_WARM_BACKOFF_MS = [5_000, 15_000, 45_000, 120_000, 120_000];
 
 function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -276,6 +281,59 @@ function appendPartialAnswer(messages: ModelMessage[], partial: string | undefin
   messages.push({ role: 'assistant', content: text });
 }
 
+/**
+ * Drop the guidance frames a previous step injected, so a step never carries the
+ * same update twice.
+ *
+ * `prepareStep` re-appends every update so far (an update the model obeyed once
+ * and then lost is not steering), but the messages it is handed already contain
+ * the frames the previous step injected. Re-appending on top of those would grow
+ * the request by one copy of every update per step.
+ */
+export function stripStaleGuidance<M extends { role?: string; content?: unknown }>(messages: readonly M[]): M[] {
+  return messages.filter(message => {
+    if (message?.role !== 'user' || typeof message.content !== 'string') return true;
+    return !(message.content.startsWith(STEERING_OPEN_TAG) && message.content.includes(STEERING_CLOSE_TAG));
+  });
+}
+
+/**
+ * A unified-style diff for an edit tool's call, so its card shows WHAT changed
+ * instead of only the file name.
+ *
+ * The diff is built from what the call itself carries: `write_file` has the new
+ * contents, and `replace_text` has the exact block it replaces. Nothing is read
+ * back from disk — a fabricated "before" would claim a change that did not
+ * happen. Returning nothing is the correct answer when there is nothing to
+ * compare; a diff nobody can trust is worse than no diff.
+ */
+export function editDiffFor(toolName: unknown, input: unknown): string | undefined {
+  const args = (input ?? {}) as { content?: unknown; oldText?: unknown; newText?: unknown };
+  if (toolName === 'write_file') {
+    if (typeof args.content !== 'string') return undefined;
+    return diffBlock('', args.content, '@@ new file @@');
+  }
+  if (toolName === 'replace_text') {
+    if (typeof args.oldText !== 'string' || typeof args.newText !== 'string') return undefined;
+    return diffBlock(args.oldText, args.newText, '@@ replaced block @@');
+  }
+  return undefined;
+}
+
+/** Cap on a card's diff: the body is a summary, not an archive. */
+const EDIT_DIFF_MAX_LINES = 160;
+
+function diffBlock(before: string, after: string, header: string): string | undefined {
+  const lines = diffLines(before, after).lines;
+  if (!lines.some(line => line.kind === 'add' || line.kind === 'del')) return undefined;
+  const kept = lines.slice(0, EDIT_DIFF_MAX_LINES).map(line => {
+    const marker = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' ';
+    return `${marker}${line.text}`;
+  });
+  if (lines.length > kept.length) kept.push(`… ${lines.length - kept.length} more diff lines hidden`);
+  return `${header}\n${kept.join('\n')}`;
+}
+
 function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted.'));
   return new Promise((resolve, reject) => {
@@ -402,6 +460,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private fsVersion = 0;
   /** Cached merged MCP connection, reused across turns while its config signature is unchanged. */
   private mcpCache: { key: string; connection: McpConnection } | undefined;
+  /** Pending background MCP reconnect attempt (see `warmMcpConnections`). */
+  private mcpWarmTimer?: ReturnType<typeof setTimeout>;
 
   /**
    * Which engine owns the run loop. The Sleepy CLI owns it whenever it is
@@ -585,13 +645,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // the same streamed text a second time.
     if (busy) return;
     this.post({ type: 'cliSettled', conversationId });
+    // The projected items are the only record of what a CLI turn changed, so the
+    // review bar's target is derived from them here. Without it `commit` and
+    // `sourceControl` resolved no turn and did nothing on a CLI conversation.
+    this.recordChangeTarget(conversationId);
+    if (this.activeProject()?.activeConversationId === conversationId) {
+      void this.view?.webview.postMessage(adapter.pendingChangesMessage(conversation.items));
+    }
     this.syncConversations();
   }
 
   private applyCliLiveEvent(conversationId: string, event: import('./cli-engine').CliLiveEvent): void {
     if (event.kind === 'delta') this.post({ type: 'delta', conversationId, text: event.text });
     else if (event.kind === 'reasoningDelta') this.post({ type: 'reasoningDelta', conversationId, text: event.text });
-    else this.post({ type: 'tool', conversationId, phase: event.phase, id: event.id, tool: event.tool, name: event.name, failed: event.failed });
+    else this.post({
+      type: 'tool', conversationId, phase: event.phase, id: event.id, tool: event.tool, name: event.name, failed: event.failed,
+      // Forwarded so the card has something to draw: the adapter reads `args` for
+      // the input and `result` for the output, and a live CLI call that omitted
+      // them rendered a shell command as `$ …`.
+      ...(event.input !== undefined ? { args: JSON.stringify(event.input) } : {}),
+      ...(event.result !== undefined ? { result: event.result } : {}),
+    });
   }
 
   private findConversation(conversationId: string): Conversation | undefined {
@@ -974,6 +1048,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private sendReactBootstrap(): void {
     const active = this.activeConversation();
     const selection = active ? this.selectionFor(active) : undefined;
+    // Re-opening or reloading the window starts with empty per-conversation maps,
+    // and every change action resolves its turn through them. Filled here so a
+    // review bar restored from history is actionable straight away instead of
+    // looking disabled until the next run.
+    this.recordChangeTarget(active?.id ?? '');
     // Answer from the last known state first. The network round trip for models and
     // account data used to gate the picker and the sign-in banner, so a fresh
     // window sat unusable until both came back — and stayed that way offline.
@@ -1736,7 +1815,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       writeSettings: async (patch) => {
         const config = vscode.workspace.getConfiguration('sleepycode');
         if (patch.model !== undefined) await config.update('model', patch.model, vscode.ConfigurationTarget.Global);
-        if (patch.maxSteps !== undefined) await config.update('maxSteps', patch.maxSteps, vscode.ConfigurationTarget.Global);
+        // `0` means unlimited and must survive the round trip. The manifest's
+        // `maximum: 200` bounds a finite limit, but a bare update clamps only
+        // inside the schema path — this handler is also reached from the settings
+        // window, so the value is normalised here rather than left to the schema.
+        if (patch.maxSteps !== undefined) {
+          const requested = Number(patch.maxSteps);
+          const bounded = requested === 0 ? 0 : Math.max(1, Math.min(200, Math.round(requested) || 200));
+          await config.update('maxSteps', bounded, vscode.ConfigurationTarget.Global);
+        }
         if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
         if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
         if (patch.systemNotifications !== undefined) await config.update('systemNotifications', patch.systemNotifications, vscode.ConfigurationTarget.Global);
@@ -1769,10 +1856,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.mcpCache = undefined;
       },
       syncConnections: async () => {
-        // A probe that just ran is the truth; re-running it makes the panel wait
-        // on every server a second time for an answer it already has.
-        const cached = this.mcpStatusCache;
-        if (cached && Date.now() - cached.at < 60_000) return cached.statuses;
+        // Reconnect is the user asking for a fresh answer, so the cache is
+        // bypassed. Answering from a probe that ran before a server was
+        // restarted is how the button appeared to do nothing: the row kept the
+        // old failure for another minute.
         return this.probeMcpConnections();
       },
       mcpLogin: async (name) => {
@@ -1908,12 +1995,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'openSourceControl') {
       void this.onMessage({ type: 'reviewChanges', conversationId, itemId } as WebMessage);
-      return true;
-    }
-    if (message.type === 'stageAllChanges') {
-      const paths = Array.isArray(message.paths) ? message.paths.filter((path: unknown) => typeof path === 'string') : [];
-      if (!paths.length) return true;
-      void this.onMessage({ type: 'gitStageChanges', conversationId, itemId, paths } as WebMessage);
       return true;
     }
     return false;
@@ -3115,6 +3196,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         void this.persistProjects();
         this.syncConversations();
         this.refreshSessionStats();
+        // The bar restored from this conversation's history needs its turn id,
+        // or every button on it resolves nothing and reads as broken.
+        this.recordChangeTarget(message.id);
         // Switching chats must leave the composer on a model this conversation's
         // engine can run; without this a model-less CLI chat would show the
         // local SleepyAI default and substitute on its first send.
@@ -3225,7 +3309,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'restoreCheckpoint') {
-      if (this.runs.size) return;
+      // Scoped to the conversation being restored, not to "anything is running".
+      // A background run in another tab used to make this return silently, so the
+      // button did nothing at all and said nothing about why.
+      if (this.runs.has(message.conversationId)) {
+        void vscode.window.showInformationMessage('Wait until this conversation finishes, then restore the checkpoint.');
+        return;
+      }
       const root = this.workspaceRoot();
       const project = this.activeProject();
       if (!root || !project || project.path !== root.fsPath || !isGitTrackedWorkspace(root.fsPath)) {
@@ -3234,7 +3324,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       const conversation = project.conversations.find(item => item.id === message.conversationId);
       const targetIndex = conversation?.items.findIndex(item => item.id === message.itemId && item.role === 'assistant') ?? -1;
-      if (!conversation || targetIndex < 0) return;
+      if (!conversation || targetIndex < 0) {
+        void vscode.window.showInformationMessage('That restore point is no longer in this conversation.');
+        return;
+      }
       // Restore rewinds items and structured history together. A CLI
       // conversation has no local restore point and no structured history to
       // keep in step, so there is nothing here it can honestly rewind.
@@ -4316,6 +4409,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const engine = await this.ensureEngine();
       stage('dispatch');
       const sending = project.conversations.find(conversation => conversation.id === conversationId);
+      const steering = (message as { steering?: boolean }).steering === true;
+      // A CLI conversation is owned by a process whose step loop this build has
+      // no mid-step hook into: the update would be delivered as a brand-new prompt
+      // (interrupting the turn) while the composer already drew it as inline
+      // guidance. Refuse it and say so, rather than doing something that looks
+      // like steering and is not.
+      if (steering && sending && this.cliOwns(sending, engine)) {
+        this.log('warn', 'message.steer.cli-unsupported', `conversation=${conversationId}`);
+        this.post({
+          type: 'error',
+          conversationId,
+          keepTurn: true,
+          text: 'This chat is running on the Sleepy CLI, which does not accept mid-run updates. Your message was not sent — wait for the turn to finish, or stop it and send it as the next request.',
+        });
+        this.post({
+          type: 'steered',
+          conversationId,
+          requestId: (message as { requestId?: string }).requestId,
+          text: '',
+          rejected: true,
+        });
+        return;
+      }
       if (sending && this.cliOwns(sending, engine)) {
         void this.sendViaCli(conversationId, sendText, root).catch(error => {
           const detail = errorMessage(error);
@@ -4328,10 +4444,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       stage('done');
       // Guidance for the run in progress is queued even when a slot is free: it
       // belongs to the current task, so starting a run would make it a new one.
-      const steering = (message as { steering?: boolean }).steering === true;
       if (steering && this.runs.has(conversationId)) {
         this.log('info', 'message.steer.queued', `conversation=${conversationId}`);
-        this.enqueue(sendText, conversationId, composerContext, promptContext, true);
+        // The client's request id becomes the queue id, so the `steered` echo
+        // names the exact row the webview drew optimistically.
+        this.enqueue(sendText, conversationId, composerContext, promptContext, true, (message as { requestId?: string }).requestId);
         return;
       }
       if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
@@ -4342,6 +4459,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         void this.run(sendText, conversationId, undefined, undefined, composerContext, promptContext).catch(error => {
           const detail = errorMessage(error);
           this.log('error', 'run.unhandled', detail);
+          // Abort the run's controller before dropping its entry. Deleting the
+          // entry alone marked the conversation idle while the stream was still
+          // writing into it: `run()`'s own `finally` then cleared `runs` a second
+          // time and drained the queue, so the turn's text kept arriving on a chat
+          // the UI had finished. The abort is what actually ends the work.
+          this.runs.get(conversationId)?.controller.abort();
           // The user turn is persisted before the run starts, so a failure escaping the
           // run left a turn that nothing ever answered. Both the streamed partial text
           // and this error lived only in the DOM, so a reload erased the evidence. Persist
@@ -4357,7 +4480,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             void this.persistProjects();
           }
           this.post({ type: 'error', conversationId, text: detail, keepTurn: true });
-          this.runs.delete(conversationId);
           this.post({ type: 'state', conversationId, running: false, label: '' });
         });
       }
@@ -4448,11 +4570,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return taken.map(entry => entry.text);
   }
 
-  private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string, steering = false): void {
+  private enqueue(text: string, conversationId: string, context?: ComposerContext, promptContext?: string, steering = false, requestId?: string): void {
     // Multiple follow-ups may be queued for the same conversation; they run in FIFO order.
     // `steering` marks guidance the run in progress will consume, so it never
     // queues up as a turn of its own.
-    this.queue.push({ id: `q${++this.queueSeq}`, text, conversationId, context, promptContext, ...(steering ? { steering: true as const } : {}) });
+    this.queue.push({ id: requestId && requestId.trim() ? requestId : `q${++this.queueSeq}`, text, conversationId, context, promptContext, ...(steering ? { steering: true as const } : {}) });
     this.postWorkflow(conversationId);
   }
 
@@ -4519,15 +4641,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // running `git add -A` again.
         runGitTree = this.lastGitTree.tree;
       } else {
-        // Capture the undo checkpoint without blocking send: `runGitTree` is only
-        // consumed after the stream (undo checkpointing and post-run diffs), never on
-        // the first-byte path. Awaiting it here made every send wait on `git add -A`.
-        void captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 })
-          .then(tree => {
-            runGitTree = tree;
-            this.lastGitTree = { root: root.fsPath, tree, version: versionAtSend };
-          })
-          .catch(error => this.log('warn', 'run.checkpoint.unavailable', errorMessage(error)));
+        // Awaited, deliberately. The tree is the BASELINE every change of this
+        // turn is measured against, and the run is already executing: capturing
+        // it concurrently meant `git add -A` could snapshot the mid-turn state,
+        // so the turn's first edits were recorded as "before" and could neither
+        // be undone nor reported as changed. It is also what the `pending`
+        // checkpoint needs, and that checkpoint is written from inside the loop.
+        // A bounded `git add -A` is worth this, and the capture is cached for the
+        // next send when the workspace has not moved.
+        try {
+          runGitTree = await captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 });
+          this.lastGitTree = { root: root.fsPath, tree: runGitTree, version: versionAtSend };
+        } catch (error) {
+          this.log('warn', 'run.checkpoint.unavailable', errorMessage(error));
+        }
       }
     }
     if (resume) {
@@ -4560,10 +4687,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // the step that consumed it. Wiping it after one step meant the model read the
     // update, acted on it, and then went back to what it had been doing because
     // the next request no longer contained it.
+    // Drained in `prepareStep` (below), which runs BETWEEN steps, so an update
+    // reaches the model on the next request instead of only once the turn ends.
     const runGuidance: string[] = [];
+    // The same updates as the framed text the model saw, recorded on the turn's
+    // durable history. An ASSISTANT message, deliberately: a `user` message here
+    // would put two user turns in a row into the next request, which strict
+    // providers reject — the very hazard `safeHistoryStart` exists to avoid.
+    const runGuidanceLog: string[] = [];
     /** Hand the guidance to the transcript once, at the end, so later turns see it. */
     const flushGuidance = (): void => {
-      for (const guidance of runGuidance.splice(0)) runMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
+      for (const guidance of runGuidanceLog.splice(0)) runMessages.push({ role: 'assistant', content: guidance } as ModelMessage);
     };
     const snapshotByPath = new Map<string, FileSnapshot>((resume?.fileSnapshot ?? []).map(snap => [snap.path, snap]));
     const postToolEvent = (message: unknown): void => {
@@ -5033,7 +5167,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           role === 'worker' && mcpConnection?.instructions.length ? `Connected MCP instructions:\n${mcpConnection.instructions.join('\n')}` : '',
           skillBlock,
         ].filter(Boolean).join('\n\n');
-        const subagentModelId = definition?.model || this.subagentModels()[role] || model;
+        // A subagent always runs on a real model id. Every source is a string
+        // that can be empty — a definition with `model: ''`, a role map saved
+        // with blanks, and `model` itself when the catalogue lookup above found
+        // nothing — and `provider('')` is a request the provider rejects with a
+        // message that names no cause. Falling back to the chat's model keeps the
+        // delegation working, and it is what the parent is already running on.
+        const subagentModelId = definition?.model?.trim() || this.subagentModels()[role]?.trim() || model;
         let subagentProvider = provider;
         let subagentProviderId = providerConfig.id;
         if (subagentModelId && subagentModelId !== model) {
@@ -5231,8 +5371,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         instructions,
         tools: runTools,
         stopWhen: maxSteps === 0 ? isLoopFinished() : isStepCount(maxSteps),
+        // The one place a mid-run update can reach the model promptly. The SDK
+        // owns the step loop, so without this override the guidance queued while
+        // the model was thinking or running a tool was only ever read after the
+        // whole turn had finished — which is exactly "it just sends the message
+        // after the turn completed".
+        prepareStep: ({ messages: stepMessages }) => steeringStep(stepMessages),
         ...(Object.keys(effortBody).length ? { providerOptions: { [providerConfig.id]: effortBody } } : {}),
       });
+      const steeringStep = (stepMessages: readonly ModelMessage[]): { messages: ModelMessage[] } | undefined => {
+        const taken = this.drainSteering(conversationId);
+        if (!taken.length) return undefined;
+        runGuidance.push(...taken);
+        runGuidanceLog.push(...taken.map(steeringGuidance));
+        return {
+          messages: [
+            ...stripStaleGuidance(stepMessages),
+            ...runGuidance.map(guidance => ({ role: 'user', content: steeringGuidance(guidance) }) as ModelMessage),
+          ],
+        };
+      };
 
       let streamPrompt: string;
       let resumeContext = '';
@@ -5338,11 +5496,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // Keep prior conversation history AND this turn's already-produced
             // tool calls/results. Resume/auto-continue used to drop that live
             // slice, which is how partial context disappeared mid-iteration.
-            // Guidance the user added while this step was being planned or worked.
-            // It goes AFTER the request (see the push below), because the request
-            // itself is the last message `iterationRequestMessages` produces: a
-            // guidance message placed before it reads as the original ask.
-            runGuidance.push(...this.drainSteering(conversationId));
+            // Guidance is drained in `prepareStep`, between steps, not here: this
+            // request is also the one step whose guidance the SDK has not yet
+            // had a chance to attach.
             const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
             let agentMessages: ModelMessage[] | undefined;
             // The live slice is unbudgeted by nature: one assistant tool-call + result
@@ -5378,8 +5534,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
             if (runGuidance.length) {
               if (!agentMessages) agentMessages = [{ role: 'user', content: streamPrompt } as ModelMessage];
-              // Every update so far, every step: the model has to keep steering by
-              // them, not merely have steered by them once.
+              // Every update so far: the model has to keep steering by them, not
+              // merely have steered by them once. Later steps get the same set
+              // from `prepareStep`.
               for (const guidance of runGuidance) agentMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
             }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
@@ -5444,7 +5601,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 if (taskEntry) taskEntry.done = true;
                 const elapsed = durationMs(toolStartedAt.get(toolCall.toolCallId));
                 toolStartedAt.delete(toolCall.toolCallId);
-                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input), args: toolArgsText(toolCall.input), result: toolResultText(toolOutput), durationMs: elapsed, failed: toolOutput?.type === 'tool-error' });
+                // An edit card shows the change it made. The diff comes from the
+                // call's own before/after, so the card never claims a change the
+                // tool did not make.
+                const editDiff = toolOutput?.type === 'tool-error' ? undefined : editDiffFor(toolCall.toolName, toolCall.input);
+                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input), args: toolArgsText(toolCall.input), result: toolResultText(toolOutput), durationMs: elapsed, failed: toolOutput?.type === 'tool-error', ...(editDiff ? { diff: editDiff } : {}) });
                 updatePending(true);
               },
               onStepFinish: step => {
@@ -5565,6 +5726,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             const priorThinking = persistedReasoningBody(reasoningBuffer.trim() || collectReasoningText(work));
             streamPrompt = `Continue the original coding request from exactly where you stopped. Do not mention this instruction, do not repeat prior text, and do not stop after describing the next action. Use tools to complete all remaining work, verify it, and only then give the concise final summary.\n\nOriginal request:\n${userText}\n\nWork shown so far:\n${answer.slice(-8_000)}${priorThinking ? `\n\nYour previous thinking (do not repeat it; continue from it):\n${priorThinking.slice(-reasoningLimit)}` : ''}`;
           } while (continuationCount < 2 && !run.controller.signal.aborted);
+          // Stop requested while the stream was draining. Committing here would
+          // push a `done` for a turn the user cancelled and, worse, persist the
+          // assistant item as a success: the stop branch below (which preserves
+          // the partial work as a retryable card) never runs. Throwing is what
+          // routes control there.
+          if (run.controller.signal.aborted) {
+            throw run.controller.signal.reason instanceof Error ? run.controller.signal.reason : new Error('Stopped.');
+          }
           this.sendUsage();
           const paused = pausedByStepLimit(maxSteps, lastIterationStepCount, finishReason);
           // The model hit its output limit and cut the answer mid-sentence. That is
@@ -5775,15 +5944,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Auto-compaction must run after this.runs.delete above: compactConversation
       // refuses to compact while a run is active for the conversation.
       if (providerConfig) this.maybeAutoCompact(conversation, providerConfig.id, this.selectionFor(conversation).model);
-      const own = this.queue.find(entry => entry.conversationId === conversationId);
-      const next = own ?? this.queue[0];
-      if (next && this.runs.size < MAX_CONCURRENT_RUNS) {
-        this.queue = this.queue.filter(entry => entry !== next);
-        this.postWorkflow(next.conversationId);
+      // Only THIS conversation's next prompt is drained here. Falling back to
+      // `this.queue[0]` started another chat's run from this one's `finally` —
+      // before that chat had finished its own turn, and without the user ever
+      // asking for it to run. Other conversations are drained by their own run,
+      // or by a send when nothing is running for them.
+      const own = this.queue.find(entry => entry.conversationId === conversationId && !entry.steering);
+      if (own && this.runs.size < MAX_CONCURRENT_RUNS) {
+        this.queue = this.queue.filter(entry => entry !== own);
+        this.postWorkflow(own.conversationId);
         // Guidance that outlived its run corrects a task that has already ended,
         // so it becomes the next turn instead of being dropped.
-        void this.run(next.text, next.conversationId, undefined, undefined, next.context, next.promptContext);
-      } else if (own) {
+        void this.run(own.text, own.conversationId, undefined, undefined, own.context, own.promptContext);
+      } else {
+        // Republish even when nothing runs: a steering row left in the queue for
+        // this chat would otherwise stay on screen with no run to consume it.
         this.postWorkflow(conversationId);
       }
     }
@@ -6214,8 +6389,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!this.reactMode) return;
     const project = this.activeProject();
     const conversation = project?.conversations.find(item => item.id === conversationId);
-    if (!project || !conversation || project.activeConversationId !== conversationId) return;
+    if (!project || !conversation) return;
+    // The turn is recorded even when the chat is not on screen. `handleReactChangeAction`
+    // resolves every action through it, so a conversation whose changes were
+    // published while it was in the background still had no target — and after a
+    // reload nothing fills it until the next run. Both maps are cheap to keep.
+    const target = adapter.latestAssistantItemId(conversation.items);
+    if (target) this.reactChangeTarget.set(conversationId, target);
+    this.reactPendingPaths.set(conversationId, adapter.pendingChangesOf(conversation.items).map((change) => change.path));
+    if (project.activeConversationId !== conversationId) return;
     void this.view?.webview.postMessage(adapter.pendingChangesMessage(conversation.items));
+  }
+
+  /**
+   * Remember which turn owns a conversation's review bar, without publishing.
+   *
+   * Opening a conversation or reloading the window starts from empty maps, and
+   * every change action resolves its files through that turn — so a bar restored
+   * from history was drawn disabled until the next run happened to publish one.
+   */
+  private recordChangeTarget(conversationId: string): void {
+    if (!this.reactMode || !conversationId) return;
+    const conversation = this.findConversation(conversationId);
+    if (!conversation) return;
     const target = adapter.latestAssistantItemId(conversation.items);
     if (target) this.reactChangeTarget.set(conversationId, target);
     this.reactPendingPaths.set(conversationId, adapter.pendingChangesOf(conversation.items).map((change) => change.path));
@@ -6309,9 +6505,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void vscode.window.showInformationMessage(`Committed SleepyCode task${hash ? ` (${hash})` : ''}.`);
   }
 
-  /** Status per saved MCP server, cached for the last probe of this window. */
-  private mcpStatusCache: { at: number; statuses: settingsAdapter.PanelMcpStatus[] } | undefined;
-
   /**
    * Connect every saved MCP server and report one status row per server.
    *
@@ -6339,9 +6532,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       statuses = [];
     }
     // One row per saved server, always: never leave the panel guessing.
-    const complete = settingsAdapter.completeMcpStatuses(connections, statuses);
-    this.mcpStatusCache = { at: Date.now(), statuses: complete };
-    return complete;
+    return settingsAdapter.completeMcpStatuses(connections, statuses);
   }
 
   /**
@@ -6354,12 +6545,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private async warmMcpConnections(): Promise<void> {
     if (!this.reactMode) return;
-    try {
-      const statuses = await this.probeMcpConnections();
-      if (statuses.length) this.log('info', 'mcp.warm.done', `${statuses.filter(row => row.connected).length}/${statuses.length} connected`);
-    } catch (error) {
-      this.log('warn', 'mcp.warm.failed', errorMessage(error));
-    }
+    // Retried in the background: a server that is not up yet when the window
+    // opens (a local process still starting, a laptop waking up, a flaky
+    // network) used to stay "idle" until someone pressed Reconnect by hand.
+    // Each attempt is a fresh probe, and the panel is told what it found, so a
+    // server that comes back becomes usable without any user action.
+    if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
+    let attempt = 0;
+    const run = async (): Promise<void> => {
+      attempt += 1;
+      try {
+        const statuses = await this.probeMcpConnections();
+        if (!statuses.length) return;
+        const connected = statuses.filter(row => row.connected).length;
+        this.log('info', 'mcp.warm.done', `${connected}/${statuses.length} connected (attempt ${attempt})`);
+        // Push the result so an open settings window shows reality without a
+        // manual sync, and so a row that came back stops reading "idle".
+        this.post({ type: 'mcpStatus', statuses });
+        const stillDown = statuses.filter(row => !row.connected && row.error !== 'Disabled').length;
+        if (connected === 0 && stillDown > 0 && attempt < MCP_WARM_ATTEMPTS) schedule();
+      } catch (error) {
+        this.log('warn', 'mcp.warm.failed', errorMessage(error));
+        if (attempt < MCP_WARM_ATTEMPTS) schedule();
+      }
+    };
+    const schedule = (): void => {
+      // 5s, 15s, 45s, 2m: long enough not to hammer a broken server, short
+      // enough that a restart is picked up while the user is still looking.
+      const delay = MCP_WARM_BACKOFF_MS[Math.min(attempt, MCP_WARM_BACKOFF_MS.length - 1)]!;
+      this.mcpWarmTimer = setTimeout(() => { void run(); }, delay);
+      this.mcpWarmTimer.unref?.();
+    };
+    await run();
   }
 
   private hookRules(): HookRule[] {
@@ -7137,10 +7354,13 @@ ${cached}`;
       }
       return;
     }
-    // The turn is over — stop continuous preview captures until the next browser tool.
+    // The turn is over — stop continuous preview captures until the next browser
+    // tool. `steered` is NOT one of those: it reports guidance the still-running
+    // turn just consumed, so treating it as an end killed the live preview of a
+    // run that was very much alive.
     if (message && typeof message === 'object') {
       const type = (message as { type?: unknown }).type;
-      if (type === 'done' || type === 'generationError' || type === 'steered') this.stopBrowserPreviewPolling();
+      if (type === 'done' || type === 'generationError') this.stopBrowserPreviewPolling();
     }
     // In React mode, translate SleepyCode messages into the React webview protocol.
     let outgoing: unknown = message;

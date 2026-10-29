@@ -159,6 +159,57 @@ const TOOL_LABELS: Record<string, string> = {
   BrowserScreenshot: "Taking browser screenshot",
   BrowserInteract: "Interacting with browser page",
   BrowserClose: "Closing browser",
+  // SleepyCode's own tool ids, beyond the ones the ported base already knew.
+  write_file: "Writing file",
+  replace_text: "Editing file",
+  list_files: "Listing files",
+  search_files: "Searching workspace",
+  get_diagnostics: "Checking diagnostics",
+  run_command: "Running command",
+  terminal_start: "Starting terminal",
+  terminal_write: "Writing to terminal",
+  terminal_read: "Reading terminal",
+  terminal_list: "Listing terminals",
+  terminal_stop: "Stopping terminal",
+  delegate_task: "Running subagent",
+  write_plan: "Saving plan",
+  memory_read: "Reading project memory",
+  memory_update: "Updating project memory",
+  obs_recall: "Recalling archived output",
+  use_skill: "Reading installed skill",
+  search_skills: "Searching skills",
+  install_skill: "Installing skill",
+  skillsmp_search: "Searching SkillsMP",
+  skillsmp_get_skill: "Previewing skill",
+  skillsmp_install_skill: "Installing skill",
+  skillsmp_list_installed: "Listing installed skills",
+  skillsmp_read_installed: "Reading installed skill",
+  skillsmp_list_repo_skills: "Listing repository skills",
+  repo_search: "Searching the codebase",
+  repo_symbol: "Finding symbols",
+  repo_architecture: "Mapping imports",
+  worktree_create: "Creating worktree",
+  worktree_list: "Listing worktrees",
+  worktree_status: "Checking worktree",
+  worktree_compare: "Comparing worktrees",
+  worktree_merge: "Merging worktree",
+  worktree_remove: "Removing worktree",
+  worktree_run: "Running in worktree",
+  github_list_issues: "Listing GitHub issues",
+  github_get_issue: "Reading GitHub issue",
+  github_start_from_issue: "Creating branch for issue",
+  github_commit: "Committing changes",
+  github_open_pr: "Opening pull request",
+  github_pr_status: "Checking pull request",
+  github_review_comments: "Reading review comments",
+  github_pr_comment: "Commenting on pull request",
+  TerminalStart: "Starting terminal",
+  TerminalWrite: "Writing to terminal",
+  TerminalRead: "Reading terminal",
+  TerminalList: "Listing terminals",
+  TerminalStop: "Stopping terminal",
+  MemoryRead: "Reading project memory",
+  MemoryUpdate: "Updating project memory",
 };
 function toolLabel(name: string): string {
   if (name.startsWith("mcp__")) return "Running MCP tool";
@@ -180,6 +231,11 @@ const EXPLORE_TOOLS = new Set([
   "SearchDocs",
   "read_lints", "ReadLints",
   "todo_read", "TodoRead",
+  // SleepyCode's own read-only ids. Without them every read, list and search this
+  // build actually runs rendered as a separate full card, so a normal exploration
+  // buried the answer under a dozen of them.
+  "list_files", "search_files", "get_diagnostics",
+  "terminal_read", "terminal_list", "memory_read", "obs_recall",
 ]);
 function isExploreBlock(b: AssistantBlock): b is ToolBlock {
   return b.kind === "tool" && EXPLORE_TOOLS.has(b.name);
@@ -207,6 +263,29 @@ function groupBlocks(blocks: AssistantBlock[]): RenderItem[] {
   return out;
 }
 
+/**
+ * Remove one optimistic steering note.
+ *
+ * The webview draws the note itself so the words appear immediately, and the
+ * host's echo normally arrives to confirm it (the reducer then skips the
+ * duplicate). When the host REFUSES the update, this is the only thing that can
+ * take the note back off the screen.
+ */
+function dropSteeringNote(turns: Turn[], requestId: string | undefined, text: string): Turn[] {
+  let changed = false;
+  const next = turns.map((turn) => {
+    if (turn.role !== "assistant") return turn;
+    const blocks = turn.blocks.filter(block => !(
+      block.kind === "steering"
+      && (requestId ? block.requestId === requestId : block.text === text)
+    ));
+    if (blocks.length === turn.blocks.length) return turn;
+    changed = true;
+    return { ...turn, blocks };
+  });
+  return changed ? next : turns;
+}
+
 // Each user prompt stays pinned within its own response. Leading assistant
 // turns form a separate group without a pinned prompt.
 function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
@@ -228,8 +307,10 @@ function exploreSummary(tools: ToolBlock[]): string {
   let searches = 0;
   let lints = 0;
   for (const t of tools) {
-    if (t.name === "Read" || t.name === "read_file" || t.name === "ListDir" || t.name === "list_dir") reads++;
-    else if (t.name === "ReadLints" || t.name === "read_lints" || t.name === "TodoRead" || t.name === "todo_read") lints++;
+    if (t.name === "Read" || t.name === "read_file" || t.name === "ListDir" || t.name === "list_dir"
+      || t.name === "list_files" || t.name === "terminal_read") reads++;
+    else if (t.name === "ReadLints" || t.name === "read_lints" || t.name === "TodoRead" || t.name === "todo_read"
+      || t.name === "get_diagnostics") lints++;
     else searches++;
   }
   const parts: string[] = [];
@@ -1075,6 +1156,17 @@ export function App() {
   // Mirror of activeId readable inside the stable message handler.
   const activeIdRef = React.useRef<string | undefined>(undefined);
   React.useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  // A switch that never gets its snapshot must not spin forever: the host
+  // always republishes eventually, but a dropped reply would otherwise leave the
+  // loader up with no way back.
+  React.useEffect(() => {
+    if (!loadingId) return;
+    const timer = window.setTimeout(() => {
+      setLoadingId((current) => (current === loadingId ? undefined : current));
+      post({ type: "requestTranscript", convId: loadingId });
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [loadingId]);
   // Enforce Max Tab Count (0 = unlimited): drop oldest non-active tabs when over.
   React.useEffect(() => {
     const max = uiPrefs.maxTabCount;
@@ -1097,6 +1189,13 @@ export function App() {
     tabBarRef.current?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, openTabs]);
 
+  // A tab the host has been asked for but has not answered yet. Switching to a
+  // conversation is a round trip, and until the snapshot lands the session has
+  // no turns — which painted the "New Chat" empty state, then filled in. That
+  // read as a blank tab that sometimes needed several clicks.
+  const [loadingId, setLoadingId] = React.useState<string | undefined>(undefined);
+  const requestedTranscriptRef = React.useRef<Map<string, number>>(new Map());
+
   // Brand-new (id-less) chats use the "" key until the backend assigns an id.
   const sessionFor = (id: string | undefined): ChatSession => {
     const key = id ?? "";
@@ -1111,11 +1210,17 @@ export function App() {
   // The host supplies a fresh transcript whenever a conversation is selected.
   // Keep only the visible chat and live background runs instead of retaining
   // every transcript (including attachments and tool output) ever opened.
+  //
+  // Keyed on the ACTIVE CONVERSATION, deliberately. As a bare effect it ran on
+  // every render — including the one that lands a snapshot — so a tab switch
+  // could be processed and then immediately swept away, leaving the "New Chat"
+  // empty state after clicking. One sweep per switch, after the paint that
+  // switched, is the whole requirement.
   React.useEffect(() => {
     for (const [id, session] of sessionsRef.current) {
       if (id !== (activeId ?? "") && !session.running) sessionsRef.current.delete(id);
     }
-  });
+  }, [activeId]);
   // Whether the view is pinned to the bottom. Starts true; flips off ONLY on an
   // explicit user gesture scrolling up (wheel/touch/scrollbar drag), back on
   // when the user returns to the bottom (gesture or the jump button). Mirrored
@@ -1563,6 +1668,7 @@ export function App() {
           markRunning(msg.runningConvIds);
           break;
         case "conversationActive":
+          setLoadingId((current) => (current === msg.activeId ? undefined : current));
           // The host withholds a transcript snapshot while that conversation is
           // streaming, and used to drop the switch with it — so clicking another
           // tab mid-run changed nothing. The turn it lands on is already in
@@ -1583,6 +1689,10 @@ export function App() {
           }
           break;
         case "loadConversation":
+          if (msg.activeId) {
+            requestedTranscriptRef.current.delete(msg.activeId);
+            setLoadingId((current) => (current === msg.activeId ? undefined : current));
+          }
           setWorkspaceRoot(msg.workspaceRoot);
           setCompactionUndoable(msg.compactionUndoable === true);
           setCompactionRedoable(msg.compactionRedoable === true);
@@ -1628,8 +1738,30 @@ export function App() {
           force();
           break;
         }
+        case "steeringRejected": {
+          // The host refused the update (a CLI-owned chat cannot take a mid-run
+          // one). Roll back the note the composer drew the instant the user
+          // pressed send, or the transcript claims guidance that never arrived.
+          for (const [convId, pending] of pendingSteeringRef.current) {
+            if (!pending.delete(msg.requestId)) continue;
+            if (!pending.size) pendingSteeringRef.current.delete(convId);
+          }
+          const session = sessionsRef.current.get(msg.convId);
+          if (session) {
+            session.turns = dropSteeringNote(session.turns, msg.requestId, msg.text);
+            force();
+          }
+          break;
+        }
         case "error": {
           const s = sessionFor(msg.convId ?? activeIdRef.current);
+          // A notice about a still-running turn (a refused mid-run update) must
+          // not settle it: the run is alive and its stream keeps arriving.
+          if ((msg as { keepTurn?: boolean }).keepTurn) {
+            s.status = { text: msg.message, error: true };
+            force();
+            break;
+          }
           s.running = false;
           s.turns = applyEvent(s.turns, { type: "run-status", status: "error" });
           s.status = { text: "Error: " + msg.message, error: true };
@@ -1681,7 +1813,13 @@ export function App() {
           } else {
             s.turns = applyEvent(s.turns, ev);
             if (ev.type === "user-steering" && ev.requestId) {
-              pendingSteeringRef.current.get(msg.convId)?.delete(ev.requestId);
+              // The row the composer drew is now a note inside the work, so it
+              // must leave the queue AND stop being counted as pending: a marker
+              // left behind shows "Steering…" for the rest of the session.
+              for (const [convId, pending] of pendingSteeringRef.current) {
+                if (!pending.delete(ev.requestId)) continue;
+                if (!pending.size) pendingSteeringRef.current.delete(convId);
+              }
               queueRef.current.set(msg.convId, (queueRef.current.get(msg.convId) ?? []).filter(item => item.id !== ev.requestId));
             }
             // Throttle-persist live turns so a pane move / remount (which destroys
@@ -1758,6 +1896,21 @@ export function App() {
 
   const sendNow = React.useCallback((convId: string | undefined, text: string, attachments?: Attachment[], model?: string, mode2?: Mode, context?: Record<string, boolean>) => {
     const s = sessionFor(convId);
+    // While this chat is working, plain text is an update to the task in
+    // progress, not the next queued request. It used to be queued, so the words
+    // only arrived once the whole turn had finished — the user watched the agent
+    // keep doing the wrong thing for the rest of the run.
+    if (s.running && convId && !attachments?.length) {
+      // Optimistic: shown inside the work it changes. The host echoes it as
+      // `user-steering`, which inserts the same note; the request id is what lets
+      // it drop this optimistic copy instead of rendering the words twice.
+      const requestId = crypto.randomUUID();
+      s.turns = applyEvent(s.turns, { type: "user-steering", text, requestId });
+      pendingSteeringRef.current.set(requestId, { id: requestId, text, status: "queued", createdAt: Date.now(), steering: true });
+      force();
+      post({ type: "steerMessage", convId, text, requestId } as any);
+      return;
+    }
     if (!s.running && !(queueRef.current.get(convId ?? "") ?? []).some(item => item.status !== "running")) {
       s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2 }];
       s.running = true;
@@ -1777,7 +1930,11 @@ export function App() {
   };
 
   // Queue item actions.
-  const queued = (queueRef.current.get(activeId ?? "") ?? []).filter((item) => item.status !== "running");
+  // A steering update in flight is not a queued request: it is already drawn
+  // inside the running work, so listing it here would offer to "send" or "edit"
+  // something the run is about to apply.
+  const queued = (queueRef.current.get(activeId ?? "") ?? [])
+    .filter((item) => item.status !== "running" && !item.steering && !pendingSteeringRef.current.get(activeId ?? "")?.has(item.id));
   const isQueuedSteering = (item: typeof queued[number]) => !!item.steering || !!pendingSteeringRef.current.get(activeId ?? "")?.has(item.id);
   const removeQueued = (i: number) => {
     const item = queued[i];
@@ -2029,6 +2186,10 @@ export function App() {
                   if (tabId === "") {
                     if (activeId) post({ type: "newConversation" });
                   } else if (tabId !== activeId) {
+                    if (!sessionsRef.current.get(tabId)?.turns.length) {
+                      requestedTranscriptRef.current.set(tabId, Date.now());
+                      setLoadingId(tabId);
+                    }
                     post({ type: "selectConversation", id: tabId });
                   }
                 }}
@@ -2243,6 +2404,13 @@ export function App() {
               Get started <Icon name="chevR" size={14} />
             </button>
           </div>
+        ) : turns.length === 0 && !!activeId && loadingId === activeId ? (
+          // The transcript is on its way. Showing the new-chat hero first made a
+          // tab switch look like it had opened a blank conversation.
+          <div className="chat-empty" aria-busy="true">
+            <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="" />
+            <div className="empty-hint"><ThinkingStatus text="Loading conversation" /></div>
+          </div>
         ) : turns.length === 0 ? (
           <div className="chat-empty">
             <img className="app-logo" src={document.getElementById("root")?.dataset.icon} alt="SleepyCode" />
@@ -2387,8 +2555,9 @@ export function App() {
                 </span>
               </div>
               <div className="review-actions">
+                {/* One list, built and gated in `review-actions.ts`, so a visible
+                    button always has a message and the two cannot drift. */}
                 {changeActions({ conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning })
-                  .filter(action => action.id !== "stageAll")
                   .map(action => (
                     <button
                       key={action.id}
@@ -2397,21 +2566,17 @@ export function App() {
                       disabled={!action.enabled}
                       onClick={(event) => {
                         event.stopPropagation();
-                        // `changeActionMessages` already refused anything it cannot
-                        // run, so an enabled button always has a message here. Commit
-                        // and Restore end the review for this turn; Source Control
-                        // only opens a view, so the bar stays for that one.
                         const messages = changeActionMessages(action.id, { conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning });
-                        const ends = action.id !== "sourceControl";
                         const send = () => { for (const message of messages) post(message as any); };
-                        if (ends) finishReview(send); else send();
+                        // Source Control only reveals a view; the files are still
+                        // awaiting a decision, so the bar stays for that one.
+                        if (action.id === "sourceControl") send();
+                        else finishReview(send);
                       }}
                     >
                       {action.label}
                     </button>
                   ))}
-                <button className="rv-link" onClick={(event) => { event.stopPropagation(); finishReview(() => post({ type: "rejectAllChanges" })); }}>Undo All</button>
-                <button className="rv-link" onClick={(event) => { event.stopPropagation(); finishReview(() => post({ type: "acceptAllChanges" })); }}>Keep All</button>
               </div>
             </div>
             <AnimatedDisclosure open={reviewOpen}>

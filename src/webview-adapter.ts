@@ -177,8 +177,16 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
 
     case 'steerMessage':
       // Guidance for the task in progress, not a new turn: flagged so the host
-      // hands it to the run that is working instead of queueing a follow-up.
-      return { type: 'send', text: message.text, conversationId: message.convId, steering: true };
+      // hands it to the run that is working instead of queueing a follow-up. The
+      // request id travels so the `steered` echo can name the row it consumed and
+      // the webview drops its optimistic copy instead of showing it twice.
+      return {
+        type: 'send',
+        text: message.text,
+        conversationId: message.convId,
+        steering: true,
+        ...(message.requestId ? { requestId: message.requestId } : {}),
+      };
 
     case 'queueAction':
       if (message.action === 'remove') return { type: 'removeQueued', conversationId: message.convId, id: message.id };
@@ -367,7 +375,11 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
             name,
             status: message.failed ? 'error' : 'completed',
             result: message.result ?? message.text ?? '',
+            // Carried on completion too: a call whose arguments only resolved at
+            // the end (or a CLI row that reports input with its result) would
+            // otherwise settle with an empty input and draw a blank card.
             input,
+            ...(typeof message.diff === 'string' && message.diff ? { diff: message.diff } : {}),
           });
     }
 
@@ -375,8 +387,16 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       // Without a conversation the event would be filed under the placeholder
       // session, which is not the active one, so it rendered nowhere. React's
       // top-level `error` message falls back to the active session instead.
+      //
+      // `keepTurn` means the turn is still running and this is a notice about it
+      // (a refused mid-run update, a model substitution). It travels: without it
+      // the webview marked the live conversation as finished.
       return message.conversationId
-        ? agentEvent(message.conversationId, { type: 'error', message: message.text ?? message.message ?? 'Unknown error' })
+        ? agentEvent(message.conversationId, {
+            type: 'error',
+            message: message.text ?? message.message ?? 'Unknown error',
+            ...(message.keepTurn === true ? { keepTurn: true } : {}),
+          })
         : { type: 'error', message: message.text ?? message.message ?? 'Unknown error' };
 
     case 'generationError':
@@ -499,6 +519,14 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       // The `requestId` is the queue row this guidance consumed: the webview
       // prunes its optimistic steering row by it, and without it the row was
       // re-inserted on every workflow update and never cleared.
+      //
+      // A rejected one (a CLI-owned chat, which cannot take a mid-run update)
+      // must reach the webview as its own message: the composer drew the note
+      // optimistically, and this is the only thing that can take it back off.
+      // Emitting `user-steering` instead would print a blank quote of the user.
+      if (message.rejected) {
+        return { type: 'steeringRejected', convId: message.conversationId ?? '', requestId: message.requestId ? String(message.requestId) : undefined, text: message.text ?? '' };
+      }
       return agentEvent(message.conversationId, { type: 'user-steering', text: message.text ?? '', ...(message.requestId ? { requestId: String(message.requestId) } : {}) });
 
     case 'liveUsage': {
@@ -699,7 +727,6 @@ const TOOL_NAMES: Record<string, string> = {
   search_files: 'Grep',
   get_diagnostics: 'ReadLints',
   run_command: 'Shell',
-  obs_recall: 'Read',
   browser_navigate: 'BrowserNavigate',
   browser_click: 'BrowserInteract',
   browser_type: 'BrowserInteract',
@@ -710,11 +737,61 @@ const TOOL_NAMES: Record<string, string> = {
   web_search: 'WebSearch',
   web_fetch: 'WebFetch',
   delegate: 'Task',
+  delegate_task: 'Task',
   ask_user: 'AskQuestion',
   use_skill: 'Read',
   search_skills: 'FileSearch',
   install_skill: 'Write',
   list_skills: 'ListDir',
+  terminal_start: 'TerminalStart',
+  terminal_write: 'TerminalWrite',
+  terminal_read: 'TerminalRead',
+  terminal_list: 'TerminalList',
+  terminal_stop: 'TerminalStop',
+  // Every mutating tool whose id was left out fell through to the ported card's
+  // generic shape, so a rename or a commit rendered as an unlabelled "tool".
+  skillsmp_search: 'SearchSkills',
+  skillsmp_get_skill: 'Read',
+  skillsmp_install_skill: 'InstallSkill',
+  skillsmp_list_installed: 'ListSkills',
+  skillsmp_read_installed: 'Read',
+  skillsmp_list_repo_skills: 'ListSkills',
+  memory_read: 'MemoryRead',
+  memory_update: 'MemoryUpdate',
+  write_plan: 'WritePlan',
+  repo_search: 'SemanticSearch',
+  repo_symbol: 'SemanticSearch',
+  repo_architecture: 'SemanticSearch',
+  repo_memory_record: 'MemoryUpdate',
+  repo_memory_list: 'MemoryRead',
+  worktree_create: 'WorktreeCreate',
+  worktree_list: 'WorktreeList',
+  worktree_status: 'WorktreeStatus',
+  worktree_compare: 'WorktreeCompare',
+  worktree_merge: 'WorktreeMerge',
+  worktree_remove: 'WorktreeRemove',
+  worktree_run: 'Shell',
+  github_list_issues: 'GitHubIssues',
+  github_get_issue: 'GitHubIssues',
+  github_start_from_issue: 'GitHubBranch',
+  github_commit: 'GitHubCommit',
+  github_open_pr: 'GitHubPullRequest',
+  github_pr_status: 'GitHubPullRequest',
+  github_review_comments: 'GitHubPullRequest',
+  github_pr_comment: 'GitHubPullRequest',
+  obs_recall: 'Read',
+  browser_launch: 'BrowserNavigate',
+  browser_press: 'BrowserInteract',
+  browser_wait: 'BrowserInteract',
+  browser_back: 'BrowserNavigate',
+  browser_forward: 'BrowserNavigate',
+  browser_reload: 'BrowserNavigate',
+  browser_new_tab: 'BrowserNavigate',
+  browser_list_tabs: 'BrowserInspect',
+  browser_switch_tab: 'BrowserNavigate',
+  browser_close_tab: 'BrowserClose',
+  browser_scroll: 'BrowserInteract',
+  browser_geometry: 'BrowserInspect',
 };
 
 /** Map a SleepyCode tool id onto the React tool name it renders as. */

@@ -512,6 +512,11 @@ export function App() {
       } else if (msg.type === "modelsFetched") {
         setModels(msg.models || []);
         if (msg.modelList) setModelList(msg.modelList);
+      } else if (msg.type === "mcpStatus") {
+        // A background reconnect reached a server that was down when the window
+        // opened. Only the rows move: replacing the whole feature state here
+        // would blank the MCP list and every toggle.
+        if (Array.isArray(msg.statuses)) setMcpStatus(msg.statuses);
       } else if (msg.type === "features") {
         setFeaturesState({ ...EMPTY_FEATURES, ...msg.features });
         setMcpStatus(msg.mcpStatus || []);

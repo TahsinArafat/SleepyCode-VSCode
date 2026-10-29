@@ -11,8 +11,10 @@
  *   --paginate   split tools/list into two pages via nextCursor
  *   --fail       write a diagnostic to stderr and exit non-zero
  *   --slow       delay tools/list so a timeout can be observed
+ *   --crash-once <marker> exit non-zero on the first tools/call, to exercise reconnection
  */
 import { createInterface } from 'node:readline';
+import { existsSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(flag);
@@ -125,6 +127,18 @@ rl.on('line', (line) => {
 
   if (request.method === 'tools/call') {
     const callArgs = request.params?.arguments ?? {};
+    // --crash-once <marker>: die on the first call, once ever, like a server that
+    // was restarted or lost its database file. The marker is on disk because a
+    // re-spawned process has no memory of the previous one — without it the
+    // replacement server would crash too and nothing could ever recover.
+    if (has('--crash-once')) {
+      const marker = args[args.indexOf('--crash-once') + 1] ?? '';
+      if (marker && !existsSync(marker)) {
+        writeFileSync(marker, 'crashed');
+        process.stderr.write('fatal: simulated crash\n');
+        process.exit(1);
+      }
+    }
     send({
       jsonrpc: '2.0',
       id: request.id,

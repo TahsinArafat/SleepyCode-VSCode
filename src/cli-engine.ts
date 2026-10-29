@@ -54,6 +54,21 @@ export async function resolveEngine(directory: string, useCli = false): Promise<
   }
 }
 
+/**
+ * A CLI tool part's output as display text. The wire value is a union of string
+ * and object shapes, so this never assumes one: a card that throws while
+ * formatting is worse than a card that shows the raw value.
+ */
+function toolStateText(output: unknown): string | undefined {
+  if (output === undefined || output === null) return undefined;
+  if (typeof output === 'string') return output;
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -129,7 +144,12 @@ export class CliSessionRegistry {
 export type CliLiveEvent =
   | { kind: 'delta'; text: string }
   | { kind: 'reasoningDelta'; text: string }
-  | { kind: 'tool'; phase: 'start' | 'end'; id: string; tool?: string; name?: string; failed?: boolean };
+  /**
+   * `input` and `result` are what the tool card actually renders. Without them a
+   * live CLI tool call drew a bare label — a shell command with no command, a
+   * write with no filename — because the projection only ever carried a name.
+   */
+  | { kind: 'tool'; phase: 'start' | 'end'; id: string; tool?: string; name?: string; failed?: boolean; input?: unknown; result?: string };
 
 /** Live bridge between one CLI session and the sidebar projection. */
 export class CliChatSession {
@@ -326,11 +346,16 @@ export class CliChatSession {
     const id = part.callID || part.id || 'tool';
     const name = this.label(part.tool ?? 'tool', part.state?.input);
     if (status === 'pending' || status === 'running') {
-      this.onLive({ kind: 'tool', phase: 'start', id, tool: part.tool, name });
+      this.onLive({ kind: 'tool', phase: 'start', id, tool: part.tool, name, input: part.state?.input });
       return;
     }
     if (status === 'completed' || status === 'error' || status === 'aborted') {
-      this.onLive({ kind: 'tool', phase: 'end', id, tool: part.tool, name, failed: status !== 'completed' });
+      this.onLive({
+        kind: 'tool', phase: 'end', id, tool: part.tool, name,
+        failed: status !== 'completed',
+        input: part.state?.input,
+        result: toolStateText(part.state?.output),
+      });
     }
   }
 

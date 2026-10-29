@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   appendConversationMessages,
+  dropOrphanedToolCalls,
   iterationRequestMessages,
   nextTurnStart,
   pausedByStepLimit,
@@ -157,4 +158,107 @@ test('iterationRequestMessages keeps live tool context when a turn continues mid
   const resumeWithOnlyLive = iterationRequestMessages([], live, prompt);
   assert.equal(resumeWithOnlyLive[0], live[0]);
   assert.equal(resumeWithOnlyLive.at(-1)?.content, prompt);
+});
+
+// ---------------------------------------------------------------- stopped turns
+
+/*
+ * Pressing stop between a tool call and its result writes an assistant message
+ * with a tool-call and no result. Strict providers reject that shape outright, so
+ * one stop used to make every later turn fail — and repeated stops left a
+ * history that could not be sent at all.
+ */
+
+test('an unanswered tool call becomes a note instead of an invalid request', () => {
+  const stored = [
+    { role: 'user', content: 'do the thing' },
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read_file', input: {} }] },
+  ];
+  const repaired = dropOrphanedToolCalls(stored);
+  assert.equal(repaired.length, 2);
+  const parts = repaired[1].content;
+  assert.equal(parts[0].type, 'text');
+  assert.match(parts[0].text, /read_file/);
+  assert.match(parts[0].text, /did not finish/);
+});
+
+test('an answered tool call is left exactly as it was', () => {
+  const stored = [
+    { role: 'user', content: 'do it' },
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read_file', input: {} }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'read_file', output: { type: 'text', value: 'file' } }] },
+  ];
+  assert.deepEqual(dropOrphanedToolCalls(stored), stored);
+});
+
+test('only the unanswered call in a mixed step is rewritten', () => {
+  const stored = [
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: [
+      { type: 'tool-call', toolCallId: 'done', toolName: 'read_file', input: {} },
+      { type: 'tool-call', toolCallId: 'hung', toolName: 'run_command', input: {} },
+    ] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'done', toolName: 'read_file', output: { type: 'text', value: 'ok' } }] },
+  ];
+  const parts = dropOrphanedToolCalls(stored)[1].content;
+  assert.equal(parts[0].type, 'tool-call');
+  assert.equal(parts[1].type, 'text');
+  assert.match(parts[1].text, /run_command/);
+});
+
+test('the simpler toolCalls shape is repaired too', () => {
+  const stored = [
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c1' }] },
+  ];
+  const repaired = dropOrphanedToolCalls(stored);
+  assert.deepEqual(repaired[1].toolCalls, []);
+});
+
+test('a repair that leaves nothing to say removes the empty step', () => {
+  const stored = [
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: [] },
+    { role: 'assistant', content: 'real answer' },
+  ];
+  assert.deepEqual(dropOrphanedToolCalls(stored).map(message => message.content), ['go', 'real answer']);
+});
+
+test('a stopped turn persists a history the next request can send', () => {
+  // End to end: append a turn that was cut off mid-tool, then select it.
+  const stored = appendConversationMessages(
+    [{ role: 'user', content: 'earlier' }, { role: 'assistant', content: 'answer' }],
+    'now do this',
+    [{ role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c9', toolName: 'write_file', input: {} }] }],
+    400,
+  );
+  const selected = selectStructuredHistory(stored, 100_000, message => String(message.content ?? '').length);
+  assert.ok(selected.length >= 2);
+  const calls = selected.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(part => part.type === 'tool-call');
+  assert.deepEqual(calls, [], 'no unanswered tool call may reach the provider');
+});
+
+test('a completion frame fills in args the start frame never had', async () => {
+  // A streamed tool call whose arguments only finish parsing at the end (or a CLI
+  // row that reports its input with the result) used to settle with an empty
+  // input, so a finished write card showed no filename and a shell card `$ …`.
+  const { applyEvent } = await import('../src/shared/turns.ts');
+  let turns = applyEvent([], { type: 'run-status', status: 'running' });
+  turns = applyEvent(turns, { type: 'tool-call-started', callId: 't1', name: 'Write', input: {} });
+  turns = applyEvent(turns, {
+    type: 'tool-call-completed', callId: 't1', name: 'Write', status: 'completed', result: 'Wrote a.ts',
+    input: { path: 'src/a.ts', content: 'x' },
+  });
+  const block = turns[turns.length - 1].blocks.find(entry => entry.kind === 'tool');
+  assert.equal(block.input.path, 'src/a.ts');
+  assert.equal(block.status, 'completed');
+});
+
+test('an empty completion input does not erase what the start frame carried', async () => {
+  const { applyEvent } = await import('../src/shared/turns.ts');
+  let turns = applyEvent([], { type: 'run-status', status: 'running' });
+  turns = applyEvent(turns, { type: 'tool-call-started', callId: 't2', name: 'Shell', input: { command: 'npm test' } });
+  turns = applyEvent(turns, { type: 'tool-call-completed', callId: 't2', name: 'Shell', status: 'completed', result: 'ok' });
+  const block = turns[turns.length - 1].blocks.find(entry => entry.kind === 'tool');
+  assert.equal(block.input.command, 'npm test');
 });

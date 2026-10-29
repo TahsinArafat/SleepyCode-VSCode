@@ -535,3 +535,31 @@ test('tool names and counts agree', async () => {
     await connection.close();
   }
 });
+
+// ---------------------------------------------------------------- reconnection
+
+test('a tool call survives a server that died, by reconnecting once', async () => {
+  // The defect this pins: a stdio server that crashed or was restarted left the
+  // pipe dead, so every later call failed with "MCP connection is closed" and the
+  // only way back was to reconnect by hand in Settings.
+  const { mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const marker = join(await mkdtemp(join(tmpdir(), 'sleepycode-mcp-crash-')), 'crashed');
+  const connection = await connectMcpServers(
+    JSON.stringify({ echo: { command: process.execPath, args: [serverPath, '--crash-once', marker] } }),
+    here,
+    async () => {},
+  );
+  try {
+    const name = Object.keys(connection.tools)[0];
+    assert.ok(name, `expected the echo tool, errors: ${connection.errors.join(' | ')}`);
+    // The first call kills the server; the client reconnects and retries it.
+    const result = await connection.tools[name].execute({ text: 'after-restart' }, {});
+    assert.match(JSON.stringify(result), /echo:after-restart/);
+    // And the connection is usable for subsequent calls too.
+    const again = await connection.tools[name].execute({ text: 'still-alive' }, {});
+    assert.match(JSON.stringify(again), /echo:still-alive/);
+  } finally {
+    await connection.close();
+  }
+});

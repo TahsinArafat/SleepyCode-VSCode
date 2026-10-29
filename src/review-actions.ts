@@ -24,7 +24,7 @@ export interface ChangeContext {
   running?: boolean;
 }
 
-export type ChangeActionId = 'stageAll' | 'commit' | 'sourceControl' | 'restore';
+export type ChangeActionId = 'commit' | 'sourceControl' | 'restore' | 'keepAll' | 'undoAll';
 
 /**
  * The names the WEBVIEW posts. They are React-level intents, not host messages:
@@ -36,17 +36,28 @@ export type ChangeActionId = 'stageAll' | 'commit' | 'sourceControl' | 'restore'
  * because turns carry no id on that side.
  */
 const MESSAGE: Record<ChangeActionId, string> = {
-  stageAll: 'stageAllChanges',
   commit: 'commitChanges',
   sourceControl: 'openSourceControl',
   restore: 'restoreCheckpoint',
+  keepAll: 'acceptAllChanges',
+  undoAll: 'rejectAllChanges',
 };
 
+/**
+ * The bar's actions, in the order they render.
+ *
+ * Two controls were removed rather than left standing: "Stage all" duplicated
+ * Keep All (which stages), and "Restore checkpoint" told the host to return the
+ * files to their pre-turn state, which besides undoing the work nothing else
+ * wanted is the opposite of Keep All sitting beside it. Both are reachable
+ * where they belong — staging in Source Control, restore in Undo History — so a
+ * button that only ever confused the file list is gone.
+ */
 const ACTIONS: { id: ChangeActionId; label: string; hint: string }[] = [
-  { id: 'stageAll', label: 'Stage all', hint: 'Stage every file this response changed.' },
+  { id: 'keepAll', label: 'Keep All', hint: 'Stage every file this response changed, so the change is ready to commit.' },
+  { id: 'undoAll', label: 'Undo All', hint: 'Revert every file this response changed back to how it was before the response.' },
   { id: 'commit', label: 'Commit', hint: 'Commit this response’s changes with a generated message.' },
   { id: 'sourceControl', label: 'Source Control', hint: 'Open these changes in VS Code’s Source Control view.' },
-  { id: 'restore', label: 'Restore checkpoint', hint: 'Return the workspace to how it was before this response.' },
 ];
 
 /**
@@ -68,16 +79,18 @@ function hasTarget(context: ChangeContext): boolean {
  */
 export function changeActionMessages(action: string, context: ChangeContext): Record<string, unknown>[] {
   const id = action as ChangeActionId;
-  if (!MESSAGE[id]) return [];
+  // Only an action the bar actually renders may post anything: a removed id
+  // ("stageAll", "restore") must not fall through to the generic branch.
+  if (!ACTIONS.some(entry => entry.id === id)) return [];
   if (!hasTarget(context)) return [];
-  const mutating = id === 'stageAll' || id === 'commit' || id === 'restore';
-  if (mutating && context.running) return [];
-
-  // React-level intent only. The host resolves the turn, so the button works
-  // whether or not the webview happens to know its id.
-  if (id === 'stageAll') {
+  // Every action here touches files (or lists what they are), and the host
+  // refuses all of them mid-run: a half-applied revert racing a live edit is
+  // worse than a disabled button.
+  if (context.running) return [];
+  // Keep All / Undo All act on the files still awaiting review. With none left
+  // there is nothing to accept or revert, so the button is not offered.
+  if (id === 'keepAll' || id === 'undoAll') {
     const paths = (context.paths ?? []).filter(path => typeof path === 'string' && path);
-    // Staging nothing is not a request worth posting.
     if (!paths.length) return [];
     return [{ type: MESSAGE[id], conversationId: context.conversationId, paths }];
   }

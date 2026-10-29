@@ -29,6 +29,8 @@ export type AgentEvent =
       name: string;
       status: "completed" | "error";
       result: string;
+      /** Arguments reported with the result, for a call whose start frame had none. */
+      input?: unknown;
       diff?: string;
       startLine?: number;
       endLine?: number;
@@ -49,7 +51,8 @@ export type AgentEvent =
   | { type: "retry"; attempt: number; max: number; delayMs: number; error: string }
   | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
   | { type: "max-steps"; steps: number }
-  | { type: "error"; message: string };
+  /** `keepTurn`: a notice about a turn that is still running, not its end. */
+  | { type: "error"; message: string; keepTurn?: boolean };
 
 export interface Attachment {
   id: string;
@@ -121,7 +124,7 @@ export interface RouteBlock {
 }
 
 /** Guidance the user added while this run was working; the run continues with it. */
-export interface SteeringBlock { kind: "steering"; text: string; at: number }
+export interface SteeringBlock { kind: "steering"; text: string; at: number; /** The steering request this note came from, so an echo of it is not drawn twice. */ requestId?: string }
 export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock | ErrorBlock | CompactionBlock | MaxStepsBlock | VerificationBlock | RouteBlock | SteeringBlock;
 
 export interface UserTurn {
@@ -416,10 +419,21 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
 
   // Steering joins the running turn: same timer, same work section, no new
   // request boundary. Only a separately sent message starts a new turn.
+  //
+  // The webview renders its own copy the instant the user presses send, and the
+  // host echoes the same update when the run consumes it. A note already on
+  // screen is not drawn again, or one update would read as two.
   if (ev.type === "user-steering") {
+    const existing = (turn: AssistantTurn): boolean => turn.blocks.some(
+      block => block.kind === "steering" && (block.requestId
+        ? block.requestId === ev.requestId
+        : !ev.requestId && block.text === ev.text),
+    );
+    const last = turns[turns.length - 1];
+    if (ev.requestId && last?.role === "assistant" && existing(last)) return turns;
     const { list, turn } = ensureAssistant(turns);
     turn.startedAt ??= Date.now();
-    turn.blocks.push({ kind: "steering", text: ev.text, at: Date.now() });
+    turn.blocks.push({ kind: "steering", text: ev.text, at: Date.now(), ...(ev.requestId ? { requestId: ev.requestId } : {}) });
     return list;
   }
 
@@ -556,11 +570,20 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const location = findTool(turns, ev.callId);
     if (!location) return turns;
     const b = location.block;
+    // The completion frame can carry args the start frame did not (a streamed
+    // call whose arguments only finished parsing at the end, or a CLI row that
+    // reports its input with the result). Merging them is what stops a finished
+    // write or shell card rendering with a blank filename or command.
+    const input = (ev as { input?: unknown }).input;
+    const merged = input && typeof input === "object" && Object.keys(input).length
+      ? { ...(b.input && typeof b.input === "object" ? b.input : {}), ...(input as object) }
+      : b.input;
     // Never reopen a settled tool if a late/duplicate completion races in.
     return updateTool(turns, location,
       b.status !== "running" && b.status === ev.status
         ? {
             ...b,
+            input: merged,
             result: ev.result ?? b.result,
             diff: ev.diff ?? b.diff,
             startLine: ev.startLine ?? b.startLine,
@@ -569,6 +592,7 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
           }
         : {
             ...b,
+            input: merged,
             status: ev.status,
             result: ev.result,
             diff: ev.diff,

@@ -2491,6 +2491,21 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	overflow: auto;
 	white-space: pre-wrap;
 }
+/* The call's arguments, above its output. Dimmer than the result: it says what
+   the tool was asked to do, not what it found. */
+.tool-args {
+	margin: 0;
+	padding: 8px 10px 6px;
+	border-bottom: 1px dashed var(--border-soft);
+	font-family: "Cascadia Code", Consolas, monospace;
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--fg-dim);
+	opacity: .85;
+	max-height: 140px;
+	overflow: auto;
+	white-space: pre-wrap;
+}
 .terminal-output {
 	margin: 0;
 	padding: 10px 12px;

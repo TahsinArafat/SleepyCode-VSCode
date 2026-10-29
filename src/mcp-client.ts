@@ -133,6 +133,10 @@ export class McpConnection {
   private oauth?: McpOAuthProvider;
   private disposed = false;
   private refresh?: Promise<void>;
+  /** In-flight reconnect, so a burst of failed calls reconnects once. */
+  private reconnect?: Promise<boolean>;
+  /** Set by close()/logout(): this connection is finished, not merely broken. */
+  private closeRequested = false;
   private serverRequests = new Map<number | string, AbortController>();
   private proc?: ChildProcessWithoutNullStreams;
   private nextId = 1;
@@ -160,6 +164,7 @@ export class McpConnection {
 
   async connect(timeoutMs = 15_000): Promise<void> {
     this.disposed = false;
+    this.closeRequested = false;
     if (this.config.transport !== 'stdio') {
       await this.connectRemote(timeoutMs);
       return;
@@ -201,23 +206,33 @@ export class McpConnection {
       proc.once('spawn', onSpawn);
       proc.once('error', onError);
     });
+    // Every handler below belongs to THIS process. A reconnected server inherits
+    // `this`, and a late event from the previous, dead child used to reject the
+    // new child's in-flight handshake — so a retry after a crash always failed
+    // with the old process's exit reason.
+    const isCurrent = (): boolean => this.proc === proc;
     proc.stdin.on('error', (error) => {
       this.lastError = error.message;
+      if (!isCurrent()) return;
       for (const { reject } of this.pending.values()) reject(error);
     });
 
     // Keep the last stderr lines so a startup failure surfaces a real reason
     // instead of just "MCP server closed".
     let stderrTail = '';
-    proc.stdout.on('data', (d) => this._onData(d.toString()));
+    proc.stdout.on('data', (d) => {
+      if (isCurrent()) this._onData(d.toString());
+    });
     proc.stderr.on('data', (d) => {
       stderrTail = (stderrTail + d.toString()).slice(-2000);
     });
     proc.on('error', (e) => {
+      if (!isCurrent()) return;
       this.lastError = e.message;
       this.connected = false;
     });
     proc.on('close', (code) => {
+      if (!isCurrent()) return;
       this.connected = false;
       if (code) {
         const tail = stderrTail.trim().split('\n').pop();
@@ -228,7 +243,10 @@ export class McpConnection {
       this.pending.clear();
     });
 
-    const initialized = await this._request(
+    // The handshake goes straight to this process's pipe. Routing it through
+    // `_request` made a server that fails to start reconnect from inside its own
+    // connect(), which respawned it before the caller ever saw the reason.
+    const initialized = await this._requestRaw(
       'initialize',
       {
         protocolVersion: '2024-11-05',
@@ -273,7 +291,7 @@ export class McpConnection {
       return fetch(input, { ...init, headers, redirect: 'error' });
     };
     const client = new Client(
-      { name: 'sleepycode', version: '0.7.0' },
+      { name: 'sleepycode', version: '0.8.0' },
       { capabilities: this.host?.elicit ? { elicitation: { form: {}, url: {} } } : {} },
     );
     client.onerror = (error) => {
@@ -314,6 +332,9 @@ export class McpConnection {
     this.client = client;
     this.remote = transport;
     try {
+      // Marked connected BEFORE discovery: a remote transport has no pipe to
+      // inspect, so `refreshTools` asking through `_requestRaw` must not be
+      // treated as a dead connection.
       await client.connect(transport, { timeout: timeoutMs });
       if (this.disposed) {
         await client.close();
@@ -321,6 +342,7 @@ export class McpConnection {
       }
       const serverInstructions = client.getInstructions?.();
       if (typeof serverInstructions === 'string') this.instructions = serverInstructions;
+      this.connected = true;
       if (client.getServerCapabilities()?.tools) await this.refreshTools(timeoutMs);
       else this.tools = [];
       this.connected = true;
@@ -346,7 +368,14 @@ export class McpConnection {
       const seen = new Set<string>();
       let cursor: string | undefined;
       do {
-        const result = await this._request('tools/list', cursor ? { cursor } : {}, undefined, timeoutMs);
+        // A stdio catalog refresh goes straight to the pipe: it is part of
+        // connecting (or of a `list_changed` note), and reconnecting from here
+        // would recurse into connect(). `_request` handles the reconnecting case
+        // for tool CALLS. A remote refresh must go through `remoteRequest`,
+        // which is where the SDK's own transport lives.
+        const result = this.config.transport === 'stdio'
+          ? await this._requestRaw('tools/list', cursor ? { cursor } : {}, undefined, timeoutMs)
+          : await this._request('tools/list', cursor ? { cursor } : {}, undefined, timeoutMs);
         for (const tool of result?.tools ?? []) {
           if (typeof tool.name === 'string' && !tools.some((existing) => existing.name === tool.name)) {
             tools.push({
@@ -465,6 +494,7 @@ export class McpConnection {
 
   dispose(): void {
     this.disposed = true;
+    this.closeRequested = true;
     this.oauth?.endAuthorization();
     for (const controller of this.serverRequests.values()) controller.abort();
     this.serverRequests.clear();
@@ -550,10 +580,86 @@ export class McpConnection {
     this.proc?.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, ...(error ? { error } : { result }) }) + '\n', () => {});
   }
 
-  private _request(method: string, params: any, signal?: AbortSignal, timeoutMs = 300_000): Promise<any> {
-    if (signal?.aborted) return Promise.reject(new Error('aborted: MCP request'));
+  /**
+   * Reconnect after the server went away, once per request.
+   *
+   * A stdio server that crashes or is restarted takes the pipe with it, and an
+   * HTTP server that restarts drops its session. Nothing above this class holds
+   * a connection open between turns, so without this the next tool call failed
+   * with "MCP connection is closed" and every later one did too — the only way
+   * back was to reconnect by hand in Settings.
+   */
+  private ensureAlive(): Promise<boolean> {
+    // `closeRequested` means "closed on purpose" (close(), logout()), not "the
+    // server died": a stdio server that crashed has a dead pipe and MUST be
+    // reconnected. `disposed` is deliberately NOT consulted for that reason.
+    if (this.closeRequested) return Promise.resolve(false);
+    if (!this.pipeDead()) return Promise.resolve(true);
+    if (this.reconnect) return this.reconnect.then(() => true, () => false);
+    // Assigned before the attempt starts and cleared by its own completion. No
+    // `async` keyword on purpose: an async body runs synchronously up to its
+    // first `await`, which is BEFORE the caller can store this promise — so two
+    // callers would each start a reconnect, and a server that cannot start was
+    // respawned in a loop instead of being reported once.
+    const attempt = this.connect()
+      .then(() => {
+        this.host?.notification?.(this.config.name, 'notifications/reconnected', {});
+        return true;
+      })
+      .catch((error: unknown) => {
+        this.connected = false;
+        this.lastError = error instanceof Error ? error.message : String(error);
+        return false;
+      })
+      .finally(() => {
+        if (this.reconnect === attempt) this.reconnect = undefined;
+      });
+    this.reconnect = attempt;
+    return attempt;
+  }
+
+  /** Has this server's pipe gone away? The only evidence a retry is worth it. */
+  private pipeDead(): boolean {
+    return !this.proc || this.proc.stdin.destroyed || this.proc.killed || this.proc.exitCode !== null;
+  }
+
+  /**
+   * Send one request, reconnecting once when the server died under it.
+   *
+   * A stdio server that crashes or is restarted takes the pipe with it, so
+   * without a retry the next call failed with "exited (code 1)" and every later
+   * one did too — the only way back was to reconnect by hand in Settings.
+   *
+   * The retry is judged by the PIPE, never by the `connected` flag: the flag is
+   * cleared the instant the process exits, which can be after a request is
+   * already on the wire, and a freshly spawned process has not been marked
+   * connected yet. Asking about the flag turned a reconnect into an endless
+   * respawn of a server that simply fails to start. A timeout or a
+   * server-reported error is not retried either: it is the answer the caller
+   * asked for.
+   */
+  private async _request(method: string, params: any, signal?: AbortSignal, timeoutMs = 300_000): Promise<any> {
+    if (signal?.aborted) throw new Error('aborted: MCP request');
     if (this.config.transport !== 'stdio') return this.remoteRequest(method, params, signal, timeoutMs);
-    if (!this.proc || this.proc.stdin.destroyed) return Promise.reject(new Error('MCP connection is closed'));
+    if (!this.pipeDead()) {
+      try {
+        return await this._requestRaw(method, params, signal, timeoutMs);
+      } catch (error) {
+        if (!this.pipeDead() || signal?.aborted) throw error;
+      }
+    }
+    // The pipe is gone: one reconnect, then the request on the new pipe. When
+    // the server is genuinely broken, its own reason is what the caller sees.
+    const alive = await this.ensureAlive();
+    if (!alive) throw new Error(this.lastError || 'MCP connection is closed');
+    try {
+      return await this._requestRaw(method, params, signal, timeoutMs);
+    } catch (error) {
+      throw this.lastError ? new Error(this.lastError) : error;
+    }
+  }
+
+  private _requestRaw(method: string, params: any, signal?: AbortSignal, timeoutMs = 300_000): Promise<any> {
     const id = this.nextId++;
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
     return new Promise((resolve, reject) => {
@@ -595,6 +701,8 @@ export class McpConnection {
   private async remoteRequest(method: string, params: any, signal?: AbortSignal, timeout = 300_000): Promise<any> {
     const client = this.client;
     if (!client || this.disposed) throw new Error('MCP connection is closed');
+    // Placed here rather than in the retry wrapper so the shape of a handed-in
+    // client is unchanged for every earlier caller.
     const options = {
       signal,
       timeout,

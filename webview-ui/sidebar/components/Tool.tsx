@@ -148,13 +148,73 @@ function toolMeta(name: string, i: any): { icon: IconName; label: string; badge:
     case "edit_file":
     case "StrReplace":
     case "Write":
-      return { icon: "file", label: basename(i.path || ""), badge: "Edit", cls: "badge-edit" };
+      // "Write src/a.ts", not a bare file name: the card sits among reads and
+      // searches, and the verb is what tells the reader this one changed a file.
+      return {
+        icon: "file",
+        label: (name === "Write" || name === "edit_file" ? "Write " : "Edit ") + basename(i.path || ""),
+        badge: "Edit",
+        cls: "badge-edit",
+      };
     case "delete_file":
     case "Delete":
       return { icon: "trash", label: "Delete " + basename(i.path), badge: "Edit", cls: "badge-edit" };
+    case "run_command":
     case "run_terminal":
     case "Shell":
       return { icon: "terminal", label: i.command || "", badge: "Terminal", cls: "badge-term" };
+    // Persistent terminals. Each names its session so two shells in one run are
+    // distinguishable, and the write card shows the input it sends.
+    case "terminal_start":
+    case "TerminalStart":
+      return { icon: "terminal", label: "Start " + (i.name || "terminal") + (i.command ? " · " + i.command : ""), badge: "Terminal", cls: "badge-term" };
+    case "terminal_write":
+    case "TerminalWrite":
+      return { icon: "terminal", label: (i.name || "terminal") + " ← " + String(i.input ?? "").replace(/\s+/g, " ").trim(), badge: "Terminal", cls: "badge-term" };
+    case "terminal_read":
+    case "TerminalRead":
+      return { icon: "terminal", label: "Read " + (i.name || "terminal"), badge: "Terminal", cls: "badge-term" };
+    case "terminal_list":
+    case "TerminalList":
+      return { icon: "terminal", label: "List terminals", badge: "Terminal", cls: "badge-term" };
+    case "terminal_stop":
+    case "TerminalStop":
+      return { icon: "terminal", label: "Stop " + (i.name || "terminal"), badge: "Terminal", cls: "badge-term" };
+    case "get_diagnostics":
+      return { icon: "ruler", label: "Diagnostics", badge: "Read", cls: "badge-read" };
+    case "list_files":
+      return { icon: "folder", label: "List " + (i.glob || "files"), badge: "Read", cls: "badge-read" };
+    case "search_files":
+      return { icon: "search", label: 'Search "' + (i.query || "") + '"', badge: "Read", cls: "badge-read" };
+    case "write_file":
+      return { icon: "file", label: "Write " + basename(i.path || ""), badge: "Edit", cls: "badge-edit" };
+    case "replace_text":
+      return { icon: "file", label: "Edit " + basename(i.path || ""), badge: "Edit", cls: "badge-edit" };
+    case "plan":
+    case "write_plan":
+    case "WritePlan":
+      return { icon: "todo", label: i.title || "Plan", badge: "Plan", cls: "badge-plan" };
+    case "ask_user":
+    case "AskQuestion":
+      return { icon: "chat", label: i.header || "Question", badge: "Ask", cls: "badge-ask" };
+    case "delegate_task":
+      return { icon: "task", label: i.description || i.task || i.subagent || "Subagent", badge: "Agent", cls: "badge-agent" };
+    case "memory_read":
+    case "memory_update":
+      return { icon: "database", label: i.path || "Project memory", badge: "Memory", cls: "badge-read" };
+    case "obs_recall":
+      return { icon: "file", label: "Recall " + (i.id || "observation"), badge: "Read", cls: "badge-read" };
+    case "use_skill":
+    case "skillsmp_read_installed":
+      return { icon: "book", label: "Skill " + (i.name || ""), badge: "Skill", cls: "badge-read" };
+    case "search_skills":
+    case "skillsmp_search":
+      return { icon: "book", label: 'Find skills "' + (i.query || "") + '"', badge: "Skill", cls: "badge-read" };
+    case "install_skill":
+    case "skillsmp_install_skill":
+      return { icon: "book", label: "Install " + (i.skill || i.source || ""), badge: "Skill", cls: "badge-edit" };
+    case "list_skills":
+      return { icon: "book", label: "List skills", badge: "Skill", cls: "badge-read" };
     default: {
       // MCP tools arrive as "mcp__<Server>__<tool_name>"; prettify to "Server · tool name".
       const mcp = name.match(/^mcp__(.+?)__(.+)$/);
@@ -813,10 +873,13 @@ function QuestionCard({ block }: { block: ToolBlock }) {
   );
 }
 
-// The code being written, pulled from whichever arg the edit tool streams.
+// The code being written, pulled from whichever arg the edit tool streams. Both
+// naming schemes are covered — SleepyCode's own (`write_file`/`replace_text`) and
+// the ported ones — because a card that matches neither showed "Writing…" for a
+// write that had already finished.
 function editPreview(name: string, i: any): string {
-  if (name === "Write" || name === "edit_file") return String(i.contents ?? i.content ?? "");
-  if (name === "StrReplace") return String(i.new_string ?? "");
+  if (name === "Write" || name === "edit_file" || name === "write_file") return String(i.contents ?? i.content ?? "");
+  if (name === "StrReplace" || name === "replace_text") return String(i.new_string ?? i.newText ?? "");
   return "";
 }
 
@@ -829,8 +892,11 @@ function ToolCardInner({ block, onImplement, onOpenSubagent, awaitingApproval }:
 
   const i = block.input || {};
   const meta = toolMeta(block.name, i);
-  const isEdit = block.name === "edit_file" || block.name === "StrReplace" || block.name === "Write";
-  const isShell = block.name === "run_terminal" || block.name === "Shell" || block.name === "AwaitShell";
+  const isEdit = block.name === "edit_file" || block.name === "StrReplace" || block.name === "Write"
+    || block.name === "write_file" || block.name === "replace_text" || block.name === "Delete" || block.name === "delete_file";
+  const isShell = block.name === "run_terminal" || block.name === "run_command"
+    || block.name === "Shell" || block.name === "AwaitShell"
+    || block.name === "terminal_start" || block.name === "terminal_write";
   // Expanded while the tool works, collapsed the moment it settles.
   const [open, toggleOpen] = useLiveDisclosure(block.status === "running");
 
@@ -843,7 +909,9 @@ function ToolCardInner({ block, onImplement, onOpenSubagent, awaitingApproval }:
   };
   // Edit cards always show their body — the diff has its own expander.
   const showBody = isEdit || open;
-  const shellCmd = isShell ? String(i.command || meta.label || "") : "";
+  const shellCmd = isShell
+    ? String(i.command ?? (block.name === "terminal_write" ? i.input : "") ?? meta.label ?? "")
+    : "";
   const shellParsed = isShell ? parseShellResult(block.result, shellCmd) : null;
 
   return (
@@ -897,7 +965,14 @@ function ToolCardInner({ block, onImplement, onOpenSubagent, awaitingApproval }:
           ) : isShell && shellParsed ? (
             <TerminalBody parsed={shellParsed} running={block.status === "running"} />
           ) : (
-            <pre className="tool-result">{block.status === "running" ? "Running…" : (block.result || "").slice(0, 4000)}</pre>
+            <>
+              {/* The call's own arguments, so a tool with no bespoke card still
+                  says what it was asked to do instead of showing only output. */}
+              {!block.diff && Object.keys(i).length > 0 && (
+                <pre className="tool-args">{JSON.stringify(i, null, 2).slice(0, 4000)}</pre>
+              )}
+              <pre className="tool-result">{block.status === "running" ? "Running…" : (block.result || "").slice(0, 4000)}</pre>
+            </>
           )}
         </div>
       )}

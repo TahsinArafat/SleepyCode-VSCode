@@ -30,7 +30,9 @@ test('a deliberate stop is not reported as a failure', () => {
 test('an orphaned run failure leaves a persisted, retryable turn', () => {
   const start = agent.indexOf("'run.unhandled'");
   assert.ok(start > 0, 'run.unhandled not found');
-  const block = agent.slice(start - 600, start + 1400);
+  // Wide enough to include the abort that now runs before the persisted error
+  // (a rejected run promise must stop the stream, not just drop its entry).
+  const block = agent.slice(start - 600, start + 2400);
   // The user turn is persisted before the run, so an escaped failure left it unanswered.
   assert.match(block, /conversation\.items\.push\(errorItem\)/);
   assert.match(block, /persistProjects\(\)/);

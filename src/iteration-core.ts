@@ -71,6 +71,97 @@ export function recoverPendingHistory<T extends HistoryMessage>(
 }
 
 /**
+ * Drop history that a strict provider will reject.
+ *
+ * A tool call whose result never arrived is persisted as an assistant message
+ * with a `tool-call` part and no matching `tool` message. That happens whenever
+ * a turn is stopped between the model emitting the call and the tool finishing
+ * — the common case for "I pressed stop", and the reason repeated stops left
+ * later turns failing outright. Two repairs, both conservative:
+ *
+ *   - an assistant `tool-call` with no result is rewritten as text, so the model
+ *     still knows it asked for the tool and that it did not run;
+ *   - a `tool` message with no matching call is dropped, because it can only be
+ *     an orphan.
+ *
+ * A message with no content left after repair is removed: a provider rejects an
+ * empty assistant turn just as firmly.
+ */
+export function dropOrphanedToolCalls<T extends HistoryMessage>(messages: readonly T[]): T[] {
+  /** The tool-call ids an assistant message asked for, in either stored shape. */
+  const callIdsOf = (message: HistoryMessage): string[] => {
+    const ids: string[] = [];
+    if (Array.isArray((message as { toolCalls?: unknown }).toolCalls)) {
+      for (const call of (message as { toolCalls: { id?: unknown; toolCallId?: unknown }[] }).toolCalls) {
+        const id = call?.id ?? call?.toolCallId;
+        if (typeof id === 'string') ids.push(id);
+      }
+    }
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content as { type?: string; toolCallId?: unknown }[]) {
+        if (part?.type === 'tool-call' && typeof part.toolCallId === 'string') ids.push(part.toolCallId);
+      }
+    }
+    return ids;
+  };
+  /** The tool-call ids this message answers. */
+  const resultIdsOf = (message: HistoryMessage): string[] => {
+    if (message?.role !== 'tool' || !Array.isArray(message.content)) return [];
+    return (message.content as { toolCallId?: unknown }[])
+      .map(part => part?.toolCallId)
+      .filter((id): id is string => typeof id === 'string');
+  };
+
+  const answered = new Set<string>();
+  for (const message of messages) for (const id of resultIdsOf(message)) answered.add(id);
+
+  const out: T[] = [];
+  for (const message of messages) {
+    if (message?.role !== 'assistant') {
+      // Tool results are left in place: one whose call fell outside the window is
+      // an orphan, and `safeHistoryStart`/`selectStructuredHistory` are what drop
+      // that whole leading fragment. Deleting the result here would remove a
+      // legitimate answer on every slice that starts mid-turn.
+      out.push(message);
+      continue;
+    }
+    const unanswered = callIdsOf(message).filter(id => !answered.has(id));
+    if (!unanswered.length) {
+      // An assistant message with nothing in it at all is not history, it is a
+      // placeholder: providers reject an empty turn outright.
+      const emptyContent = Array.isArray(message.content) && message.content.length === 0;
+      if (emptyContent && !callIdsOf(message).length) continue;
+      out.push(message);
+      continue;
+    }
+    const content = Array.isArray(message.content) ? message.content as { type?: string; toolCallId?: unknown; toolName?: unknown }[] : [];
+    // A call with no result becomes a note: the model still knows it asked for
+    // that tool and that nothing came back, instead of the provider rejecting the
+    // entire request for a tool call that is never answered.
+    const repaired: unknown[] = content.map(part => {
+      if (part?.type !== 'tool-call') return part;
+      const id = typeof part.toolCallId === 'string' ? part.toolCallId : '';
+      if (id && answered.has(id)) return part;
+      return { type: 'text', text: `[The tool \`${String(part.toolName ?? 'tool')}\` was requested but did not finish, so it produced no result.]` };
+    });
+    // Nothing left to say at all (an empty step, or every part was an unanswered
+    // call that produced no note): providers reject an empty assistant turn just
+    // as firmly as an unanswered one, so it is dropped.
+    if (!repaired.length && !Array.isArray((message as { toolCalls?: unknown }).toolCalls)) continue;
+    const keptCalls = Array.isArray((message as { toolCalls?: unknown }).toolCalls)
+      ? (message as { toolCalls: { id?: unknown; toolCallId?: unknown }[] }).toolCalls.filter(call => {
+        const id = call?.id ?? call?.toolCallId;
+        return typeof id === 'string' && answered.has(id);
+      })
+      : undefined;
+    const next = { ...message, content: repaired.length ? repaired : message.content } as T & { toolCalls?: unknown };
+    if (keptCalls) next.toolCalls = keptCalls;
+    out.push(next);
+  }
+  return out;
+}
+
+/**
  * First index that is safe to start a provider request at.
  *
  * Strict providers reject a history that begins with a tool result or an
@@ -112,6 +203,12 @@ export function selectStructuredHistory<T extends HistoryMessage>(
   estimateTokens: EstimateMessageTokens,
 ): T[] {
   if (!stored?.length) return [];
+  // Repaired before selection: an orphaned tool call from a stopped turn makes
+  // the WHOLE request invalid, not just that turn, so it must not survive to the
+  // wire. `stored` itself is left untouched — it is the conversation's history.
+  const repaired = dropOrphanedToolCalls(stored);
+  if (!repaired.length) return [];
+  stored = repaired;
   let start = stored.findIndex(message => message.role === 'user');
   if (start < 0) return [];
   if (start > 0) start = safeHistoryStart(stored, start);
@@ -158,11 +255,17 @@ export function appendConversationMessages<T extends HistoryMessage>(
   maxStored: number,
   reuseUser = false,
 ): T[] {
-  const prior = existing ?? [];
+  // Repaired on the way IN as well as on the way out: a turn stopped between a
+  // tool call and its result writes exactly one orphan, and repairing only at
+  // request time would leave every later reload re-reading a broken history.
+  const prior = dropOrphanedToolCalls(existing ?? []);
   const lastUser = lastUserStart(prior);
   const alreadyHasUser = reuseUser && prior.length > 0 && prior[lastUser]?.role === 'user' && prior[lastUser]?.content === userText;
   const next = alreadyHasUser ? [...prior, ...produced] : [...prior, { role: 'user', content: userText } as T, ...produced];
-  return next.length > maxStored ? next.slice(-maxStored) : next;
+  // The slice can also orphan the first turn's results, so repair once more
+  // after trimming rather than assuming the cut landed cleanly.
+  const bounded = next.length > maxStored ? next.slice(-maxStored) : next;
+  return dropOrphanedToolCalls(bounded);
 }
 
 /**

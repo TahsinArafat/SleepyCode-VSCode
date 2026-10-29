@@ -500,9 +500,9 @@ export class SettingsPanel {
         await this.host.setActiveProvider(String(message.id ?? '')).catch(() => undefined);
         this.post({ type: 'providers', providers: await this.host.readProviders().catch(() => []) });
         return;
-      case 'getSubagents':
-        this.post({ type: 'subagents', ...(await this.host.readSubagents().catch(() => ({}))) as object });
-        return;
+      // `getSubagents` above answers both shapes: `postSubagents` sends the
+      // per-role model map AND the full definition list, so the later duplicate
+      // case could never run — it was dead code that shadowed a real handler.
       case 'saveSubagent': {
         let failure = '';
         await this.host.saveSubagent(message.draft).catch((error) => { failure = error instanceof Error ? error.message : String(error); });

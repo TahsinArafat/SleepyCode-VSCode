@@ -127,8 +127,11 @@ export type InMessage =
   | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string; compactionUndoable?: boolean; compactionRedoable?: boolean }
   /** Which conversation the host made active, with no transcript replayed. */
   | { type: "conversationActive"; activeId: string }
+  /** The host refused an optimistic steering note; remove it from the transcript. */
+  | { type: "steeringRejected"; convId: string; requestId?: string; text: string }
   /** Asks for a transcript the webview never received. Answered even mid-run. */
-  | { type: "error"; convId?: string; message: string }
+  /** `keepTurn`: a notice about a running turn (not the end of one). */
+  | { type: "error"; convId?: string; message: string; keepTurn?: boolean }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
   | { type: "fileSearchResults"; requestId: number; items: MentionItem[] }
   | { type: "mentionSearchResults"; requestId: number; kind: MentionCategory; items: MentionItem[] }
@@ -190,7 +193,7 @@ export type OutMessage =
   | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean; requestId?: string; context?: Record<string, boolean> }
   | { type: "updateChatWorkspace"; state: Partial<ChatWorkspaceState> }
   | { type: "queueAction"; convId: string; id: string; action: "remove" | "run" | "steer" | "up" | "down" | "edit" }
-  | { type: "steerMessage"; convId: string; text: string }
+  | { type: "steerMessage"; convId: string; text: string; requestId?: string }
   | { type: "forkConversation"; id: string }
   | { type: "archiveConversation"; id: string; archived: boolean }
   /** Rename a thread. With no title the host prompts, pre-filled. */
@@ -239,7 +242,6 @@ export type OutMessage =
   // no turn id — requiring one left the buttons permanently disabled.
   | { type: "commitChanges" }
   | { type: "openSourceControl" }
-  | { type: "stageAllChanges"; paths: string[] }
   | { type: "logError"; message: string; info?: string }
   | { type: "openLog" }
   | { type: "getFileIcon"; filename: string }

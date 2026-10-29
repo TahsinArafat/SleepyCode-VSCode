@@ -212,7 +212,8 @@ test('sending during an active run queues without rendering a fake first send', 
 test('queue keeps every follow-up sent during a run (multi-message queue)', () => {
   // Server keeps one entry per queued prompt instead of replacing the previous one.
   // One entry per prompt, appended: the queue never replaces what is waiting.
-  assert.match(agent, /this\.queue\.push\(\{ id: `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext,/);
+  // Steering rows carry the composer's request id so the echo can name them.
+  assert.match(agent, /this\.queue\.push\(\{ id: requestId && requestId\.trim\(\) \? requestId : `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext,/);
   assert.doesNotMatch(agent, /this\.queue = this\.queue\.filter\(entry => entry\.conversationId !== conversationId\);\n\s*this\.queue\.push/);
   assert.match(agent, /prompts: entries\.map\(entry => entry\.text\), ids: entries\.map\(entry => entry\.id\)/);
   assertSource(runtime, /case'queuedPrompt':\{const ids=m\.ids\|\|\[\],texts=m\.prompts\|\|\[\]/);
@@ -292,7 +293,7 @@ test('auto-compaction runs after the run leaves this.runs, with a cooldown', () 
   // Anchored on the drain's own call rather than on whichever publisher is in
   // fashion: renaming `postQueued` to `postWorkflow` broke this while the
   // invariant it protects was unchanged.
-  const finallyBlock = agent.match(/\} finally \{[\s\S]*?await mcpConnection\?\.close\(\);[\s\S]*?void this\.run\(next\.text/)?.[0] ?? '';
+  const finallyBlock = agent.match(/\} finally \{[\s\S]*?await mcpConnection\?\.close\(\);[\s\S]*?void this\.run\(own\.text/)?.[0] ?? '';
   assert.ok(finallyBlock, 'run() finally block found');
   assert.match(finallyBlock, /this\.runs\.delete\(conversationId\);[\s\S]*?maybeAutoCompact\(conversation/);
   assert.match(agent, /lastAutoCompactAt\.get\(conversation\.id\) \?\? 0\) < 120_000/);
@@ -595,9 +596,11 @@ test('the extension is a client: it never opens the CLI database', () => {
 
 test('a busy CLI turn keeps the live renderer instead of rebuilding the transcript', () => {
   const start = agent.indexOf('private applyCliProjection');
-  const body = agent.slice(start, start + 1600);
+  // Wide enough to cover the method's comments and the settled-path work added
+  // since, so a later edit cannot hide the invariant behind a fixed window.
+  const body = agent.slice(start, agent.indexOf('private applyCliLiveEvent'));
   assert.match(body, /if \(busy\) return;/);
-  assert.match(body, /applyCliLiveEvent/);
+  assert.match(agent, /private applyCliLiveEvent/);
   assert.match(cliEngine, /case 'message\.part\.delta'/);
   assert.match(cliEngine, /applyCliPartDelta/);
   // Tokens that arrive before the GET has the new part must still paint.
@@ -1046,14 +1049,20 @@ test('an update sent mid-run reaches the running task instead of starting a turn
   // most expensive recurring bug.
   const adapter = read('src/webview-adapter.ts');
   assert.match(adapter, /case 'steerMessage':/);
-  assert.match(adapter, /steering: true \};/);
+  assert.match(adapter, /steering: true,\n/);
   assert.match(agent, /if \(steering && this\.runs\.has\(conversationId\)\)/);
-  assert.match(agent, /this\.enqueue\(sendText, conversationId, composerContext, promptContext, true\)/);
+  // The composer's request id rides along so the `steered` echo can name the row.
+  assert.match(agent, /this\.enqueue\(sendText, conversationId, composerContext, promptContext, true, \(message as \{ requestId\?: string \}\)\.requestId\)/);
   assert.match(agent, /private drainSteering\(conversationId: string\): string\[\]/);
-  assert.match(agent, /runGuidance\.push\(\.\.\.this\.drainSteering\(conversationId\)\)/);
-  // It goes AFTER the request: `iterationRequestMessages` puts the user's ask
-  // last, so guidance pushed before it would read as the original ask.
-  assert.match(agent, /agentMessages\.push\(\{ role: 'user', content: steeringGuidance\(guidance\) \}/);
+  // Drained BETWEEN steps, in `prepareStep`: the SDK owns the step loop, so that
+  // is the only place an update can reach the next model request. Draining it at
+  // the top of the outer loop is what made a mid-run message arrive only after
+  // the whole turn had finished.
+  assert.match(agent, /prepareStep: \(\{ messages: stepMessages \}\) => steeringStep\(stepMessages\)/);
+  assert.match(agent, /const taken = this\.drainSteering\(conversationId\);/);
+  assert.match(agent, /runGuidance\.push\(\.\.\.taken\)/);
+  // Every update so far, every step: the model has to keep steering by them.
+  assert.match(agent, /runGuidance\.map\(guidance => \(\{ role: 'user', content: steeringGuidance\(guidance\) \}\)/);
   // Guidance never stops the run. Aborting and restarting was the old behaviour,
   // and it showed the same words twice while throwing away the work so far.
   assert.doesNotMatch(agent, /run\.steering = true/);
@@ -1068,7 +1077,8 @@ test('a mid-run update is shown inside the work it changed, not as a message', (
   const css = read('webview-ui/sidebar/sidebar.css');
   // The reducer files it as a block of the running response…
   assert.match(read('src/shared/turns.ts'), /export interface SteeringBlock \{/);
-  assert.match(read('src/shared/turns.ts'), /turn\.blocks\.push\(\{ kind: "steering", text: ev\.text, at: Date\.now\(\) \}\)/);
+  // Carries the request id so an echoed update is not drawn a second time.
+  assert.match(read('src/shared/turns.ts'), /turn\.blocks\.push\(\{ kind: "steering", text: ev\.text, at: Date\.now\(\), \.\.\.\(ev\.requestId \? \{ requestId: ev\.requestId \} : \{\}\) \}\)/);
   // …the transcript renders it there…
   assertSource(app, /if \(block.kind === "steering"\) return <SteeringNote key=\{index\} text=\{block\.text\} \/>;/);
   // …and the note carries its own rule rather than borrowing the user bubble's
@@ -1152,7 +1162,8 @@ test('a named subagent carries its own instructions, capability and model', () =
   assert.match(agent, /const subagentReadonly = definition \? definition\.readonly : role !== 'worker';/);
   assert.match(agent, /const roleTools = subagentReadonly\n/);
   // Model precedence: the definition wins, then the role's model, then the chat's.
-  assert.match(agent, /const subagentModelId = definition\?\.model \|\| this\.subagentModels\(\)\[role\] \|\| model;/);
+  // Each source is trimmed: `provider('')` is a request no provider can serve.
+  assert.match(agent, /const subagentModelId = definition\?\.model\?\.trim\(\) \|\| this\.subagentModels\(\)\[role\]\?\.trim\(\) \|\| model;/);
   // The roster is stated up front: a roster the model never sees is one it invents.
   assert.match(agent, /const rosterBlock = subagents\.subagentRosterBlock\(this\.delegatableSubagents\(\)\);/);
 });
@@ -1283,13 +1294,16 @@ test('mid-run guidance keeps steering, it does not steer once and lapse', () => 
   // prompt, so the update vanished — the model obeyed it for one step and then
   // carried on as before.
   assert.match(agent, /const runGuidance: string\[\] = \[\];/);
-  assert.match(agent, /runGuidance\.push\(\.\.\.this\.drainSteering\(conversationId\)\);/);
+  assert.match(agent, /runGuidance\.push\(\.\.\.taken\);/);
   assert.match(agent, /for \(const guidance of runGuidance\) agentMessages\.push\(/);
   // Every step, not just the one that took it.
   assert.doesNotMatch(agent, /const steered = this\.drainSteering\(conversationId\);/);
   // And it survives the turn: persisted with the messages, after the work, so a
-  // later turn knows what was asked mid-run.
+  // later turn knows what was asked mid-run. Recorded as an ASSISTANT message —
+  // a `user` one there would put two user turns in a row into the next request.
   assert.match(agent, /const flushGuidance = \(\): void => \{/);
+  assert.match(agent, /runMessages\.push\(\{ role: 'assistant', content: guidance \}/);
+  assert.doesNotMatch(agent, /runMessages\.push\(\{ role: 'user', content: steeringGuidance/);
   const flushes = [...agent.matchAll(/flushGuidance\(\);/g)].length;
   const appends = [...agent.matchAll(/appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/g)].length;
   assert.equal(flushes, appends, 'each persistence point must flush the guidance first');
@@ -1375,4 +1389,50 @@ test('the persona chip represents the chat on screen, and nothing else resets it
   assert.doesNotMatch(app, /if \(sessionFor\(activeIdRef\.current\)\.turns\.length === 0\) setPersonaId\(msg\.activePersonaId \|\| "default"\);/);
   // The "no persona" row can never be removed, whatever the host labelled it.
   assertSource(read('webview-ui/settings/panels/PersonasPanel.tsx'), /persona\.builtin === true \|\| persona\.id === DEFAULT_PERSONA_ID/);
+});
+
+test('a stop that lands while the stream drains still commits as a stop, not a success', () => {
+  // The completion path persists the assistant item and posts `done`. It used to
+  // run with no abort check, so pressing stop in the window between the last
+  // step finishing and the turn being committed produced a "completed" turn for
+  // work the user cancelled — and the stop branch that preserves the partial
+  // work as a retryable card never ran.
+  assertSource(agent, /if \(run\.controller\.signal\.aborted\) \{\s*throw run\.controller\.signal\.reason instanceof Error/);
+  const stopCheck = agent.indexOf('if (run.controller.signal.aborted) {\n            throw run.controller.signal.reason');
+  const donePost = agent.indexOf("this.post({ type: 'done', conversationId, item: assistantItem });");
+  assert.ok(stopCheck > 0 && donePost > stopCheck, 'the abort check must precede the commit');
+});
+
+test('a run whose promise rejects is aborted before its entry is dropped', () => {
+  // Deleting the entry alone marked the conversation idle while the stream was
+  // still writing into it; `run()`'s own finally then cleared `runs` again and
+  // drained the queue, and the turn's text kept arriving on a finished chat.
+  const start = agent.indexOf("this.log('error', 'run.unhandled', detail);");
+  // Window covers the explanatory comment between the log and the abort.
+  const body = agent.slice(start, start + 800);
+  assert.match(body, /this\.runs\.get\(conversationId\)\?\.controller\.abort\(\);/);
+  assert.doesNotMatch(body, /this\.runs\.delete\(conversationId\);/);
+});
+
+test('the pre-turn git baseline is captured before the run can edit anything', () => {
+  // Captured concurrently, `git add -A` could snapshot the mid-turn state: the
+  // turn's first edits became the "before" snapshot and could neither be undone
+  // nor be reported as changed.
+  const start = agent.indexOf('let runGitTree = gitTracked ? carryTree : undefined;');
+  const body = agent.slice(start, start + 1400);
+  assert.match(body, /runGitTree = await captureGitTree\(root\.fsPath, \{ signal: run\.controller\.signal, timeoutMs: 15_000 \}\)/);
+  assert.doesNotMatch(body, /void captureGitTree\(/);
+});
+
+test('a finished run never starts another conversation\'s queued prompt', () => {
+  // Falling back to `this.queue[0]` ran a different chat's prompt from this
+  // chat's finally block — before that chat's own turn had finished.
+  const start = agent.indexOf("// Only THIS conversation's next prompt is drained here.");
+  assert.ok(start > 0, 'the drain comment is present');
+  // Anchored on the code, not the prose: the comment above it names the old
+  // fallback by way of explaining why it is gone.
+  const body = agent.slice(start, start + 900);
+  assert.match(body, /const own = this\.queue\.find\(entry => entry\.conversationId === conversationId && !entry\.steering\);/);
+  assert.doesNotMatch(body, /= own \?\? this\.queue\[0\]/);
+  assert.doesNotMatch(body, /queue\.find\(entry => entry\.conversationId === conversationId\) \?\? this\.queue\[0\]/);
 });
