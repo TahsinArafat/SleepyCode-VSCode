@@ -1554,3 +1554,21 @@ test('a question the run is blocked on is pinned above the composer', () => {
   assert.match(sidebarCss, /\.question-card\.pinned/);
   assert.match(sidebarCss, /\.sticky-question/);
 });
+
+test('opening the MCP settings page probes the servers instead of promising to', () => {
+  // A fresh window's only carrier was `getFeatures`, which painted the stored
+  // list with NO statuses — every row read "Not checked yet — SleepyCode
+  // connects to saved servers when the window opens" and stayed there, while
+  // the promised connecting happened invisibly. Probing in the same handler
+  // makes the page show live states; the background reconnect forwards to an
+  // open window instead of only the chat.
+  const panel = read('src/settings-panel.ts');
+  assert.match(panel, /case 'getFeatures':[\s\S]*?await this\.pushFeatures\(\);[\s\S]*?await this\.pushFeatures\(await this\.safeSync\(\)\);/);
+  assert.match(panel, /static pushMcpStatus/);
+  // The warm-up publishes through the panel bridge, not the sidebar post (the
+  // chat protocol has no mcpStatus case — the adapter would drop it).
+  assert.match(agent, /SettingsPanel\.pushMcpStatus\(statuses\)/);
+  // And the dead sidebar post is gone: nothing else may re-add it believing
+  // the chat renders these rows.
+  assert.doesNotMatch(agent, /type: 'mcpStatus'/);
+});

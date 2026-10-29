@@ -6603,8 +6603,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const verdict = warmVerdict(statuses);
       this.log('info', 'mcp.warm.done',
         `${verdict.connected}/${verdict.total} connected, ${verdict.down.length}/${verdict.enabled.length} enabled still down (attempt ${attempt})${verdict.down.length ? `: ${verdict.down.join(', ')}` : ''}`);
-      // Pushed so an open settings window shows reality without a manual sync.
-      this.post({ type: 'mcpStatus', statuses });
+      // The settings window is the only MCP-row surface, and it has its own
+      // webview: `this.post` reaches the sidebar, whose protocol has no
+      // `mcpStatus` case (the adapter would drop it), so the statuses travel
+      // through the panel bridge instead. A closed window no-ops — its next
+      // `getFeatures` probe carries the same data fresh.
+      SettingsPanel.pushMcpStatus(statuses);
       this.mcpWarmActive = verdict.retry;
       if (verdict.retry) schedule();
     };

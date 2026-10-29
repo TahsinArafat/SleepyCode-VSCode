@@ -148,6 +148,18 @@ export interface SettingsPanelHost {
 export class SettingsPanel {
   private static current: SettingsPanel | undefined;
 
+  /**
+   * Live MCP statuses for an OPEN settings window, posted from outside the
+   * panel's own request cycle — the sidebar's background reconnect publishes
+   * them (`mcpStatus`) and a settings window that is up at that moment should
+   * move its rows too, not only the chat. An absent or disposed window is a
+   * no-op: the statuses arrive with the next `getFeatures` probe.
+   */
+  static pushMcpStatus(statuses: unknown): void {
+    if (!SettingsPanel.current || SettingsPanel.current.disposed) return;
+    SettingsPanel.current.post({ type: 'mcpStatus', statuses });
+  }
+
   private readonly panel: vscode.WebviewPanel;
   private disposed = false;
 
@@ -280,7 +292,17 @@ export class SettingsPanel {
         this.post({ type: 'loadSettings', settings: toPanelSettings(this.host.readSettings()) });
         return;
       case 'getFeatures':
+        // Paint the stored servers immediately, then probe them. A fresh window
+        // never ran `pushAll` (that is the reveal-an-existing-panel path), so
+        // `getFeatures` — which the webview posts the moment it mounts — was the
+        // ONLY carrier here, and it carried no statuses: every row read
+        // "Not checked yet — SleepyCode connects to saved servers when the
+        // window opens" and stayed there, while the connection work the copy
+        // promises happened invisibly in the background. Probing here is the
+        // same work Sync does, so a fresh MCP page shows live states, not a
+        // promise of them.
         await this.pushFeatures();
+        await this.pushFeatures(await this.safeSync());
         return;
       case 'saveFeatures': {
         // One payload, several stores. `routeFeatureSave` decides which parts are
