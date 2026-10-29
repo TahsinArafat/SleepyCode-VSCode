@@ -1153,6 +1153,16 @@ export function App() {
   // visible chat just renders the active session. Avoids any snapshot races.
   const sessionsRef = React.useRef<Map<string, ChatSession>>(new Map());
   const [, force] = React.useReducer((n) => n + 1, 0);
+  // A tab the host has been asked for but has not answered yet. Switching to a
+  // conversation is a round trip, and until the snapshot lands the session has
+  // no turns — which painted the "New Chat" empty state, then filled in. That
+  // read as a blank tab that sometimes needed several clicks.
+  //
+  // Declared here, above the effect that reads it: a `const` read from a hook
+  // that runs earlier in the component body is a ReferenceError, and the
+  // minified name in the shipped bundle made that look like a build bug.
+  const [loadingId, setLoadingId] = React.useState<string | undefined>(undefined);
+  const requestedTranscriptRef = React.useRef<Map<string, number>>(new Map());
   // Mirror of activeId readable inside the stable message handler.
   const activeIdRef = React.useRef<string | undefined>(undefined);
   React.useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -1188,13 +1198,6 @@ export function App() {
   React.useEffect(() => {
     tabBarRef.current?.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, openTabs]);
-
-  // A tab the host has been asked for but has not answered yet. Switching to a
-  // conversation is a round trip, and until the snapshot lands the session has
-  // no turns — which painted the "New Chat" empty state, then filled in. That
-  // read as a blank tab that sometimes needed several clicks.
-  const [loadingId, setLoadingId] = React.useState<string | undefined>(undefined);
-  const requestedTranscriptRef = React.useRef<Map<string, number>>(new Map());
 
   // Brand-new (id-less) chats use the "" key until the backend assigns an id.
   const sessionFor = (id: string | undefined): ChatSession => {

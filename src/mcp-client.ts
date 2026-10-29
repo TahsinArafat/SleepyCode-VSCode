@@ -291,7 +291,7 @@ export class McpConnection {
       return fetch(input, { ...init, headers, redirect: 'error' });
     };
     const client = new Client(
-      { name: 'sleepycode', version: '0.8.0' },
+      { name: 'sleepycode', version: '0.8.1' },
       { capabilities: this.host?.elicit ? { elicitation: { form: {}, url: {} } } : {} },
     );
     client.onerror = (error) => {

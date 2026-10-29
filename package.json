@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -270,10 +270,11 @@
   },
   "scripts": {
     "check": "tsc --noEmit && node scripts/verify.mjs && node scripts/logic-check.mjs && npm test && npm run test:core && node scripts/verify-notifier.mjs",
+    "check:webview": "npm run build && node scripts/verify-webview-bundles.mjs",
     "test": "node --test 'test/**/*.test.mjs'",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "package": "npm run verify:release && npm run check && npm run build && vsce package",
+    "package": "npm run verify:release && npm run check && npm run build && node scripts/verify-webview-bundles.mjs && vsce package",
     "test:core": "node --experimental-strip-types --test test/*.direct.mjs",
     "verify:release": "node scripts/verify-release.mjs"
   },

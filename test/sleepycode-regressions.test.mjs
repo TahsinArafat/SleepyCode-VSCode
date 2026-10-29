@@ -1436,3 +1436,78 @@ test('a finished run never starts another conversation\'s queued prompt', () => 
   assert.doesNotMatch(body, /= own \?\? this\.queue\[0\]/);
   assert.doesNotMatch(body, /queue\.find\(entry => entry\.conversationId === conversationId\) \?\? this\.queue\[0\]/);
 });
+
+test('no component state is read by a hook declared before it', () => {
+  // 0.8.0 shipped a `ReferenceError: Cannot access 'Ri' before initialization`:
+  // `loadingId` was declared ~40 lines BELOW the `useEffect` that read it, so the
+  // component threw on first render and the chat panel came up blank for every
+  // user. `tsc` does not analyse use-before-declaration inside a function body,
+  // and no pure-`.mjs` test loads the bundle — scripts/verify-webview-bundles.mjs
+  // is the end-to-end guard. This is the cheap, precise half: the ORDER.
+  //
+  // Deliberately narrow, so it cannot rot into a false-positive machine:
+  //   - only `useState`/`useReducer` values are considered (a ref read from a
+  //     deferred callback is safe);
+  //   - a read only counts at the immediate top level of a hook callback, so a
+  //     `.map(x => …)` body — deferred until after the component body ran — is
+  //     excluded.
+  const app = read('webview-ui/sidebar/App.tsx');
+  const appStart = app.indexOf('export function App()');
+  assert.ok(appStart > 0, 'App() is present');
+  const body = app.slice(appStart);
+
+  /** Argument list of a call starting at `from`, honouring strings and nesting. */
+  const argumentList = (from) => {
+    let depth = 0;
+    let out = '';
+    let quote = null;
+    for (let i = from; i < body.length; i++) {
+      const ch = body[i];
+      if (quote) {
+        out += ch;
+        if (ch === '\\') { out += body[++i]; continue; }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') depth++;
+      if (ch === ')' || ch === ']' || ch === '}') depth--;
+      out += ch;
+      if (depth === 0) break;
+    }
+    return out;
+  };
+
+  /** Cut everything inside a deferred callback (`.map(x => …)` and friends). */
+  const immediate = (args) => {
+    const deferred = /\.(map|filter|find|findIndex|forEach|some|every|reduce|sort|then|catch)\s*\(/;
+    const match = deferred.exec(args);
+    return match ? args.slice(0, match.index) : args;
+  };
+
+  // `const [x, setX] = React.useState(...)` — the destructured pair is the shape
+  // that shipped broken, so both names count as the declaration's bindings.
+  const states = [...body.matchAll(/(?:const|let)\s+(\[[^\]]*\]|[\w$]+)\s*=\s*React\.(useState|useReducer)\b/g)]
+    .flatMap(match => [...match[1].matchAll(/[A-Za-z_$][\w$]*/g)]
+      .map(name => ({ name: name[0], at: match.index, kind: match[2] })));
+  assert.ok(states.length > 20, `App state bindings found: ${states.length}`);
+
+  const hooks = [...body.matchAll(/React\.(useEffect|useLayoutEffect|useMemo|useCallback|useRef|useState)\s*\(/g)]
+    // Start AT the opening paren so its depth is counted; starting after it made
+    // the first `(` look like the closing one and returned ") => {".
+    .map((match) => {
+      const open = match.index + match[0].length - 1;
+      return { at: match.index, args: immediate(argumentList(open)) };
+    });
+
+  const problems = [];
+  for (const state of states) {
+    for (const hook of hooks) {
+      if (hook.at >= state.at) break;
+      if (new RegExp(`\\b${state.name}\\b`).test(hook.args)) {
+        problems.push(`${state.name} (${state.kind}) read at char ${hook.at}, declared at char ${state.at}`);
+      }
+    }
+  }
+  assert.deepEqual(problems, [], 'a hook reads state declared after it — this throws on first render');
+});
