@@ -1974,6 +1974,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * is rewritten here using the tracked target before reaching `onMessage`.
    */
   private handleReactChangeAction(message: any): boolean {
+    if (message?.type === 'dismissChanges') {
+      // A pure UI acknowledgement: the tracked changes stay in the host's
+      // history; the webview clears its own copy of the count.
+      this.log('info', 'react.changes.dismissed');
+      return true;
+    }
     if (message?.type === 'acceptAllChanges' || message?.type === 'rejectAllChanges') {
       const conversationId = this.activeProject()?.activeConversationId;
       const itemId = conversationId ? this.reactChangeTarget.get(conversationId) : undefined;

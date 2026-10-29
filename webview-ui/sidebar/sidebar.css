@@ -1506,6 +1506,36 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	color: var(--fg-faint);
 	font-weight: 500;
 }
+/* The pinned copy's dismiss. The head is a flex row; the close button slots in
+   after the step counter without disturbing the title's ellipsis behaviour. */
+.qc-head .qc-close {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px;
+	border: none;
+	border-radius: var(--r-xs);
+	background: transparent;
+	color: var(--fg-faint);
+	cursor: pointer;
+}
+.qc-head .qc-close:hover {
+	color: var(--fg);
+	background: var(--surface-2);
+}
+/* The sticky question above the composer: same card, framed as an overlay so it
+   reads as "the run is waiting on you", not as part of the transcript. */
+.sticky-question {
+	margin: 0 0 6px;
+	padding: 0 var(--composer-gutter, 10px);
+}
+.question-card.pinned {
+	margin: 0;
+	border-color: var(--kelp);
+	box-shadow: 0 2px 10px rgb(0 0 0 / 0.12);
+	background: var(--surface-1);
+}
 .qc-question {
 	font-size: 13px;
 	font-weight: 600;

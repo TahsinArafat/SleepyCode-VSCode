@@ -3,63 +3,49 @@ import assert from 'node:assert/strict';
 import * as review from '../src/review-actions.ts';
 
 /*
- * The review bar's actions.
+ * The changed-files bar.
  *
- * Two of the four the classic card offered are gone rather than left standing:
- * "Stage all" duplicated Keep All (staging is what Keep All does), and "Restore
- * checkpoint" rolled every file back to its pre-turn state — the opposite of the
- * Keep All button beside it, and available where it belongs in Undo History. A
- * button whose label promises a state change it should not make is worse than no
- * button at all.
+ * The bar once offered Keep All / Undo All / Commit / Source Control (and before
+ * those, Stage all and Restore checkpoint). Every one had a real host handler,
+ * but each path carried a precondition that could fail it silently — no git
+ * root, pre-existing dirty files, unrelated staged changes — so from the user's
+ * seat the buttons read as decoration, and they were removed on request. The
+ * bar now shows the count and one OK that dismisses it; per-file Keep/Undo stay
+ * in the expanded list, and bulk work lives in VS Code's Source Control.
  *
- * These builders exist so each remaining button posts a message the host already
- * handles, and so a button whose target is missing is disabled rather than dead.
- * The host resolves an edit through a conversation and the turn that made it.
+ * These builders exist so the one remaining button posts a message the host
+ * actually receives, and so a button whose target is missing is disabled rather
+ * than dead.
  */
 
 const ctx = { conversationId: 'c1', itemId: 'i1', paths: ['a.ts', 'b.ts'], running: false };
 
-test('the bar offers Keep All, Undo All, Commit and Source Control, and nothing else', () => {
+test('the bar offers OK and nothing else', () => {
   const actions = review.changeActions(ctx);
-  assert.deepEqual(actions.map(a => a.id), ['keepAll', 'undoAll', 'commit', 'sourceControl']);
-  for (const action of actions) {
-    assert.ok(action.label, `${action.id} needs a label`);
-    assert.ok(action.hint.length > 10, `${action.id} needs a hint`);
-    assert.equal(action.enabled, true, `${action.id} should be enabled with a full context`);
+  assert.deepEqual(actions.map(a => a.id), ['dismiss']);
+  assert.equal(actions[0].label, 'OK');
+  assert.ok(actions[0].hint.length > 10, 'dismiss needs a hint');
+  assert.equal(actions[0].enabled, true, 'dismiss should be enabled with a full context');
+});
+
+test('the removed bulk actions post nothing', () => {
+  // Removed on request after the buttons read as decoration: every one had a
+  // precondition that could fail it silently.
+  for (const removed of ['keepAll', 'undoAll', 'commit', 'sourceControl', 'stageAll', 'restore']) {
+    assert.equal(review.changeActionMessages(removed, ctx).length, 0, `${removed} must be gone`);
+    assert.equal(review.changeActions(ctx).some(action => action.id === removed), false, `${removed} must not render`);
   }
 });
 
-test('the two that duplicated or contradicted Keep All are gone', () => {
-  // "Stage all" staged — which is exactly what Keep All does — and "Restore
-  // checkpoint" reverted every file, the opposite of the button next to it.
-  assert.equal(review.changeActionMessages('stageAll', ctx).length, 0);
-  assert.equal(review.changeActionMessages('restore', ctx).length, 0);
-  assert.equal(review.changeActions(ctx).some(action => action.id === 'stageAll' || action.id === 'restore'), false);
-});
-
-test('keeping and undoing post the paths the bar is showing', () => {
-  // The host resolves the turn; the paths are what the user is looking at.
-  assert.deepEqual(review.changeActionMessages('keepAll', ctx), [
-    { type: 'acceptAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
-  ]);
-  assert.deepEqual(review.changeActionMessages('undoAll', ctx), [
-    { type: 'rejectAllChanges', conversationId: 'c1', paths: ['a.ts', 'b.ts'] },
-  ]);
-});
-
-test('commit and source control post intents the adapter can translate', () => {
-  // Posting host names (`gitCommit`, `reviewChanges`) from the webview was silently
-  // dropped — `toSleepyMessage` has no case for them — so both buttons did nothing.
-  assert.deepEqual(review.changeActionMessages('commit', ctx), [{ type: 'commitChanges', conversationId: 'c1' }]);
-  assert.deepEqual(review.changeActionMessages('sourceControl', ctx), [{ type: 'openSourceControl', conversationId: 'c1' }]);
+test('dismiss posts an intent the host receives', () => {
+  // Posting host names from the webview was silently dropped — `toSleepyMessage`
+  // has no case for them — so the intent is a React-level name the adapter
+  // translates and the host acknowledges.
+  assert.deepEqual(review.changeActionMessages('dismiss', ctx), [{ type: 'dismissChanges', conversationId: 'c1' }]);
 });
 
 test('the turn id is optional, because the host tracks it', () => {
-  // Requiring it left every one of these permanently disabled: turns carry no id
-  // in the webview.
-  for (const action of ['keepAll', 'undoAll', 'commit', 'sourceControl']) {
-    assert.equal(review.changeActionMessages(action, { ...ctx, itemId: undefined }).length, 1, `${action} without a turn id`);
-  }
+  assert.equal(review.changeActionMessages('dismiss', { ...ctx, itemId: undefined }).length, 1);
 });
 
 test('nothing fires with no conversation and no changes at all', () => {
@@ -68,23 +54,13 @@ test('nothing fires with no conversation and no changes at all', () => {
   }
 });
 
-test('keeping and undoing need at least one path', () => {
-  // An empty list would post a "keep everything" for nothing.
-  assert.deepEqual(review.changeActionMessages('keepAll', { ...ctx, paths: [] }), []);
-  assert.deepEqual(review.changeActionMessages('undoAll', { ...ctx, paths: undefined }), []);
-  // Commit and Source Control do not depend on the list: the host resolves
-  // the files from the turn.
-  assert.equal(review.changeActionMessages('commit', { ...ctx, paths: [] }).length, 1);
-});
-
-test('every action is disabled while a run is in flight', () => {
-  // The host refuses all of them mid-run — a revert racing a live edit is worse
-  // than a disabled button — so the bar must not offer one it cannot run.
+test('dismiss works while a run is in flight', () => {
+  // Dismissing a notice is not a file mutation; the old gate that disabled every
+  // action mid-run does not apply to it.
   const running = { ...ctx, running: true };
-  for (const action of review.changeActions(running)) {
-    assert.equal(action.enabled, false, `${action.id} while running`);
-    assert.deepEqual(review.changeActionMessages(action.id, running), [], `${action.id} while running`);
-  }
+  const actions = review.changeActions(running);
+  assert.equal(actions[0].enabled, true);
+  assert.deepEqual(review.changeActionMessages('dismiss', running), [{ type: 'dismissChanges', conversationId: 'c1' }]);
 });
 
 test('an unknown action posts nothing', () => {
@@ -100,6 +76,7 @@ test('the enabled flag and the message builders agree', () => {
     { ...ctx, conversationId: undefined },
     { ...ctx, itemId: undefined },
     { ...ctx, paths: [] },
+    {},
   ];
   for (const context of contexts) {
     for (const action of review.changeActions(context)) {

@@ -1,21 +1,22 @@
 /*
- * The actions on a response's changed files.
+ * The changed-files bar on a response.
  *
- * The classic changes card offered Stage all, Commit, Source Control and Restore
- * checkpoint. The React review bar offers Keep All / Undo All and per-file Keep /
- * Undo, so a response could be staged but never committed from the chat, and its
- * checkpoint was only reachable through the Undo History panel.
+ * The bar ONCE offered actions — Keep All, Undo All, Commit, Source Control,
+ * and before those, Stage all and Restore checkpoint. Every one of them was
+ * backed by a real host handler, but each path had a precondition that could
+ * quietly fail it (no git root, pre-existing dirty files, unrelated staged
+ * changes, a turn whose changes were already resolved), so from the user's
+ * seat the buttons read as decoration. They are GONE now, by decision: the
+ * per-file Keep/Undo buttons in the expanded list stay, and everything bulk —
+ * staging, committing, browsing — lives in VS Code's own Source Control view,
+ * where the same actions have real feedback. The webview bar keeps only what
+ * it can honestly do: show the count and get out of the way.
  *
- * Each action here is paired with the messages it posts, and `enabled` is derived
- * from whether those messages exist — a button that is offered but posts nothing
- * is the failure mode this module prevents.
- *
- * Everything needs both a conversation and a turn: the host resolves which files
- * to touch through those two ids, and acting on the wrong turn's files is worse
- * than doing nothing.
+ * `changeActionMessages` survives as the dismiss acknowledgement so the
+ * "posted messages must have a receiver" discipline has a real return value
+ * to test; the webview maps it to the same host handler the per-file buttons
+ * already use.
  */
-
-import type { ReviewTarget } from './shared/chatSession.ts';
 
 export interface ChangeContext {
   conversationId?: string;
@@ -24,77 +25,41 @@ export interface ChangeContext {
   running?: boolean;
 }
 
-export type ChangeActionId = 'commit' | 'sourceControl' | 'restore' | 'keepAll' | 'undoAll';
-
 /**
- * The names the WEBVIEW posts. They are React-level intents, not host messages:
- * the adapter translates them, and the host resolves which turn they refer to.
- *
- * Posting host names (`gitCommit`, `reviewChanges`) from the webview looked
- * natural and was silently dropped — `toSleepyMessage` has no case for them — and
- * requiring the webview to name the turn left every button permanently disabled,
- * because turns carry no id on that side.
+ * The webview's dismiss intent: a React-level name the adapter translates.
+ * It never posts host names from the webview — `toSleepyMessage` drops those,
+ * which is exactly how the old buttons came to feel dead.
  */
+export type ChangeActionId = 'dismiss';
+
 const MESSAGE: Record<ChangeActionId, string> = {
-  commit: 'commitChanges',
-  sourceControl: 'openSourceControl',
-  restore: 'restoreCheckpoint',
-  keepAll: 'acceptAllChanges',
-  undoAll: 'rejectAllChanges',
+  dismiss: 'dismissChanges',
 };
 
 /**
- * The bar's actions, in the order they render.
- *
- * Two controls were removed rather than left standing: "Stage all" duplicated
- * Keep All (which stages), and "Restore checkpoint" told the host to return the
- * files to their pre-turn state, which besides undoing the work nothing else
- * wanted is the opposite of Keep All sitting beside it. Both are reachable
- * where they belong — staging in Source Control, restore in Undo History — so a
- * button that only ever confused the file list is gone.
+ * The host messages for an action, or [] when the action cannot run.
+ */
+export function changeActionMessages(action: string, context: ChangeContext): Record<string, unknown>[] {
+  const id = action as ChangeActionId;
+  if (!ACTIONS.some(entry => entry.id === id)) return [];
+  if (!hasTarget(context)) return [];
+  return [{ type: MESSAGE[id], conversationId: context.conversationId }];
+}
+
+/**
+ * The bar's action, in the order it renders.
  */
 const ACTIONS: { id: ChangeActionId; label: string; hint: string }[] = [
-  { id: 'keepAll', label: 'Keep All', hint: 'Stage every file this response changed, so the change is ready to commit.' },
-  { id: 'undoAll', label: 'Undo All', hint: 'Revert every file this response changed back to how it was before the response.' },
-  { id: 'commit', label: 'Commit', hint: 'Commit this response’s changes with a generated message.' },
-  { id: 'sourceControl', label: 'Source Control', hint: 'Open these changes in VS Code’s Source Control view.' },
+  { id: 'dismiss', label: 'OK', hint: 'Dismiss this notice. The files stay as they are; Source Control shows what changed.' },
 ];
 
 /**
  * Whether a response has something to act on.
  *
- * The turn id is optional: the host tracks the newest assistant turn itself, which
- * is how Keep All / Undo All already work. Requiring it here is what made these
- * buttons dead.
+ * The turn id is optional: the host tracks the newest assistant turn itself.
  */
 function hasTarget(context: ChangeContext): boolean {
   return Boolean(context.conversationId) || Boolean(context.itemId) || Boolean(context.paths?.length);
-}
-
-/**
- * The host messages for an action, or [] when the action cannot run.
- *
- * `running` gates the three that mutate files, because the host refuses them
- * mid-run. Source Control only reveals a view, so it stays available.
- */
-export function changeActionMessages(action: string, context: ChangeContext): Record<string, unknown>[] {
-  const id = action as ChangeActionId;
-  // Only an action the bar actually renders may post anything: a removed id
-  // ("stageAll", "restore") must not fall through to the generic branch.
-  if (!ACTIONS.some(entry => entry.id === id)) return [];
-  if (!hasTarget(context)) return [];
-  // Every action here touches files (or lists what they are), and the host
-  // refuses all of them mid-run: a half-applied revert racing a live edit is
-  // worse than a disabled button.
-  if (context.running) return [];
-  // Keep All / Undo All act on the files still awaiting review. With none left
-  // there is nothing to accept or revert, so the button is not offered.
-  if (id === 'keepAll' || id === 'undoAll') {
-    const paths = (context.paths ?? []).filter(path => typeof path === 'string' && path);
-    if (!paths.length) return [];
-    return [{ type: MESSAGE[id], conversationId: context.conversationId, paths }];
-  }
-  return [{ type: MESSAGE[id], conversationId: context.conversationId }];
 }
 
 /**
@@ -109,6 +74,8 @@ export function changeActions(context: ChangeContext): { id: ChangeActionId; lab
 }
 
 // ---------------------------------------------------------------- starting a review
+
+import type { ReviewTarget } from './shared/chatSession.ts';
 
 export type ReviewScope = ReviewTarget;
 

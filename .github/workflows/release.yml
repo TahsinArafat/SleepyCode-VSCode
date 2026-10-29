@@ -23,6 +23,9 @@ jobs:
         run: npm run verify:release
         env:
           SLEEPYCODE_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      # `check` builds first (package-shape asserts the built webview bundles
+      # ship) and the browser suites need Chromium on disk.
+      - run: npx playwright-core install --with-deps chromium-headless-shell
       - run: npm run check
       - run: npm run build
       - name: Package extension

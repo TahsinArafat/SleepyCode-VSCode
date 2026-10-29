@@ -684,7 +684,13 @@ function optLabel(o: any): string {
   return typeof o === "string" ? o : String(o?.label ?? o?.id ?? "");
 }
 
-function QuestionCard({ block }: { block: ToolBlock }) {
+/**
+ * The question card the run blocks on. Rendered inline inside the transcript AND
+ * (while unanswered) pinned above the composer, so the question is still visible
+ * after the transcript scrolls away from it. `className` lets the sticky copy
+ * carry its own frame; `onDismiss` is offered only there.
+ */
+export function QuestionCard({ block, className, onDismiss }: { block: ToolBlock; className?: string; onDismiss?: () => void }) {
   const header: string = block.input?.header || block.input?.title || "Questions";
   const questions: QItem[] = (Array.isArray(block.input?.questions) ? block.input.questions : []).map((q: any) => ({
     question: String(q?.question ?? q?.prompt ?? ""),
@@ -771,7 +777,7 @@ function QuestionCard({ block }: { block: ToolBlock }) {
 
   if (answered || sent) {
     return (
-      <div className="question-card done">
+      <div className={"question-card done" + (className ? ` ${className}` : "")}>
         <div className="qc-head"><Icon name="chat" size={14} /> {header}</div>
         {questions.map((qq, i) => {
           const a = (block.answers ?? answers)[String(i)] || [];
@@ -787,10 +793,16 @@ function QuestionCard({ block }: { block: ToolBlock }) {
   }
 
   return (
-    <div className="question-card">
+    <div className={"question-card" + (className ? ` ${className}` : "")}>
       <div className="qc-head">
         <span><Icon name="chat" size={14} /> {header}</span>
         <span className="qc-step">{step + 1} of {questions.length}</span>
+        {onDismiss && (
+          <button className="qc-close" title="Hide this pinned copy" aria-label="Hide pinned question"
+            onClick={() => { onDismiss(); }}>
+            <Icon name="close" size={13} />
+          </button>
+        )}
       </div>
       <div className="qc-question">{step + 1}. {q.question}{q.required && <span className="qc-required">*</span>}</div>
       {isChoices ? (

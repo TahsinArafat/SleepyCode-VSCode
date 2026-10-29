@@ -23,5 +23,9 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # `check` builds first itself (package-shape asserts the built webview
+      # bundles ship), so a clean checkout needs no separate build step. The
+      # browser suites need the matching Chromium binary on disk.
+      - run: npx playwright-core install --with-deps chromium-headless-shell
       - run: npm run check
       - run: npm run build

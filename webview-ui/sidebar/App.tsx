@@ -38,7 +38,7 @@ import { retryCountdown } from "../../src/shared/turns.ts";
 import { DEFAULT_CONTEXT, contextFor, normalizeContext, toggleContext } from "../../src/context-panel.ts";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
-import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
+import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure, QuestionCard } from "./components/Tool";
 import { History } from "./components/History";
 import { MessageActions } from "./components/MessageActions";
 import { WorkingSection } from "./components/WorkingSection";
@@ -1131,6 +1131,11 @@ export function App() {
   const [pendingChanges, setPendingChanges] = React.useState<PendingChangeInfo[]>([]);
   // Pending in-chat approval requests, keyed by conversation id.
   const [approvals, setApprovals] = React.useState<Record<string, ApprovalRequestInfo[]>>({});
+  // A question the run is blocked on, pinned above the composer so it stays
+  // visible after the transcript scrolls past its inline card. Dismissed per
+  // call: the user asked the sticky copy to go away, not the question itself —
+  // the inline card keeps accepting the answer.
+  const [dismissedQuestions, setDismissedQuestions] = React.useState<Record<string, boolean>>({});
   const [reviewOpen, setReviewOpen] = React.useState(false);
   const reviewDetailsId = React.useId();
   const changeTotals = pendingChanges.reduce((total, change) => ({
@@ -2098,6 +2103,32 @@ export function App() {
     return m;
   }, [activeApprovals, turns]);
   const orphanApprovals = activeApprovals.filter((r) => !r.callId);
+  /**
+   * The question the run is currently blocked on, for the sticky card above the
+   * composer.
+   *
+   * A question is a tool block named ask_question/AskQuestion that is still
+   * running and carries no submitted answers (`questionAnswered` lands before
+   * the tool settles, so "running with answers" means the answer is in and the
+   * result frame has not arrived yet). Newest turn wins when several are
+   * pending — one per run, but several runs can each hold one.
+   */
+  const pendingQuestion = React.useMemo(() => {
+    let found: { callId: string; block: ToolBlock } | undefined;
+    for (let t = turns.length - 1; t >= 0; t--) {
+      const turn = turns[t];
+      if (turn.role !== "assistant") continue;
+      for (let b = turn.blocks.length - 1; b >= 0; b--) {
+        const block = turn.blocks[b];
+        if (block.kind !== "tool") continue;
+        if (block.name !== "ask_question" && block.name !== "AskQuestion") continue;
+        if (block.status !== "running" || block.answers) continue;
+        if (dismissedQuestions[block.callId]) continue;
+        return { callId: block.callId, block };
+      }
+    }
+    return found;
+  }, [turns, dismissedQuestions]);
   // If the sub-tab's block vanished (new conversation loaded), drop back to parent.
   React.useEffect(() => {
     if (subTab && !subBlock) setSubTab(null);
@@ -2532,6 +2563,18 @@ export function App() {
             <Icon name="chevD" size={14} />
           </button>
         )}
+        {pendingQuestion && (
+          // Sticky copy of the question the run is blocked on. The inline card in
+          // the transcript stays too; answering either one answers the run, and
+          // the `×` here only dismisses the pinned copy for this call.
+          <div className="sticky-question">
+            <QuestionCard
+              block={pendingQuestion.block}
+              className="pinned"
+              onDismiss={() => setDismissedQuestions((d) => ({ ...d, [pendingQuestion.callId]: true }))}
+            />
+          </div>
+        )}
         {orphanApprovals.map((r) => (
           <ApprovalCard key={r.requestId} request={r} onDecide={(id, approved) => decideApproval(activeId ?? "", id, approved)} />
         ))}
@@ -2558,9 +2601,12 @@ export function App() {
                 </span>
               </div>
               <div className="review-actions">
-                {/* One list, built and gated in `review-actions.ts`, so a visible
-                    button always has a message and the two cannot drift. */}
-                {changeActions({ conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning })
+                {/* One button, built and gated in `review-actions.ts`, so a visible
+                    button always has a message and the two cannot drift. The bulk
+                    actions (Keep All / Undo All / Commit / Source Control) were
+                    removed on request — they had preconditions that failed silently
+                    and read as decoration; the per-file Keep/Undo below stay. */}
+                {changeActions({ conversationId: activeId, running: isRunning })
                   .map(action => (
                     <button
                       key={action.id}
@@ -2569,12 +2615,9 @@ export function App() {
                       disabled={!action.enabled}
                       onClick={(event) => {
                         event.stopPropagation();
-                        const messages = changeActionMessages(action.id, { conversationId: activeId, paths: pendingChanges.map(c => c.path), running: isRunning });
+                        const messages = changeActionMessages(action.id, { conversationId: activeId, running: isRunning });
                         const send = () => { for (const message of messages) post(message as any); };
-                        // Source Control only reveals a view; the files are still
-                        // awaiting a decision, so the bar stays for that one.
-                        if (action.id === "sourceControl") send();
-                        else finishReview(send);
+                        finishReview(send);
                       }}
                     >
                       {action.label}

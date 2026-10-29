@@ -235,13 +235,11 @@ export type OutMessage =
   | { type: "openMention"; kind: MentionKind; path: string }
   | { type: "acceptChange"; path: string }
   | { type: "rejectChange"; path: string }
-  | { type: "acceptAllChanges" }
-  | { type: "rejectAllChanges" }
   | { type: "diffChange"; path: string }
-  // Review-bar intents. The host resolves which turn they refer to, so these carry
-  // no turn id — requiring one left the buttons permanently disabled.
-  | { type: "commitChanges" }
-  | { type: "openSourceControl" }
+  // The changed-files bar's OK. The bulk actions it once carried (Keep All /
+  // Undo All / Commit / Source Control) were removed on request; the host
+  // intercepts this as a pure acknowledgement in `handleReactChangeAction`.
+  | { type: "dismissChanges" }
   | { type: "logError"; message: string; info?: string }
   | { type: "openLog" }
   | { type: "getFileIcon"; filename: string }

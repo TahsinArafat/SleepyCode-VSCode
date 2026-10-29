@@ -1511,3 +1511,46 @@ test('no component state is read by a hook declared before it', () => {
   }
   assert.deepEqual(problems, [], 'a hook reads state declared after it — this throws on first render');
 });
+
+// ---------------------------------------------------------------- sticky question + review bar
+
+const reviewActions = read('src/review-actions.ts');
+const appTsx = read('webview-ui/sidebar/App.tsx');
+const toolTsx = read('webview-ui/sidebar/components/Tool.tsx');
+const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+
+test('the changed-files bar dismisses with OK instead of dead bulk buttons', () => {
+  // The bulk buttons (Keep All / Undo All / Commit / Source Control) each had a
+  // real handler but a precondition that failed silently, so they read as
+  // decoration. They are gone; the count and one OK remain.
+  assert.match(reviewActions, /id: 'dismiss', label: 'OK'/);
+  for (const gone of ['keepAll', 'undoAll', 'commit', 'sourceControl', 'stageAll', 'restore']) {
+    assert.doesNotMatch(reviewActions, new RegExp(`id: '${gone}'`), `${gone} must not be offered again`);
+  }
+  assert.match(reviewActions, /dismissChanges/);
+  // The webview maps it and the host acknowledges it before the generic
+  // translation could drop it.
+  assert.match(read('src/webview-adapter.ts'), /case 'dismissChanges'/);
+  assert.match(agent, /message\?\.type === 'dismissChanges'/);
+  // The render site derives enabled from the same builders, so the two cannot drift.
+  assert.match(appTsx, /changeActions\(\{ conversationId: activeId, running: isRunning \}\)/);
+  // Per-file keep/undo survive in the expanded list.
+  assert.match(appTsx, /type: "acceptChange", path: c\.path/);
+  assert.match(appTsx, /type: "rejectChange", path: c\.path/);
+});
+
+test('a question the run is blocked on is pinned above the composer', () => {
+  // The inline card stays; the sticky copy keeps the question visible after the
+  // transcript scrolls away from it.
+  assert.match(appTsx, /pendingQuestion = React\.useMemo/);
+  assert.match(appTsx, /block\.name !== "ask_question" && block\.name !== "AskQuestion"/);
+  // Running with submitted answers means the answer is in and the card must go.
+  assert.match(appTsx, /block\.status !== "running" \|\| block\.answers/);
+  // Dismissing hides the pinned copy for that call only, not the question itself.
+  assert.match(appTsx, /dismissedQuestions/);
+  assert.match(appTsx, /\[pendingQuestion\.callId\]: true/);
+  assert.match(toolTsx, /export function QuestionCard/);
+  assert.match(toolTsx, /qc-close/);
+  assert.match(sidebarCss, /\.question-card\.pinned/);
+  assert.match(sidebarCss, /\.sticky-question/);
+});

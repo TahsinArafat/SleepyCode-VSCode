@@ -252,6 +252,13 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     case 'answerQuestion':
       return { type: 'answerQuestion', callId: message.callId, answers: message.answers ?? {} };
 
+    case 'dismissChanges':
+      // The OK on the changed-files bar: a UI acknowledgement, not a file
+      // operation. The host intercepts it in `handleReactChangeAction`, which
+      // runs BEFORE this translation — this case exists to keep the message out
+      // of the `default: null` drop if the dispatch order ever changes.
+      return null;
+
     case 'setMode':
       return { type: 'setMode', mode: message.mode };
 
