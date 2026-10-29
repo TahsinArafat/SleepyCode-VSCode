@@ -432,9 +432,36 @@ test('a host-supplied PATH is used to resolve the command', async () => {
   // PATH, so `npx` (in /opt/homebrew/bin or an nvm dir) is invisible and every
   // stdio server fails. The host resolves the user's login-shell PATH and passes
   // it here.
+  // Per-platform shim: a `#!/bin/sh` script is not executable on Windows no
+  // matter what PATH says — cmd.exe needs a PATHEXT-resolvable file, i.e. a
+  // `.cmd` batch wrapper. The property under test (a directory the host adds
+  // to PATH makes a bare command name work) is the same on both.
   const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const bin = await mkdtemp(join(tmpdir(), 'sleepycode-bin-'));
+  if (process.platform === 'win32') {
+    const shim = join(bin, 'mcp-echo-shim.cmd');
+    await writeFile(shim, `@echo off\r\n"${process.execPath}" "${serverPath}" %*\r\n`);
+    const savedPath = process.env.PATH;
+    process.env.PATH = 'C:\\Windows\\System32';
+    try {
+      const connection = await connectMcpServers(
+        JSON.stringify({ shimmed: { command: 'mcp-echo-shim', args: [] } }),
+        here,
+        async () => {},
+        { secrets: memorySecrets(), openExternal: async () => undefined, env: { PATH: `${bin};${savedPath}` } },
+      );
+      try {
+        assert.deepEqual(connection.errors, [], `errors: ${connection.errors.join(' | ')}`);
+        assert.equal(Object.keys(connection.tools).length, 1);
+      } finally {
+        await connection.close();
+      }
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    return;
+  }
   const shim = join(bin, 'mcp-echo-shim');
   await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${serverPath}" "$@"\n`);
   await chmod(shim, 0o755);
