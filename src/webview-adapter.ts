@@ -374,9 +374,9 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'tool': {
       const name = reactToolName(message.tool ?? message.name);
       const input = parseToolArgs(message.input ?? message.args);
-      return message.phase === 'start'
-        ? agentEvent(message.conversationId, { type: 'tool-call-started', callId: message.id, name, input })
-        : agentEvent(message.conversationId, {
+      const event = message.phase === 'start'
+        ? { type: 'tool-call-started', callId: message.id, name, input }
+        : {
             type: 'tool-call-completed',
             callId: message.id,
             name,
@@ -387,7 +387,14 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
             // otherwise settle with an empty input and draw a blank card.
             input,
             ...(typeof message.diff === 'string' && message.diff ? { diff: message.diff } : {}),
-          });
+          };
+      // Subagent-internal tool calls (parentId set) are nested under the Task
+      // card instead of the parent transcript: the subagent tab renders them
+      // from subBlocks. `subagent-<id>` is the Task card's callId (see 'subagent').
+      if (message.parentId) {
+        return agentEvent(message.conversationId, { type: 'subagent-event', callId: String(message.parentId), event: event as any });
+      }
+      return agentEvent(message.conversationId, event as any);
     }
 
     case 'error':
@@ -569,7 +576,7 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       // Task tool cards, so the two are bridged onto that shape. Without this the
       // UI showed nothing at all while a subagent worked.
       const callId = message.id ?? `subagent-${message.role ?? 'task'}`;
-      const input = { role: message.role, task: message.task ?? '', description: message.name };
+      const input = { role: message.role, task: message.task ?? '', description: message.name, prompt: message.task ?? '', subagent_type: message.role };
       if (message.phase !== 'end') {
         return agentEvent(message.conversationId, { type: 'tool-call-started', callId, name: 'Task', input });
       }

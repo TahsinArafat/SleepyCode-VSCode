@@ -1318,6 +1318,37 @@ test('cancelSubagent reaches the host with the subagent id', () => {
   assert.equal(out.callId, 'sub-1');
 });
 
+test('a subagent tool call nests under the Task card via parentId', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', parentId: 'sub-1', subagentRole: 'explorer',
+    phase: 'start', id: 'sub-1:tool:abc', tool: 'glob', name: 'Finding files…',
+  });
+  assert.equal(out.event.type, 'subagent-event');
+  assert.equal(out.event.callId, 'sub-1');
+  assert.equal(out.event.event.type, 'tool-call-started');
+  assert.equal(out.event.event.callId, 'sub-1:tool:abc');
+  assert.equal(out.event.event.name, 'glob');
+});
+
+test('a subagent tool completion also nests under the Task card', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', parentId: 'sub-1',
+    phase: 'end', failed: false, id: 'sub-1:tool:abc', tool: 'glob', name: 'Finding files…',
+  });
+  assert.equal(out.event.type, 'subagent-event');
+  assert.equal(out.event.callId, 'sub-1');
+  assert.equal(out.event.event.type, 'tool-call-completed');
+  assert.equal(out.event.event.status, 'completed');
+});
+
+test('a parent-level tool call stays on the top-level transcript', () => {
+  const out = adapter.toReactMessage({
+    type: 'tool', conversationId: 'c1', phase: 'start', id: 't9', tool: 'read_file', name: 'Read',
+  });
+  assert.equal(out.event.type, 'tool-call-started');
+  assert.equal(out.event.callId, 't9');
+});
+
 // ---------------------------------------------------------------- modes
 
 test('setMode reaches the host', () => {

@@ -76,6 +76,32 @@ test('error event adds an error block', () => {
   assert.equal(blocks[blocks.length - 1].message, 'kaboom');
 });
 
+test('subagent-event nests a tool call inside the Task block, not the parent turn', () => {
+  let t = turns.applyEvent([{ role: 'user', text: 'hi' }], { type: 'run-status', status: 'running' });
+  t = turns.applyEvent(t, { type: 'tool-call-started', callId: 'sub-1', name: 'Task', input: { task: 'research' } });
+  t = turns.applyEvent(t, { type: 'subagent-event', callId: 'sub-1', event: { type: 'tool-call-started', callId: 'sub-1:tool:a', name: 'Glob', input: {} } });
+  const task = t[t.length - 1].blocks.find(b => b.kind === 'tool' && b.callId === 'sub-1');
+  const topLevel = t[t.length - 1].blocks.filter(b => b.kind === 'tool' && b.callId !== 'sub-1');
+  assert.equal(topLevel.length, 0, 'nested call must not appear at the parent level');
+  const nested = task.subBlocks.find(b => b.kind === 'tool' && b.callId === 'sub-1:tool:a');
+  assert.ok(nested, 'nested call lands in subBlocks');
+  assert.equal(nested.status, 'running');
+  t = turns.applyEvent(t, { type: 'subagent-event', callId: 'sub-1', event: { type: 'tool-call-completed', callId: 'sub-1:tool:a', name: 'Glob', status: 'completed', result: '[]' } });
+  const done = t[t.length - 1].blocks.find(b => b.callId === 'sub-1').subBlocks.find(b => b.callId === 'sub-1:tool:a');
+  assert.equal(done.status, 'completed');
+});
+
+test('subagent-event run-status drives the Task card subStatus', () => {
+  let t = turns.applyEvent([{ role: 'user', text: 'hi' }], { type: 'run-status', status: 'running' });
+  t = turns.applyEvent(t, { type: 'tool-call-started', callId: 'sub-1', name: 'Task', input: {} });
+  t = turns.applyEvent(t, { type: 'subagent-event', callId: 'sub-1', event: { type: 'run-status', status: 'running' } });
+  let task = t[t.length - 1].blocks.find(b => b.callId === 'sub-1');
+  assert.equal(task.subStatus, 'running');
+  t = turns.applyEvent(t, { type: 'subagent-event', callId: 'sub-1', event: { type: 'run-status', status: 'finished' } });
+  task = t[t.length - 1].blocks.find(b => b.callId === 'sub-1');
+  assert.equal(task.subStatus, 'finished');
+});
+
 test('restoreTurns keeps stored turns intact', () => {
   const stored = [
     { role: 'user', text: 'hi' },
