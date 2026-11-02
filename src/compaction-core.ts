@@ -87,7 +87,16 @@ export function compactionOutputBudget(maxOutputLimit?: number | null): number {
 /** Assumed context window when the provider does not report one. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 
-/** Tokens reserved for the model's answer when its output limit is unknown. */
+/**
+ * Tokens reserved for the model's answer when its output limit is unknown.
+ *
+ * When the model advertises an output limit, that limit is the reserve instead, in
+ * full. The run does not send `maxOutputTokens`, so the provider is entitled to assume
+ * the whole advertised limit is available for the answer: reserving less would make a
+ * request whose history fills the budget get rejected outright. The cost is that a
+ * model advertising 32k on a 200k window puts the history budget at 166k — the number
+ * people notice — and that is the honest boundary, not a rounding error.
+ */
 export const DEFAULT_RESPONSE_RESERVE_TOKENS = 16_000;
 
 /** Floor for the structured-history budget on tiny windows. */
@@ -195,14 +204,21 @@ export function summarizeFileOperations(items: readonly { work?: readonly { kind
 }
 
 /**
- * Token budget for the structured history handed to the provider on each turn when
- * the model's context window is unknown. Conservative on purpose: a guessed
- * window must not cause an overflow.
+ * Token budget used when the model's context window is unknown: the default window,
+ * less the system prompt and the answer's reserve.
+ *
+ * It used to be a deliberately tiny 60k, because a window guessed too large turned a
+ * silently-trimmed request into a hard failure. Nothing trims any more, so the risk has
+ * inverted: a budget that is too small compacts a conversation the model could hold in
+ * full, on every turn, for no reason. A budget that is too large fails once with an
+ * error that names the real limit — and that limit is then learned and used from the
+ * next request on (`contextWindowFromError`), so the guess corrects itself.
  */
-export const STRUCTURED_HISTORY_BUDGET_TOKENS = 60_000;
+export const STRUCTURED_HISTORY_BUDGET_TOKENS =
+  DEFAULT_CONTEXT_WINDOW - CONTEXT_SYSTEM_OVERHEAD_TOKENS - DEFAULT_RESPONSE_RESERVE_TOKENS;
 
 /**
- * Tokens the send may spend on history, derived from the model's actual window so
+ * Tokens a request may spend on history, derived from the model's actual window so
  * small windows don't overflow and large windows aren't under-used. Leaves room
  * for the system prompt, tool schemas, and the model's answer; never below
  * MIN_STRUCTURED_HISTORY_BUDGET. Falls back to STRUCTURED_HISTORY_BUDGET_TOKENS
@@ -213,8 +229,8 @@ export function structuredHistoryBudget(
   maxOutputLimit?: number | null,
 ): number {
   if (!contextWindow || contextWindow <= 0) return STRUCTURED_HISTORY_BUDGET_TOKENS;
-  const responseReserve = maxOutputLimit && maxOutputLimit > 0 ? maxOutputLimit : DEFAULT_RESPONSE_RESERVE_TOKENS;
-  const budget = contextWindow - CONTEXT_SYSTEM_OVERHEAD_TOKENS - responseReserve;
+  const reserve = maxOutputLimit && maxOutputLimit > 0 ? maxOutputLimit : DEFAULT_RESPONSE_RESERVE_TOKENS;
+  const budget = contextWindow - CONTEXT_SYSTEM_OVERHEAD_TOKENS - reserve;
   return Math.max(MIN_STRUCTURED_HISTORY_BUDGET, Math.floor(budget));
 }
 

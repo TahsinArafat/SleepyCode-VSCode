@@ -174,14 +174,6 @@ export function safeHistoryStart(messages: readonly HistoryMessage[], start: num
   return cursor;
 }
 
-/** Index of the next user message at or after `index` (a valid cut point). */
-export function nextTurnStart(messages: readonly HistoryMessage[], index: number): number {
-  for (let cursor = Math.max(0, index); cursor < messages.length; cursor++) {
-    if (messages[cursor]!.role === 'user') return cursor;
-  }
-  return messages.length;
-}
-
 /** Index of the most recent user message, or 0 when none exists. */
 export function lastUserStart(messages: readonly HistoryMessage[]): number {
   for (let cursor = messages.length - 1; cursor >= 0; cursor--) {
@@ -190,63 +182,43 @@ export function lastUserStart(messages: readonly HistoryMessage[]): number {
   return 0;
 }
 
-export type EstimateMessageTokens = (message: HistoryMessage) => number;
-
 /**
- * Select the structured history that fits the token budget, cutting only at
- * user-turn boundaries so tool results stay attached to the assistant
- * message that requested them.
+ * The stored history as it should go on the wire: repaired, and aligned so the
+ * first message is a user turn.
+ *
+ * It is deliberately NOT budgeted. Cutting stored messages to fit a guessed token
+ * budget is silent context loss: the model then repeats work it already did, or
+ * edits against a file it can no longer see, and the transcript on screen no
+ * longer matches what the agent was told. The only thing allowed to shrink a
+ * conversation is compaction, which replaces it with a summary the user can read
+ * and undo. Everything that still does not fit is a provider error the run loop
+ * recovers from by compacting (see the context-limit path in `agent.ts`).
  */
-export function selectStructuredHistory<T extends HistoryMessage>(
+export function prepareStructuredHistory<T extends HistoryMessage>(
   stored: readonly T[] | undefined,
-  budgetTokens: number,
-  estimateTokens: EstimateMessageTokens,
 ): T[] {
   if (!stored?.length) return [];
-  // Repaired before selection: an orphaned tool call from a stopped turn makes
+  // Repaired before sending: an orphaned tool call from a stopped turn makes
   // the WHOLE request invalid, not just that turn, so it must not survive to the
   // wire. `stored` itself is left untouched — it is the conversation's history.
   const repaired = dropOrphanedToolCalls(stored);
   if (!repaired.length) return [];
-  stored = repaired;
-  let start = stored.findIndex(message => message.role === 'user');
-  if (start < 0) return [];
-  if (start > 0) start = safeHistoryStart(stored, start);
-  const aligned = stored.slice(start);
-  let cost = 0;
-  let cut = 0;
-  for (let index = aligned.length - 1; index >= 0; index--) {
-    cost += estimateTokens(aligned[index]!);
-    if (cost <= budgetTokens) continue;
-    // Overflowed at this message. Keep newer complete turns. If the newest
-    // turn itself is oversized, keep that whole turn rather than returning
-    // an empty slice — that empty cut is how mid-iteration context vanished
-    // after a large tool result.
-    const afterOverflow = nextTurnStart(aligned, index + 1);
-    cut = afterOverflow < aligned.length ? afterOverflow : lastUserStart(aligned);
-    break;
-  }
-  if (cut > 0) return aligned.slice(cut);
-  return aligned;
+  const start = repaired.findIndex(message => message.role === 'user');
+  // No user turn at all (a history written before structured turns existed): there
+  // is no safe cut point, so send it whole rather than inventing one.
+  if (start < 0) return repaired;
+  return start === 0 ? repaired : repaired.slice(safeHistoryStart(repaired, start));
 }
 
 /**
- * How many stored messages a budgeted selection dropped from the front.
+ * Append a completed user turn and the messages it produced, reporting how many of
+ * the oldest messages the hard count bound had to discard.
  *
- * `selectStructuredHistory` cuts silently, which reads to the user as the agent
- * forgetting. Callers use this to say so out loud.
- */
-export function droppedMessageCount<T extends HistoryMessage>(
-  stored: readonly T[] | undefined,
-  selected: readonly T[],
-): number {
-  if (!stored?.length) return 0;
-  return Math.max(0, stored.length - selected.length);
-}
-
-/**
- * Append a completed user turn and the messages it produced. Always trims
- * from the front so the newest context survives the hard count bound.
+ * The bound is a memory guard, not a budget: compaction keeps a conversation small by
+ * summarizing it against the model's real window, and this only stops a pathological
+ * one from growing forever. When it does bite it is context loss, so the count comes
+ * back to the caller to report — a silent cut here reads as the agent forgetting, the
+ * same as trimming a request did.
  */
 export function appendConversationMessages<T extends HistoryMessage>(
   existing: readonly T[] | undefined,
@@ -254,7 +226,7 @@ export function appendConversationMessages<T extends HistoryMessage>(
   produced: readonly T[],
   maxStored: number,
   reuseUser = false,
-): T[] {
+): { messages: T[]; dropped: number } {
   // Repaired on the way IN as well as on the way out: a turn stopped between a
   // tool call and its result writes exactly one orphan, and repairing only at
   // request time would leave every later reload re-reading a broken history.
@@ -262,10 +234,13 @@ export function appendConversationMessages<T extends HistoryMessage>(
   const lastUser = lastUserStart(prior);
   const alreadyHasUser = reuseUser && prior.length > 0 && prior[lastUser]?.role === 'user' && prior[lastUser]?.content === userText;
   const next = alreadyHasUser ? [...prior, ...produced] : [...prior, { role: 'user', content: userText } as T, ...produced];
+  // Only the count bound discards anything here; a repair that collapses an orphaned
+  // call is not a drop, so it must not be reported as one.
+  const dropped = Math.max(0, next.length - maxStored);
   // The slice can also orphan the first turn's results, so repair once more
   // after trimming rather than assuming the cut landed cleanly.
-  const bounded = next.length > maxStored ? next.slice(-maxStored) : next;
-  return dropOrphanedToolCalls(bounded);
+  const bounded = dropped ? next.slice(-maxStored) : next;
+  return { messages: dropOrphanedToolCalls(bounded), dropped };
 }
 
 /**

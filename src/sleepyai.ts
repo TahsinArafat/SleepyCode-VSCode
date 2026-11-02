@@ -286,8 +286,11 @@ export async function fetchSleepyModelPrices(token: string): Promise<SleepyModel
           outputPrice: parseNum(model.outputPrice ?? model.output_price),
           cacheReadPrice: parseNum(model.cacheReadPrice ?? model.cache_read_price),
           cacheWritePrice: parseNum(model.cacheWritePrice ?? model.cache_write_price),
-          contextWindow: parseNum(model.contextWindow ?? model.context_window),
-          maxOutputLimit: parseNum(model.maxOutputLimit ?? model.max_output_limit),
+          // SleepyAI reports a window per model, and the field it uses varies by route
+          // (a relay in front of several vendors). All three spellings are the same
+          // number; reading only two of them left a 1M model budgeted as unknown.
+          contextWindow: parseNum(model.contextWindow ?? model.context_window ?? model.context_length),
+          maxOutputLimit: parseNum(model.maxOutputLimit ?? model.max_output_limit ?? model.max_output_tokens),
         };
       });
   };

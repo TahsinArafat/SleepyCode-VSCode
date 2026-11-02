@@ -2226,8 +2226,13 @@ test('a bare id string still becomes a model row', () => {
   const out = adapter.modelOptionsPayload([{ providerId: 'p', models: ['bare-model'] }], undefined);
   assert.deepEqual(out.models, ['bare-model']);
   assert.equal(out.modelList[0].name, 'bare-model');
-  // No discovered limits and no overrides means no options, not options of zero.
-  assert.deepEqual(out.modelList[0].options, []);
+  // No discovered limit still offers the control that sets one: a model whose
+  // catalog reports no window is exactly the one whose budget has to be chosen.
+  const keys = out.modelList[0].options.map(option => option.key);
+  assert.deepEqual(keys, ['max_context']);
+  assert.equal(out.modelList[0].options[0].value, '');
+  // Never a row of zeroes pretending to be a measurement.
+  assert.ok(out.modelList[0].options[0].values.every(value => Number(value) > 0));
 });
 
 test('a model listed twice is offered once', () => {

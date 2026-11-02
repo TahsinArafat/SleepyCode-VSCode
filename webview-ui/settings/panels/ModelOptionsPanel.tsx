@@ -114,6 +114,9 @@ export function ModelOptionsPanel() {
                   value={option.value}
                   onChange={(event) => save(row, option.key, event.target.value)}
                 >
+                  {/* An unset value needs a row of its own, or the control reads as
+                      though its first choice were the one in force. */}
+                  {!option.value && <option value="">Not set</option>}
                   {option.values.map((value) => (
                     <option key={value} value={value}>
                       {Number(value).toLocaleString()}

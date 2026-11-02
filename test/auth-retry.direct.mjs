@@ -12,10 +12,11 @@ const SLEEPY = { id: 'sleepyai', name: 'SleepyAI', baseURL: 'https://www.sleepya
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
 const sleepyai = readFileSync(new URL('../src/sleepyai.ts', import.meta.url), 'utf8');
 
+/** The one request layer every provider gets, as source text. */
 function fetchLayer() {
-  const start = agent.indexOf('fetch: async (input, init) =>');
+  const start = agent.indexOf('private resilientProviderFetch(');
   assert.ok(start > 0, 'request layer not found');
-  return agent.slice(start, start + 5_000);
+  return agent.slice(start, start + 6_000);
 }
 
 function streamCatch() {
@@ -57,7 +58,7 @@ test('backoff stays short enough to keep a turn alive without hammering', () => 
 
 test('the request layer asks the shared policy what to do, then rotates and resends', () => {
   const layer = fetchLayer();
-  assert.match(layer, /retryKindForStatus\(response\.status, \{ replayable, isFirstParty: providerConfig\.isSleepy \}\)/);
+  assert.match(layer, /retryKindForStatus\(response\.status, \{ replayable, isFirstParty: provider\.isSleepy \}\)/);
   assert.match(layer, /retryBudget\.take\(kind,/, 'the request layer spends from the turn budget');
   assert.match(layer, /refreshSleepyToken\(\)/, 'the token must be rotated before the resend');
   assert.ok(
@@ -72,6 +73,9 @@ test('the request layer asks the shared policy what to do, then rotates and rese
 test('a spent budget ends the turn instead of inventing another attempt', () => {
   const layer = fetchLayer();
   assert.match(layer, /if \(!decision\) throw error;/, 'a transport failure with no budget left is surfaced');
+  // A spent budget on a *response* hands the real status back so the error card can
+  // name it; only a transport failure throws.
+  assert.match(layer, /if \(!decision\) return response;/);
 });
 
 test('a 404 waits for the edge, but only on a request that can be replayed', () => {

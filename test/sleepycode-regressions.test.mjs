@@ -194,7 +194,7 @@ test('previous thinking is persisted for later model requests and the budget is 
   assert.match(types, /maxPersistedReasoning: number/);
   assert.match(agent, /attachReasoningToLatestAssistant\(runMessages/);
   assert.match(agent, /attachReasoningToLatestAssistant\(subagentMessages, stepThinking\)/);
-  assert.match(agent, /backfillAssistantReasoning\(selected, reasoningTextsFromItems\(conversation\.items\)\)/);
+  assert.match(agent, /backfillAssistantReasoning\(prepared, reasoningTextsFromItems\(conversation\.items\)\)/);
   assert.match(agent, /Your previous thinking/);
   assert.match(agent, /rememberReasoningText\(reasoningBuffer/);
   assertSource(runtime, /maxPersistedReasoning:Number\(maxPersistedReasoning/);
@@ -322,7 +322,10 @@ test('summary items record only the compaction call usage, not pre-compaction to
   assert.doesNotMatch(summarize, /items\.reduce\(\(sum, item\)/);
   assert.match(summarize, /usage = attemptUsage/);
   assert.match(summarize, /if \(usage\?\.inputTokens\) summary\.inputTokens = usage\.inputTokens/);
-  assert.match(summarize, /compactionPromptInput\(items\)/);
+  // Rendered per candidate, against that candidate's own window: one fixed cap grew
+  // past a small model's window, so every candidate rejected the summary request.
+  assert.match(summarize, /compactionPromptInput\(items, 4_000, maxChars\)/);
+  assert.match(summarize, /prompt: promptFor\(candidateId\)/);
 });
 
 test('compaction candidates get real output headroom, not the reasoning-starving 1024 cap', () => {
@@ -467,21 +470,21 @@ test('structured model history persists across turns instead of flattening to te
   assert.match(types, /messages\?: ModelMessage\[\]/);
   assert.match(types, /export const MAX_STORED_MESSAGES/);
   // The run seeds the provider with real messages when structured history exists,
-  // including the live tool-call slice of the current iteration.
-  assert.match(agent, /const history = this\.structuredHistory\(conversation, modelInfo\.contextWindow, modelInfo\.maxOutputLimit\)/);
-  // The live slice is handed over as a request-only view: budgeted down when it does
-  // not fit, while `runMessages` keeps everything for the saved transcript.
-  assert.match(agent, /agentMessages = iterationRequestMessages\(history, liveForRequest as ModelMessage\[\], streamPrompt\)/);
-  assert.match(agent, /const liveForRequest = trimmedLive\.messages;/);
+  // including the live tool-call slice of the current iteration — in full. Neither
+  // the stored history nor the live slice is shrunk to fit: a request with its older
+  // tool results replaced by stubs is a model that no longer knows what it read.
+  assert.match(agent, /const history = this\.structuredHistory\(conversation\)/);
+  assert.match(agent, /agentMessages = iterationRequestMessages\(history, runMessages, streamPrompt\)/);
+  assert.doesNotMatch(agent, /trimToolResultsForRequest|liveSliceBudget/);
   assert.match(agent, /messages: agentMessages/);
   // Response messages (assistant tool calls + tool results) are captured and kept.
   assert.match(agent, /runMessages\.push\(\.\.\.\(responseMessages as ModelMessage\[\]\)\.filter\(message => message\.role !== 'system'\)\)/);
   assert.match(agent, /this\.appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
   // History must never start with a tool result: strict providers reject it.
   assert.match(iterationCore, /export function safeHistoryStart/);
-  assert.match(iterationCore, /export function selectStructuredHistory/);
+  assert.match(iterationCore, /export function prepareStructuredHistory/);
   // Legacy conversations without structured history still use the text fallback.
-  assert.match(agent, /const structured = this\.structuredHistory\(conversation, modelInfo\.contextWindow, modelInfo\.maxOutputLimit\)/);
+  assert.match(agent, /const structured = this\.structuredHistory\(conversation\)/);
 });
 
 test('compaction and rollbacks keep structured history in sync with the transcript', () => {
@@ -1329,26 +1332,26 @@ test('the loop stops itself before a step can overflow the window', () => {
   assert.match(guard, /export const CONTEXT_PRESSURE_RATIO = 0\.9/);
   assert.match(agent, /if \(contextPressure\(\{ measuredPromptTokens: lastStepInput, contextWindow: modelInfo\.contextWindow, budgetTokens \}\) === 'near'\)/);
   assert.match(agent, /throw contextLimitReached\(lastStepInput, modelInfo\.contextWindow, budgetTokens\)/);
-  // Our own stop is recoverable, unlike a provider rejection: compaction runs before
-  // the turn is committed, so the card offers a retry instead of a dead end.
+  // Our own stop is recoverable: the loop summarizes and continues the same turn,
+  // and if that fails the card still offers a retry instead of a dead end.
   assert.match(agent, /if \(error instanceof ContextLimitError\) \{/);
   assert.match(agent, /errorInfo\.primaryLabel = 'Retry with compacted history';/);
   // …and it says so out loud rather than stopping silently.
   assert.match(agent, /The work so far is kept; older turns are compacted so continuing fits\./);
 });
 
-test('the turn in flight is budgeted for the request but never lost from the transcript', () => {
+test('a request is compacted to fit, never shrunk by dropping messages', () => {
   const guard = read('src/context-guard.ts');
-  // Messages are never removed (a missing tool result is what providers reject) and
-  // the caller's array is never mutated (it is what the turn persists).
-  assert.match(guard, /export function trimToolResultsForRequest/);
-  assert.match(guard, /Messages are never removed, and the caller's array is never mutated/);
-  assert.match(agent, /const liveBudget = liveSliceBudget\(\{/);
-  assert.match(agent, /const trimmedLive = trimToolResultsForRequest\(runMessages, liveBudget, estimateMessageTokens\);/);
-  // The saved transcript keeps the whole slice.
+  // The guard's only job is deciding when to stop. It must not carry a trimming
+  // helper: a stub in place of a tool result is the loss itself.
+  assert.doesNotMatch(guard, /trimToolResultsForRequest|liveSliceBudget|TOOL_RESULT_STUB/);
+  assert.doesNotMatch(agent, /trimToolResultsForRequest|liveSliceBudget/);
+  // Both recovery paths exist: before the request, and after a rejection.
+  assert.match(agent, /await this\.compactForRun\(conversation, 'stored history exceeds the window'\)/);
+  assert.match(agent, /if \(contextFull && !compactedThisTurn\) \{/);
+  assert.match(agent, /await this\.compactForRun\(conversation, /);
+  // The saved transcript keeps the whole slice, on every path.
   assert.match(agent, /if \(runMessages\.length\) this\.appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
-  // And the model is told when a result it "read" is no longer in front of it.
-  assert.match(agent, /were left out of the request to stay within the model's window/);
   // An empty reply at high pressure is not retried twice: same context, same result.
   assert.match(read('src/util.ts'), /if \(!text\) return !options\.nearLimit;/);
   assert.match(agent, /shouldAutoContinue\(answer, finishReason, continuationCount, \{ nearLimit \}\)/);
@@ -1584,4 +1587,47 @@ test('a Windows path and a Windows not-found read like any other command', () =>
   assert.match(client, /WINDOWS_NOT_FOUND/);
   assert.match(client, /describeServerExit/);
   assert.match(client, /describeServerExit\(this\.config\.command \?\? '', code, stderrTail\)/);
+});
+
+test('compaction is the only thing that may make a conversation smaller', () => {
+  // A request that does not fit is summarized and resent. Nothing on the send path
+  // is allowed to drop messages or stub tool results to fit: that is context the
+  // model loses without a summary, and it reads as the agent forgetting.
+  assert.match(agent, /private async replaceWithSummary\(/);
+  assert.match(agent, /private async compactForRun\(conversation: Conversation, reason: string\): Promise<boolean>/);
+  // Before the request...
+  assert.match(agent, /await this\.compactForRun\(conversation, 'stored history exceeds the window'\);/, 'the pre-run check is awaited, not fire-and-forget');
+  // ...and after a rejection, once per turn, then the same turn continues.
+  assert.match(agent, /let compactedThisTurn = false;/);
+  assert.match(agent, /if \(contextFull && !compactedThisTurn\) \{/);
+  assert.match(agent, /if \(await this\.compactForRun\(conversation, [^)]*\?[^)]*\)\) \{/);
+});
+
+test('a failed compaction does not lock out the next attempt for two minutes', () => {
+  // Arming the cooldown before the summary ran meant one failure (a reasoning model
+  // returning no text, a rotated token) blocked every retry while the conversation
+  // stayed full.
+  assert.match(agent, /const snapshotsBefore = this\.compactionUndoStacks\.get\(conversation\.id\)\?\.length \?\? 0;/);
+  assert.match(agent, /if \(snapshotsAfter <= snapshotsBefore\) this\.lastAutoCompactAt\.delete\(conversation\.id\);/);
+});
+
+test('the summarizer shares the request layer that recovers a rotated token', () => {
+  // Compaction is a long single request issued exactly when the conversation is too
+  // big to send. A bare provider meant one 401 or 429 there failed compaction
+  // outright, which is the "compaction never works" symptom.
+  assert.match(agent, /private resilientProviderFetch\(options: \{/);
+  const summarizer = agent.slice(agent.indexOf('private async summarizeConversation('), agent.indexOf('private compactionModelCandidates('));
+  assert.ok(summarizer.length > 1_000, 'summarizer body found');
+  assert.match(summarizer, /fetch: this\.resilientProviderFetch\(\{/);
+  // Two providers are built with it: the run's, and the summarizer's.
+  const wired = agent.match(/fetch: this\.resilientProviderFetch\(\{/g) ?? [];
+  assert.equal(wired.length, 2, 'the run and the summarizer both use the shared request layer');
+});
+
+test('compaction always keeps a candidate that is known to answer', () => {
+  // Price ranking puts the smallest model first, and reasoning-heavy small models
+  // return an empty summary after spending the whole output budget thinking. Without
+  // the conversation's own model as a final candidate the conversation became
+  // permanently uncompactable.
+  assert.match(agent, /const withFallback = main && !ordered\.includes\(main\) \? \[\.\.\.ordered, main\] :/);
 });

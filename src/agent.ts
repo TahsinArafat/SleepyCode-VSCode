@@ -25,13 +25,13 @@ import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectRe
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
-import { createRetryBudget, retryKindForStatus, retryMessage } from './retry-core.ts';
+import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
 import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
-import { AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
-import { appendConversationMessages, droppedMessageCount, iterationRequestMessages, pausedByStepLimit, recoverPendingHistory, selectStructuredHistory } from './iteration-core';
-import { pickContextWindow } from './context-window-core';
-import { contextPressure, liveSliceBudget, trimToolResultsForRequest } from './context-guard';
+import { AUTO_COMPACT_BUDGET_RATIO, AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, COMPACTION_PROMPT_MAX_CHARS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, prepareStructuredHistory, recoverPendingHistory } from './iteration-core';
+import { contextWindowFromError, pickContextWindow } from './context-window-core';
+import { contextPressure } from './context-guard';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import { getWebviewHtml } from './webview';
@@ -422,8 +422,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private persistFailed = false;
   /** Index entries that failed validation on load, kept verbatim so a rewrite cannot delete them. */
   private unreadableProjectEntries: unknown[] = [];
-  /** Last dropped-message count announced per conversation, so the notice is not repeated every turn. */
-  private lastHistoryDropNotice = new Map<string, number>();
+  /** Conversations already told their model history hit the message-count guard. */
+  private historyBoundNoticed = new Set<string>();
   /** Timestamp of the last coalesced mid-run checkpoint write, per conversation. */
   private checkpointAtByConversation = new Map<string, number>();
   private notifySeq = 0;
@@ -456,6 +456,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private lastModelGroups: ProviderModelGroup[] = [];
   private lastSleepyModelPrices: SleepyModelPrice[] = [];
   private lastSleepyPriceRefresh = 0;
+  /**
+   * Context windows learned from a provider's own "request too large" rejection,
+   * keyed by model id. A catalog cannot describe a relay that fronts several
+   * vendors, and many compatible endpoints report no window at all; the rejection
+   * names the real one, so it is kept and used for every later request.
+   */
+  private learnedContextWindows: Record<string, number> = {};
   private reviewTempDirs = new Set<string>();
   private subagentSequence = 0;
   private compactionControllers = new Map<string, AbortController>();
@@ -521,6 +528,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
     context.subscriptions.push({ dispose: () => { void this.shutdownCli(); } });
     context.subscriptions.push({ dispose: () => this.closeMcpCache() });
+    // Read synchronously so budgeting can use a learned window on the first send,
+    // which is often the one that is already too large.
+    const learned = context.globalState.get<unknown>('sleepycode.contextWindows');
+    if (learned && typeof learned === 'object' && !Array.isArray(learned)) {
+      for (const [modelId, value] of Object.entries(learned as Record<string, unknown>)) {
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) this.learnedContextWindows[modelId] = value;
+      }
+    }
     // Warm the SleepyAI token in the background so the first send doesn't block on a cold refresh.
     void getSleepyToken().catch(() => { });
   }
@@ -2684,46 +2699,40 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * messages that are not valid to start a request with.
    *
    * The first message MUST be a user message; a history that starts with a
-   * tool-result (e.g. after trimming) would be rejected by strict providers.
+   * tool-result would be rejected by strict providers.
    *
-   * Selection is token-budgeted and cut only at safe boundaries: a turn's tool
-   * results are never separated from the assistant message that requested them,
-   * because an orphaned tool-call id makes strict providers reject the request.
+   * Nothing is dropped for being too large. Shrinking stored history to fit a
+   * guessed budget is context the model loses without anyone being told, and the
+   * old budget was conservative enough (60k for a model that reported no window)
+   * to cut conversations that the model could hold in full. Compaction is the only
+   * thing that may reduce this conversation, and it leaves a summary the user can
+   * see and undo.
    */
-  private structuredHistory(conversation: Conversation, contextWindow?: number | null, maxOutputLimit?: number | null): ModelMessage[] {
-    // Same budget formula as maybeAutoCompact, including the output reserve. Budgeting the
-    // send with a different number than the one compaction is measured against is what let
-    // history be cut before compaction ever became due.
-    const budgetTokens = structuredHistoryBudget(contextWindow, maxOutputLimit);
-    const selected = selectStructuredHistory(conversation.messages, budgetTokens, estimateMessageTokens);
-    // The cut is real context loss, so say so. Silently narrowing the window is what
-    // makes this read as "the agent forgot" instead of "older turns were dropped".
-    const dropped = droppedMessageCount(conversation.messages, selected);
-    if (dropped > 0 && this.lastHistoryDropNotice.get(conversation.id) !== dropped) {
-      this.lastHistoryDropNotice.set(conversation.id, dropped);
-      // Name the number the cut was made against. "400 messages left this request" with no
-      // figures is unactionable — it reads as a 1M-window model misbehaving when the real
-      // cause was a 60k budget for a model nobody could describe.
-      const within = contextWindow && contextWindow > 0
-        ? `${Math.round(budgetTokens / 1_000)}k of the model's ${Math.round(contextWindow / 1_000)}k-token window`
-        : `the conservative ${Math.round(budgetTokens / 1_000)}k-token budget (no context window is known for this model)`;
-      this.post({
-        type: 'contextNotice',
-        conversationId: conversation.id,
-        kind: 'trimmed',
-        text: `${dropped} older message${dropped === 1 ? '' : 's'} left this request to stay within ${within}. They are still saved in this conversation.`,
-      });
-    }
-    return backfillAssistantReasoning(selected, reasoningTextsFromItems(conversation.items));
+  private structuredHistory(conversation: Conversation): ModelMessage[] {
+    const prepared = prepareStructuredHistory(conversation.messages);
+    return backfillAssistantReasoning(prepared, reasoningTextsFromItems(conversation.items));
   }
 
   /**
    * Append this run's structured messages to the conversation, paired with the
-   * user turn that produced them. Keeps a hard count bound and always trims from
-   * the front so the newest context survives.
+   * user turn that produced them. The count bound is a memory guard; when it discards
+   * anything, that is context loss and it is said out loud rather than cut silently.
    */
   private appendConversationMessages(conversation: Conversation, userText: string, produced: ModelMessage[], reuseUser = false): void {
-    conversation.messages = appendConversationMessages(conversation.messages, userText, produced, MAX_STORED_MESSAGES, reuseUser);
+    const { messages, dropped } = appendConversationMessages(conversation.messages, userText, produced, MAX_STORED_MESSAGES, reuseUser);
+    conversation.messages = messages;
+    if (dropped <= 0) return;
+    // Reported here, recovered at the run's end: compaction must not run while this
+    // turn is still committing, so `maybeAutoCompact` fires it once the run is gone.
+    if (this.historyBoundNoticed.has(conversation.id)) return;
+    this.historyBoundNoticed.add(conversation.id);
+    this.log('warn', 'conversation.history.bound', `${conversation.id}: dropped ${dropped} messages at the ${MAX_STORED_MESSAGES}-message guard`);
+    this.post({
+      type: 'contextNotice',
+      conversationId: conversation.id,
+      kind: 'trimmed',
+      text: `${dropped} of the oldest message${dropped === 1 ? '' : 's'} left this conversation's model history (limit ${MAX_STORED_MESSAGES.toLocaleString()}). It is being summarized so the conversation keeps its context.`,
+    });
   }
 
   /**
@@ -4912,11 +4921,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         model = route.id;
         this.post({ type: 'modelRoute', conversationId, requested: SLEEPY_AUTO_MODEL_ID, model, reason: route.reason });
       }
-      // The send budget has to follow the window of the model that will actually run.
-      // Resolving it from the unresolved id (or before `refreshModels` filled the
-      // catalog) is how a 1M-window model was budgeted at the 60k fallback and dropped
-      // hundreds of stored messages per request.
+      // The window has to follow the model that will actually run. Resolving it from
+      // the unresolved id (or before `refreshModels` filled the catalog) is how a
+      // 1M-window model was budgeted at the 60k fallback for a model nobody could
+      // describe, and then compacted at the wrong size.
       const modelInfo = this.getEffectiveModelInfo(selection.provider, model);
+      // A conversation that no longer fits this model is compacted BEFORE the
+      // request, not cut down to fit it. The post-turn trigger covers the ordinary
+      // case; this covers the two it cannot: switching to a model with a smaller
+      // window, and a previous compaction that failed.
+      const sendBudget = structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit);
+      const storedTokens = estimateHistoryTokens(conversation.messages, estimateMessageTokens);
+      if (storedTokens >= sendBudget * AUTO_COMPACT_BUDGET_RATIO && conversation.items.length >= 4) {
+        await this.compactForRun(conversation, 'stored history exceeds the window');
+      }
       // The single retry budget for this turn. The request layer below and the
       // run loop after it both draw from it, so retries can no longer multiply
       // per layer, and both report the same attempt numbering.
@@ -4936,71 +4954,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           ...providerConfig.customHeaders,
           ...(sleepyToken ? { Authorization: `Bearer ${sleepyToken}` } : {}),
         },
-        fetch: async (input, init) => {
-          const method = (init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET') ?? 'GET').toUpperCase();
-          const replayable = method === 'GET' || method === 'HEAD';
-          const headersAtSend = new Headers(init?.headers ?? (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined));
-          // A request carries the token captured in the headers closure at send time.
-          // After a rotation the same Request object would keep replaying the rejected
-          // token, so rebuild it (and the message-carrying init) with the new header.
-          const withAuthorization = (bearer: string): { input: typeof input; init: typeof init } => {
-            const authHeaders = new Headers(headersAtSend);
-            authHeaders.set('Authorization', `Bearer ${bearer}`);
-            if (typeof Request !== 'undefined' && input instanceof Request) {
-              input = new Request(input, { headers: authHeaders });
-            }
-            init = { ...(init ?? {}), headers: authHeaders };
-            return { input, init };
-          };
-          const report = (attempt: number, max: number, errorMsg: string, backoffMs: number): void => {
-            reconnectAttempt = attempt;
-            this.post({ type: 'retry', conversationId, attempt, max, error: errorMsg, backoffMs });
-          };
-          const endReport = (ok: boolean): void => {
+        fetch: this.resilientProviderFetch({
+          provider: providerConfig,
+          conversationId,
+          retryBudget,
+          signal: run.controller.signal,
+          onRetry: decision => {
+            reconnectAttempt = decision.attempt;
+            this.post({ type: 'retry', conversationId, attempt: decision.attempt, max: decision.max, error: decision.message, backoffMs: decision.backoffMs });
+          },
+          onRetryEnd: ok => {
             if (!reconnectAttempt) return;
             const attempt = reconnectAttempt;
             reconnectAttempt = 0;
             this.post({ type: 'retryEnd', conversationId, ok, attempt, max: retryBudget.max });
-          };
-          for (; ;) {
-            try {
-              const requestInput = typeof Request !== 'undefined' && input instanceof Request ? input.clone() : input;
-              const response = await fetch(requestInput, init);
-              // Every retryable status is judged by the shared policy: a rejected
-              // credential is recovered by rotating the token, a 404 on a read waits
-              // for the edge to settle, and 408/409/429/5xx backs off. When the turn's
-              // budget is spent the response is surfaced untouched, so the error card
-              // reflects the real failure instead of a synthetic "logged out".
-              const kind = retryKindForStatus(response.status, { replayable, isFirstParty: providerConfig.isSleepy });
-              if (!kind) {
-                // The exchange completed, so the retry streak starts over: a later
-                // failure in this same turn gets the full budget again instead of
-                // inheriting what an earlier flaky request already spent.
-                retryBudget.succeed();
-                if (response.ok) endReport(true);
-                return response;
-              }
-              let renewed: string | null = null;
-              if (kind === 'auth') renewed = await refreshSleepyToken().catch(() => null);
-              const decision = retryBudget.take(kind, retryMessage({ kind, status: response.status, detail: response.statusText || 'Server error', recovered: Boolean(renewed) }));
-              // Budget spent: surface the response exactly as the gateway sent it, so
-              // the error card names the real status instead of a recovery message.
-              if (!decision) return response;
-              this.log('warn', `run.retry.${decision.kind}`, `status=${response.status}; attempt=${decision.attempt}/${decision.max}; renewed=${Boolean(renewed)}`);
-              report(decision.attempt, decision.max, decision.message, decision.backoffMs);
-              if (renewed) withAuthorization(renewed);
-              await waitForRetry(decision.backoffMs, run.controller.signal);
-            } catch (error) {
-              // A transport failure is transient by definition. An aborted run is not.
-              if (run.controller.signal.aborted) throw error;
-              const decision = retryBudget.take('transient', retryMessage({ kind: 'transient', detail: errorMessage(error) }));
-              if (!decision) throw error;
-              this.log('warn', 'run.retry.transient', `attempt=${decision.attempt}/${decision.max}; ${decision.message}`);
-              report(decision.attempt, decision.max, decision.message, decision.backoffMs);
-              await waitForRetry(decision.backoffMs, run.controller.signal);
-            }
-          }
-        },
+          },
+        }),
       });
 
       // Skills and project memory are loaded on demand by tools. Do not touch a
@@ -5447,7 +5416,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // Prefer the structured model history (assistant turns + tool calls + tool
         // results). Fall back to the flattened text window only for conversations
         // that predate structured history or were compacted to text summaries.
-        const structured = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
+        const structured = this.structuredHistory(conversation);
         if (structured.length) {
           streamPrompt = `${userText}${promptContext}`;
         } else {
@@ -5469,11 +5438,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       let runRetries = 0;
       const baseWork = work.slice();
       while (true) {
-        // Each attempt restarts the stream from `baseStreamPrompt`, so the messages
-        // produced by the previous attempt must not be carried over: keeping them
-        // re-stacked the whole turn onto `structuredHistory` on every retry until the
-        // request overflowed the context window.
-        runMessages = [];
+        // `runMessages` deliberately survives a retry. It holds the tool calls and
+        // results this turn already produced, and those are real work: clearing it
+        // meant a retried turn re-read every file it had already read. It cannot
+        // stack onto the stored history, because each attempt sends
+        // `iterationRequestMessages(history, runMessages, …)` and `runMessages` is
+        // only appended to `conversation.messages` once, when the turn settles.
         let answer = '';
         let finishReason = '';
         let stepCount = 0;
@@ -5488,8 +5458,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         let runCacheRead = 0;
         let runCacheWrite = 0;
         let lastStepInput = 0;
-        // One notice per turn when the request had to shrink the live slice.
-        let liveTrimNoticed = false;
+        // One compaction per turn. It is the recovery for "this request does not
+        // fit"; running it twice would summarise a summary for no gain.
+        let compactedThisTurn = false;
         let liveStartTime = Date.now();
         let streamStartTime = Date.now();
         try {
@@ -5517,38 +5488,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               }]
               : streamPrompt;
             // Keep prior conversation history AND this turn's already-produced
-            // tool calls/results. Resume/auto-continue used to drop that live
-            // slice, which is how partial context disappeared mid-iteration.
-            // Guidance is drained in `prepareStep`, between steps, not here: this
-            // request is also the one step whose guidance the SDK has not yet
-            // had a chance to attach.
-            const history = this.structuredHistory(conversation, modelInfo.contextWindow, modelInfo.maxOutputLimit);
+            // tool calls/results, in full. Neither is shrunk to fit: a request that
+            // had a tool result replaced with a stub is a model that no longer knows
+            // what it just read, and it re-reads the file or edits blind. Guidance is
+            // drained in `prepareStep`, between steps, not here: this request is also
+            // the one step whose guidance the SDK has not yet had a chance to attach.
+            const history = this.structuredHistory(conversation);
             let agentMessages: ModelMessage[] | undefined;
-            // The live slice is unbudgeted by nature: one assistant tool-call + result
-            // per step. Give it what the history and the prompt leave, and shrink the
-            // REQUEST when it does not fit — `runMessages` itself is untouched, since
-            // it is what the turn persists.
-            const liveBudget = liveSliceBudget({
-              budgetTokens: structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit),
-              historyTokens: estimateHistoryTokens(history, estimateMessageTokens),
-              promptTokens: Math.ceil((streamPrompt.length + runGuidance.join('').length) / CHARS_PER_TOKEN),
-            });
-            const trimmedLive = trimToolResultsForRequest(runMessages, liveBudget, estimateMessageTokens);
-            const liveForRequest = trimmedLive.messages;
-            // Say it once per turn. The results are still in the saved transcript; what
-            // the model gets is a stub, and it should know why a file it "read" is not
-            // in front of it any more.
-            if (trimmedLive.stubbed > 0 && !liveTrimNoticed) {
-              liveTrimNoticed = true;
-              this.post({
-                type: 'contextNotice',
-                conversationId,
-                kind: 'trimmed',
-                text: `${trimmedLive.stubbed} older tool result${trimmedLive.stubbed === 1 ? '' : 's'} from this turn were left out of the request to stay within the model's window. They are still saved in this conversation.`,
-              });
-            }
-            if (history.length || liveForRequest.length) {
-              agentMessages = iterationRequestMessages(history, liveForRequest as ModelMessage[], streamPrompt);
+            if (history.length || runMessages.length) {
+              agentMessages = iterationRequestMessages(history, runMessages, streamPrompt);
               if (imageAttachments.length) {
                 const imageParts = await Promise.all(imageAttachments.map(async attachment => ({ type: 'image' as const, image: await readFile(attachment.tempPath!), mediaType: attachment.mimeType })));
                 const last = agentMessages[agentMessages.length - 1];
@@ -5819,6 +5767,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         } catch (attemptError) {
           if (run.controller.signal.aborted) throw attemptError;
           const attemptInfo = classifyAgentError(attemptError, providerConfig);
+          // A request that did not fit is recoverable, and compaction is the
+          // recovery. This replaces the old behaviour of dropping stored messages
+          // (and stubbing tool results) until the request fit: that kept the turn
+          // alive while quietly taking away everything the model had learned, which
+          // is the "the agent forgot what it just did" symptom. Summarize once, then
+          // send the same turn with the summary in place of the old history.
+          const contextFull = attemptError instanceof ContextLimitError || attemptInfo.code === 'context_too_large';
+          if (contextFull && !compactedThisTurn) {
+            compactedThisTurn = true;
+            // The rejection usually names the real limit, which is authoritative for
+            // an endpoint whose catalog says nothing. Learn it before compacting so
+            // the compaction that follows is measured against the true window.
+            this.noteContextWindowFromError(model, attemptInfo.message, conversationId);
+            this.post({ type: 'contextNotice', conversationId, kind: 'trimmed', text: `${attemptInfo.message} Older turns are being summarized so this turn can continue.` });
+            if (await this.compactForRun(conversation, attemptError instanceof ContextLimitError ? 'the turn reached the window' : 'the provider rejected the request size')) {
+              streamPrompt = baseStreamPrompt;
+              work.length = 0;
+              work.push(...baseWork);
+              planState = undefined;
+              planItem = undefined;
+              activeTasks.clear();
+              reasoningBuffer = '';
+              workStartedAt = 0;
+              continue;
+            }
+          }
           // One policy for every reason a turn is resent. A stream rejected with a
           // 401/403 (sleep/wake, gateway rollout) is not a sign-out: rotate the token,
           // then continue from the text already streamed instead of restarting from
@@ -5920,6 +5894,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             kind: 'trimmed',
             text: `${message} The work so far is kept; older turns are compacted so continuing fits.`,
           });
+        } else if (errorInfo.code === 'context_too_large') {
+          // The provider rejected this request for size and the in-run compaction did
+          // not rescue it (it failed, or the turn had already been compacted once).
+          // Still learn the limit it named, so the next turn is budgeted correctly.
+          this.noteContextWindowFromError(model, message, conversationId);
         }
         if (reasoningBuffer.trim()) work.push({ kind: 'reasoning', text: reasoningBuffer });
         const errorItem = createTranscriptItem('assistant', message, 'error', runGitTree, work.slice(-80), workStartedAt ? Math.max(1, Math.round((Date.now() - workStartedAt) / 1000)) : 0);
@@ -6030,42 +6009,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.compactionControllers.has(targetId ?? '')) return; // already compacting
     const controller = new AbortController();
     this.compactionControllers.set(targetId ?? '', controller);
-    const beforeTokens = contextOccupancy(conversation.items).tokens;
     progress('start', { auto: options?.auto === true });
     try {
       progress('summarizing', { auto: options?.auto === true });
-      const selection = this.selectionFor(conversation);
-      const before = conversation.items;
-      const summarized = await this.summarizeConversation(before, selection, controller.signal, targetId);
-      conversation.items = summarized.items;
-      // The structured model history must follow the compacted transcript, otherwise
-      // the next turn would replay the pre-compaction tool calls we just summarized.
-      const afterMessages: ModelMessage[] = [
-        { role: 'user', content: `Conversation summary (earlier context was compacted):\n\n${summarized.summaryText}` },
-      ];
-      const undo = this.compactionUndoStacks.get(targetId ?? '') ?? [];
-      undo.push({
-        beforeItems: before.slice(),
-        afterItems: summarized.items.slice(),
-        beforeMessages: (conversation.messages ?? []).slice(),
-        afterMessages: afterMessages.slice(),
-      });
-      conversation.messages = afterMessages;
-      this.compactionUndoStacks.set(targetId ?? '', undo.slice(-3));
-      this.compactionRedoStacks.delete(targetId ?? '');
-      void this.persistCompactionSnapshots(targetId ?? '');
-      conversation.updatedAt = Date.now();
-      project.updatedAt = Date.now();
-      await this.persistProjects();
-      this.syncConversations();
-      // Note: usage was already recorded per attempt inside summarizeConversation
-      // (including rejected empty responses — reasoning burn is real spend).
-      const afterTokens = contextOccupancy(conversation.items).tokens;
-      const modelInfo = this.getEffectiveModelInfo(selection.provider, selection.model);
+      const result = await this.replaceWithSummary(conversation, controller.signal);
+      const modelInfo = this.getEffectiveModelInfo(result.providerId, result.modelId);
       progress('done', {
         auto: options?.auto === true,
-        beforeTokens,
-        afterTokens,
+        beforeTokens: result.beforeTokens,
+        afterTokens: result.afterTokens,
         contextWindow: modelInfo.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         itemCount: conversation.items.length,
       });
@@ -6078,10 +6030,63 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Summarize a conversation and swap its transcript and structured history for
+   * the summary. Throws when no model produced a summary, leaving the
+   * conversation exactly as it was.
+   *
+   * This is the only thing in the extension allowed to make a conversation
+   * smaller. It is shared by the manual/automatic path and by the run loop, which
+   * needs it mid-turn: a request that does not fit the window is compacted and
+   * retried rather than sent with messages quietly removed.
+   */
+  private async replaceWithSummary(
+    conversation: Conversation,
+    signal: AbortSignal,
+  ): Promise<{ summaryText: string; beforeTokens: number; afterTokens: number; modelId: string; providerId: string }> {
+    const before = conversation.items;
+    const beforeTokens = contextOccupancy(before).tokens;
+    const summarized = await this.summarizeConversation(before, this.selectionFor(conversation), signal, conversation.id);
+    conversation.items = summarized.items;
+    // The structured model history must follow the compacted transcript, otherwise
+    // the next turn would replay the pre-compaction tool calls we just summarized.
+    const afterMessages: ModelMessage[] = [
+      { role: 'user', content: `Conversation summary (earlier context was compacted):\n\n${summarized.summaryText}` },
+    ];
+    const undo = this.compactionUndoStacks.get(conversation.id) ?? [];
+    undo.push({
+      beforeItems: before.slice(),
+      afterItems: summarized.items.slice(),
+      beforeMessages: (conversation.messages ?? []).slice(),
+      afterMessages: afterMessages.slice(),
+    });
+    conversation.messages = afterMessages;
+    this.compactionUndoStacks.set(conversation.id, undo.slice(-3));
+    this.compactionRedoStacks.delete(conversation.id);
+    void this.persistCompactionSnapshots(conversation.id);
+    conversation.updatedAt = Date.now();
+    const project = this.activeProject();
+    if (project) project.updatedAt = Date.now();
+    await this.persistProjects();
+    this.syncConversations();
+    return {
+      summaryText: summarized.summaryText,
+      beforeTokens,
+      afterTokens: contextOccupancy(conversation.items).tokens,
+      modelId: summarized.modelId,
+      providerId: summarized.providerId,
+    };
+  }
+
+  /**
    * Auto-compaction entry point, invoked from the run() finally block — i.e. only
    * after the run has been removed from this.runs, otherwise compactConversation's
    * active-run guard would always reject it. Cooldown prevents pathological loops
    * when a conversation stays above the threshold even after compaction.
+   *
+   * The cooldown is armed only once a compaction actually succeeded. Arming it up
+   * front meant one failed summary (a reasoning model returning no text, a rotated
+   * token) blocked every retry for two minutes, so a full conversation just stayed
+   * full and the next request failed instead.
    */
   private maybeAutoCompact(conversation: Conversation, providerId: string, model: string): void {
     if (conversation.items.length < 8) return;
@@ -6091,16 +6096,67 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const contextTokens = contextOccupancy(conversation.items).tokens;
     const modelInfo = this.getEffectiveModelInfo(providerId, model);
     // Measure the stored history the way the send path will budget it, so compaction
-    // fires before the budget starts dropping messages. Without this the conversation
-    // could grow past the send budget and silently lose turns with no compaction ever
-    // running, because the old trigger only watched the model window.
+    // fires before a request has to be rejected for being too large.
     const budgetTokens = structuredHistoryBudget(modelInfo.contextWindow, modelInfo.maxOutputLimit);
     const historyTokens = estimateHistoryTokens(conversation.messages, estimateMessageTokens);
-    if (!shouldAutoCompact(contextTokens, modelInfo.contextWindow, historyTokens, budgetTokens)) return;
+    // The message-count guard is the other way history can run out: a turn with many
+    // tool steps reaches it long before a small window's token budget does. Reaching it
+    // already forced a cut, so summarize here — from the full transcript — instead of
+    // letting the conversation sit at the guard and lose more on every turn.
+    const atCountGuard = (conversation.messages?.length ?? 0) >= MAX_STORED_MESSAGES;
+    if (!atCountGuard && !shouldAutoCompact(contextTokens, modelInfo.contextWindow, historyTokens, budgetTokens)) return;
     const now = Date.now();
     if (now - (this.lastAutoCompactAt.get(conversation.id) ?? 0) < 120_000) return;
     this.lastAutoCompactAt.set(conversation.id, now);
-    void this.compactConversation(conversation.id, { auto: true });
+    const snapshotsBefore = this.compactionUndoStacks.get(conversation.id)?.length ?? 0;
+    void this.compactConversation(conversation.id, { auto: true }).then(() => {
+      // A compaction that failed leaves the conversation above the threshold; let the
+      // next turn try again instead of waiting out the cooldown.
+      const snapshotsAfter = this.compactionUndoStacks.get(conversation.id)?.length ?? 0;
+      if (snapshotsAfter <= snapshotsBefore) this.lastAutoCompactAt.delete(conversation.id);
+    });
+  }
+
+  /**
+   * Compact before a request rather than send something that cannot fit.
+   *
+   * Called from the run loop for two situations: a conversation whose stored
+   * history already exceeds the model's window (it would be rejected), and a turn
+   * a provider has just rejected for size. Both used to be handled by cutting
+   * messages out of the request; a summary the user can see and undo is the honest
+   * version of the same recovery.
+   */
+  private async compactForRun(conversation: Conversation, reason: string): Promise<boolean> {
+    if (conversation.items.length < 4) return false;
+    if (this.refuseIfCliOwned(conversation, 'Compacting')) return false;
+    if (this.compactionControllers.has(conversation.id)) return false;
+    const controller = new AbortController();
+    this.compactionControllers.set(conversation.id, controller);
+    this.post({ type: 'compactProgress', conversationId: conversation.id, phase: 'start', auto: true });
+    try {
+      this.post({ type: 'compactProgress', conversationId: conversation.id, phase: 'summarizing', auto: true });
+      const result = await this.replaceWithSummary(conversation, controller.signal);
+      const modelInfo = this.getEffectiveModelInfo(result.providerId, result.modelId);
+      this.post({
+        type: 'compactProgress',
+        conversationId: conversation.id,
+        phase: 'done',
+        auto: true,
+        beforeTokens: result.beforeTokens,
+        afterTokens: result.afterTokens,
+        contextWindow: modelInfo.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        itemCount: conversation.items.length,
+      });
+      this.lastAutoCompactAt.set(conversation.id, Date.now());
+      this.log('info', 'run.compacted', `${conversation.id}: ${reason}; ${result.beforeTokens} -> ${result.afterTokens} tokens`);
+      return true;
+    } catch (error) {
+      this.post({ type: 'compactProgress', conversationId: conversation.id, phase: 'error', auto: true, text: errorMessage(error) });
+      this.log('warn', 'run.compact.failed', `${conversation.id}: ${reason}; ${errorMessage(error)}`);
+      return false;
+    } finally {
+      this.compactionControllers.delete(conversation.id);
+    }
   }
 
   /**
@@ -6172,20 +6228,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     /** The conversation this summary is for, so its spend is charged to it. */
     conversationId?: string,
   ): Promise<{ items: TranscriptItem[]; summaryText: string; usage?: { inputTokens?: number; outputTokens?: number }; modelId: string; providerId: string }> {
-    const text = compactionPromptInput(items);
     // Carry what the conversation already inspected and edited. Without this the
     // next turn re-reads every file to rediscover the same facts — the re-read
     // loop this work exists to remove.
     const fileOps = summarizeFileOperations(items);
-    const prompt = [
-      'Summarize the conversation below into a compact continuation context.',
-      'Preserve: active goal, unresolved blockers, open todos, key decisions, and latest state.',
-      'Omit completed subtasks, repeated confirmations, and tool trivia unless they affect the next steps.',
-      'Keep it under 1200 words and write it as a brief assistant message that can be injected into the next run.',
-      fileOps,
-      '',
-      text,
-    ].filter(Boolean).join('\n');
+    // The transcript is rendered per candidate, against that candidate's own window.
+    // One fixed cap was the other half of "compaction never works": the prompt grew
+    // past a small model's window, so every candidate rejected the summary request
+    // and the conversation could never be compacted at all.
+    const promptFor = (candidateId: string): string => {
+      const info = this.getEffectiveModelInfo(selection.provider, candidateId);
+      const budgetChars = structuredHistoryBudget(info.contextWindow, info.maxOutputLimit) * CHARS_PER_TOKEN;
+      const maxChars = Math.max(12_000, Math.min(COMPACTION_PROMPT_MAX_CHARS, budgetChars));
+      return [
+        'Summarize the conversation below into a compact continuation context.',
+        'Preserve: active goal, unresolved blockers, open todos, key decisions, and latest state.',
+        'Omit completed subtasks, repeated confirmations, and tool trivia unless they affect the next steps.',
+        'Keep it under 1200 words and write it as a brief assistant message that can be injected into the next run.',
+        fileOps,
+        '',
+        compactionPromptInput(items, 4_000, maxChars),
+      ].filter(Boolean).join('\n');
+    };
     let summaryText = '';
     let usage: { inputTokens?: number; outputTokens?: number } | undefined;
     let modelId = '';
@@ -6207,6 +6271,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             ...providerConfig.customHeaders,
             ...(sleepyToken ? { Authorization: `Bearer ${sleepyToken}` } : {}),
           },
+          // Same transport as the main loop. A summary is one long request issued
+          // exactly when the conversation is too large to send, so a rotated token
+          // or a single 429 here must not fail compaction: that is how "compaction
+          // never works" happened.
+          fetch: this.resilientProviderFetch({
+            provider: providerConfig,
+            conversationId: conversationId ?? '',
+            retryBudget: createRetryBudget(),
+            signal,
+            onRetry: decision => {
+              this.post({ type: 'compactProgress', conversationId: conversationId ?? '', phase: 'summarizing', text: decision.message });
+            },
+          }),
         });
         // Cheapest model first; on failure, fall through to the next cheapest.
         for (const candidateId of candidates) {
@@ -6227,7 +6304,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             // envelope and compaction hops model after model while the dashboard
             // shows a valid completion. streamText requests stream:true and parses
             // that same SSE correctly — the same transport the main run loop uses.
-            const result = await streamText({ model: provider(candidateId), prompt, maxOutputTokens: budget, maxRetries: 1, abortSignal: attemptSignal });
+            const result = await streamText({ model: provider(candidateId), prompt: promptFor(candidateId), maxOutputTokens: budget, maxRetries: 1, abortSignal: attemptSignal });
             // Awaiting any auto-consuming promise runs the stream to completion and
             // surfaces transport/parse errors here (caught below).
             const attemptUsage = await result.usage;
@@ -6312,6 +6389,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * cheap model falls through to the second cheapest, and so on. When the user has
    * pinned a specific compaction model in Settings, that model is tried first and the
    * cheapest-first sequence remains as a fallback.
+   *
+   * The conversation's own model is always last. Ranking by price puts the smallest —
+   * usually most reasoning-heavy — model first, and those are the ones that return an
+   * empty summary after spending their whole output budget thinking. Without a final
+   * candidate that is known to answer, "no model could summarize" left the conversation
+   * permanently uncompactable.
    */
   private compactionModelCandidates(selection: { model: string; provider: string; agentId: string }): string[] {
     const configured = this.config().compactionModel.trim();
@@ -6323,15 +6406,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       .filter(model => (typeof model === 'string' ? model : model.id) !== SLEEPY_AUTO_MODEL_ID)
       .map(model => typeof model === 'string' ? { id: model, name: model } : { id: model.id, name: model.name });
     const ranked = rankModelsByPrice(models, this.lastSleepyModelPrices);
-    let ordered = ranked.map(model => model.id);
-    if (!ordered.length) {
-      const main = selection.model;
-      if (main && main !== SLEEPY_AUTO_MODEL_ID) ordered = [main];
+    const main = selection.model && selection.model !== SLEEPY_AUTO_MODEL_ID ? selection.model : '';
+    const ordered = ranked.map(model => model.id);
+    const withFallback = main && !ordered.includes(main) ? [...ordered, main] : ordered.length ? ordered : main ? [main] : [];
+    if (configured && configured !== '__auto__' && withFallback.includes(configured)) {
+      return [configured, ...withFallback.filter(id => id !== configured)];
     }
-    if (configured && configured !== '__auto__' && ordered.includes(configured)) {
-      return [configured, ...ordered.filter(id => id !== configured)];
-    }
-    return ordered;
+    return withFallback;
   }
 
   private taskGitRoot(project: Project): vscode.Uri | undefined {
@@ -6938,6 +7019,84 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  /**
+   * The `fetch` every provider gets: the one place a rejected credential is
+   * rotated, a transient status is backed off, and the retry is reported.
+   *
+   * It is a method rather than a closure inside `run` because compaction needs
+   * the same behaviour. The summarizer used a bare provider, so one 401 after a
+   * token rotation or one 429 in the middle of a summary failed compaction
+   * outright — and compaction is exactly what the loop depends on when a
+   * conversation is too large to send. A caller that has nowhere to show a retry
+   * row simply omits the reporters.
+   */
+  private resilientProviderFetch(options: {
+    provider: Provider;
+    conversationId: string;
+    retryBudget: RetryBudget;
+    signal: AbortSignal;
+    onRetry?: (decision: RetryDecision) => void;
+    onRetryEnd?: (ok: boolean) => void;
+  }): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const { provider, conversationId, retryBudget, signal } = options;
+    return async (input, init) => {
+      let requestInput = input;
+      let requestInit = init;
+      const method = (init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET') ?? 'GET').toUpperCase();
+      const replayable = method === 'GET' || method === 'HEAD';
+      const headersAtSend = new Headers(init?.headers ?? (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined));
+      // A request carries the token captured in the headers at send time. After a
+      // rotation the same Request would keep replaying the rejected token, so
+      // rebuild it (and the message-carrying init) with the new header.
+      const withAuthorization = (bearer: string): void => {
+        const authHeaders = new Headers(headersAtSend);
+        authHeaders.set('Authorization', `Bearer ${bearer}`);
+        if (typeof Request !== 'undefined' && requestInput instanceof Request) {
+          requestInput = new Request(requestInput, { headers: authHeaders });
+        }
+        requestInit = { ...(requestInit ?? {}), headers: authHeaders };
+      };
+      for (; ;) {
+        try {
+          const sendable = typeof Request !== 'undefined' && requestInput instanceof Request ? requestInput.clone() : requestInput;
+          const response = await fetch(sendable, requestInit);
+          // Every retryable status is judged by the shared policy: a rejected
+          // credential is recovered by rotating the token, a 404 on a read waits
+          // for the edge to settle, and 408/409/429/5xx backs off. When the turn's
+          // budget is spent the response is surfaced untouched, so the error card
+          // reflects the real failure instead of a synthetic "logged out".
+          const kind = retryKindForStatus(response.status, { replayable, isFirstParty: provider.isSleepy });
+          if (!kind) {
+            // The exchange completed, so the retry streak starts over: a later
+            // failure in this same turn gets the full budget again instead of
+            // inheriting what an earlier flaky request already spent.
+            retryBudget.succeed();
+            if (response.ok) options.onRetryEnd?.(true);
+            return response;
+          }
+          let renewed: string | null = null;
+          if (kind === 'auth') renewed = await refreshSleepyToken().catch(() => null);
+          const decision = retryBudget.take(kind, retryMessage({ kind, status: response.status, detail: response.statusText || 'Server error', recovered: Boolean(renewed) }));
+          // Budget spent: surface the response exactly as the gateway sent it, so
+          // the error card names the real status instead of a recovery message.
+          if (!decision) return response;
+          this.log('warn', `run.retry.${decision.kind}`, `conversation=${conversationId}; status=${response.status}; attempt=${decision.attempt}/${decision.max}; renewed=${Boolean(renewed)}`);
+          options.onRetry?.(decision);
+          if (renewed) withAuthorization(renewed);
+          await waitForRetry(decision.backoffMs, signal);
+        } catch (error) {
+          // A transport failure is transient by definition. An aborted run is not.
+          if (signal.aborted) throw error;
+          const decision = retryBudget.take('transient', retryMessage({ kind: 'transient', detail: errorMessage(error) }));
+          if (!decision) throw error;
+          this.log('warn', 'run.retry.transient', `conversation=${conversationId}; attempt=${decision.attempt}/${decision.max}; ${decision.message}`);
+          options.onRetry?.(decision);
+          await waitForRetry(decision.backoffMs, signal);
+        }
+      }
+    };
+  }
+
   private subagentModels(): SubagentModelMap {
     return this.context.globalState.get<SubagentModelMap>('sleepycode.subagentModels', {}) ?? {};
   }
@@ -7207,9 +7366,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * no metadata never fills it at all.
    *
    * An id that matches nothing deliberately does NOT borrow another model's window — not
-   * even the catalog's first entry. A window guessed too large turns a trimmed request
-   * into a hard `context_too_large` failure, so an unknown model keeps the conservative
-   * fallback budget instead.
+   * even the catalog's first entry. A window guessed too large turns a request into a hard
+   * `context_too_large` failure, so an unknown model keeps the conservative fallback
+   * budget instead — and learns the real one the first time a provider says so
+   * (`noteContextWindowFromError`), which is the only way a model whose catalog entry
+   * omits the window, or changes it per model behind a relay, ever gets a correct budget.
    */
   private getEffectiveModelInfo(providerId: string, configuredModel: string): { contextWindow?: number; maxOutputLimit?: number } {
     const providers = this.getProviders();
@@ -7227,13 +7388,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       ? this.lastSleepyModelPrices.find(item => item.modelId === modelId || item.name === modelId)
       : undefined;
     const resolved: { contextWindow?: number; maxOutputLimit?: number } = {};
-    const window = pickContextWindow(entry?.contextWindow, price?.contextWindow, modelId);
+    const window = pickContextWindow(entry?.contextWindow, price?.contextWindow, modelId, this.learnedContextWindows[modelId]);
     if (window.window) resolved.contextWindow = window.window;
     const maxOutputLimit = entry?.maxOutputLimit ?? price?.maxOutputLimit;
     if (maxOutputLimit && maxOutputLimit > 0) resolved.maxOutputLimit = maxOutputLimit;
     // A user override changes how this request is budgeted, which is the only
     // reason to offer the option at all.
     return modelOptions.applyOverrides(resolved, this.storedModelOptions()[modelId]);
+  }
+
+  /**
+   * Record the window a provider named when it rejected a request for size.
+   *
+   * Everything else about a model's window is either reported (trust it until it is
+   * contradicted) or guessed. This is neither: it is the endpoint itself saying what it
+   * holds. It is persisted per model so the next session starts with the right budget,
+   * and it is reported to the composer so the meter stops promising a number the
+   * requests do not use.
+   *
+   * A learned window outranks the catalog on purpose. SleepyAI is a relay in front of
+   * several vendors: its per-model number is right when it is right, but when a route
+   * quietly answers with a smaller model, the rejection is the only source that knows.
+   */
+  private noteContextWindowFromError(modelId: string, message: string | undefined, conversationId?: string): void {
+    if (!modelId) return;
+    const learned = contextWindowFromError(message);
+    if (!learned) return;
+    if (this.learnedContextWindows[modelId] === learned) return;
+    this.learnedContextWindows[modelId] = learned;
+    void this.context.globalState.update('sleepycode.contextWindows', { ...this.learnedContextWindows });
+    this.log('info', 'model.contextWindow.learned', `${modelId} -> ${learned}`);
+    this.post({
+      type: 'contextNotice',
+      conversationId: conversationId ?? this.activeProject()?.activeConversationId ?? '',
+      kind: 'trimmed',
+      text: `${modelId} holds ${Math.round(learned / 1_000)}k tokens. This conversation is budgeted against that from now on.`,
+    });
   }
 
   // Auto-compaction threshold logic lives in compaction-core.ts (shouldAutoCompact)

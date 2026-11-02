@@ -62,8 +62,14 @@ export function normalizeOverrides(stored: unknown): OverrideStore {
 /**
  * Apply overrides to the limits discovered from the provider.
  *
- * An override only adjusts a limit that was actually discovered: inventing a
- * context window for a model that reports none would mis-budget every request.
+ * A chosen context window always applies, including for a model that reports none.
+ * That case is the whole point of the option: many compatibility endpoints — and a
+ * relay fronting several vendors — return no window at all, so the user is the only
+ * remaining source of a correct number. It is a decision, not a guess, so it is
+ * honoured where an invented default would be dangerously optimistic.
+ *
+ * The output limit only moves down from what the provider advertises: asking a model
+ * for more than its own limit makes strict providers reject the request.
  */
 export function applyOverrides(
   discovered: { contextWindow?: number; maxOutputLimit?: number },
@@ -72,7 +78,7 @@ export function applyOverrides(
   const applied = { ...discovered };
   const context = positiveInteger(overrides?.max_context);
   const output = positiveInteger(overrides?.max_output);
-  if (context && applied.contextWindow) applied.contextWindow = context;
+  if (context) applied.contextWindow = context;
   if (output && applied.maxOutputLimit) applied.maxOutputLimit = output;
   return applied;
 }
@@ -84,16 +90,16 @@ export function optionsFor(
 ): ModelOptionInfo[] {
   const list: ModelOptionInfo[] = [];
   const window = positiveInteger(overrides?.max_context) ?? positiveInteger(discovered.contextWindow);
-  if (window) {
-    list.push({
-      key: 'max_context',
-      label: 'Context window',
-      description: 'Tokens the model can see at once. Changes how a request is budgeted.',
-      type: 'select',
-      values: [...new Set([...CONTEXT_CHOICES, window])].sort((a, b) => a - b).map(String),
-      value: String(window),
-    });
-  }
+  // Always offered. A model that reports no window is exactly the one whose budget has
+  // to be set by hand, and this row is the only way to do it.
+  list.push({
+    key: 'max_context',
+    label: 'Context window',
+    description: 'Tokens the model can see at once. Changes how a request is budgeted.',
+    type: 'select',
+    values: [...new Set([...CONTEXT_CHOICES, ...(window ? [window] : [])])].sort((a, b) => a - b).map(String),
+    value: window ? String(window) : '',
+  });
   const output = positiveInteger(overrides?.max_output) ?? positiveInteger(discovered.maxOutputLimit);
   if (output) {
     list.push({

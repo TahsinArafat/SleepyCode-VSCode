@@ -38,8 +38,11 @@ test('summarizeFileOperations ignores non-task work and empty input', () => {
   assert.equal(summary, '');
 });
 
-test('the structured history budget leaves room under the compaction threshold', () => {
-  // Budget must be a real positive number and comfortably below default windows.
+test('the unknown-window budget is a full default window, not a token 60k', () => {
+  // Nothing trims any more, so a too-small guess no longer protects anything: it just
+  // compacts conversations the model could hold in full. The guess is now the default
+  // window less the system prompt and the answer's reserve.
   assert.ok(STRUCTURED_HISTORY_BUDGET_TOKENS > 0);
-  assert.ok(STRUCTURED_HISTORY_BUDGET_TOKENS < 128_000);
+  assert.ok(STRUCTURED_HISTORY_BUDGET_TOKENS < 128_000, 'it still reserves room for prompt and answer');
+  assert.ok(STRUCTURED_HISTORY_BUDGET_TOKENS > 60_000, 'the old 60k cliff is gone');
 });

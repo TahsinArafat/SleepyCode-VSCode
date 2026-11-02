@@ -4,11 +4,10 @@ import {
   appendConversationMessages,
   dropOrphanedToolCalls,
   iterationRequestMessages,
-  nextTurnStart,
   pausedByStepLimit,
+  prepareStructuredHistory,
   recoverPendingHistory,
   safeHistoryStart,
-  selectStructuredHistory,
 } from '../src/iteration-core.ts';
 
 test('max-step pause only triggers when a bounded tool loop stops on tool calls at the limit', () => {
@@ -78,8 +77,7 @@ test('recoverPendingHistory folds a mid-stream partial answer that never reached
   assert.deepEqual(recoverPendingHistory(undefined, stored, 400)?.map(message => message.content), ['go', 'done so far']);
 });
 
-test('selectStructuredHistory never starts on a tool result and cuts only at user turns', () => {
-  const estimate = message => Math.ceil(String(message.content ?? '').length / 4);
+test('prepareStructuredHistory starts on a user turn and keeps every turn', () => {
   const stored = [
     { role: 'tool', content: 'orphan result' },
     { role: 'user', content: 'first' },
@@ -88,16 +86,20 @@ test('selectStructuredHistory never starts on a tool result and cuts only at use
     { role: 'assistant', content: 'tooling', toolCalls: [{ id: 't1' }] },
     { role: 'tool', content: 'big result '.repeat(40) },
   ];
-  const selected = selectStructuredHistory(stored, 20, estimate);
-  assert.equal(selected[0]?.role, 'user');
-  assert.equal(selected[0]?.content, stored[3]?.content);
-  assert.ok(selected.some(message => message.role === 'tool'), 'tool results stay attached to their turn');
-  assert.ok(selected.length >= 3, 'an oversized newest turn is kept instead of dropping all context');
-  assert.equal(selectStructuredHistory([], 100, estimate).length, 0);
-  assert.equal(selectStructuredHistory([{ role: 'assistant', content: 'no user' }], 100, estimate).length, 0);
+  const prepared = prepareStructuredHistory(stored);
+  assert.equal(prepared[0]?.role, 'user');
+  assert.equal(prepared[0]?.content, stored[1]?.content);
+  // Nothing is dropped for being large: the same turns, minus the leading orphan.
+  assert.equal(prepared.length, stored.length - 1);
+  assert.ok(prepared.some(message => message.role === 'tool'), 'tool results stay attached to their turn');
+  assert.equal(prepareStructuredHistory([]).length, 0);
+  assert.equal(prepareStructuredHistory(undefined).length, 0);
+  // A history with no user turn at all has no safe cut point, so it is sent whole
+  // rather than invented.
+  assert.equal(prepareStructuredHistory([{ role: 'assistant', content: 'no user' }]).length, 1);
 });
 
-test('safeHistoryStart and nextTurnStart only cut at user-owned boundaries', () => {
+test('safeHistoryStart only cuts at user-owned boundaries', () => {
   const messages = [
     { role: 'assistant', content: 'lead' },
     { role: 'user', content: 'ask' },
@@ -107,8 +109,6 @@ test('safeHistoryStart and nextTurnStart only cut at user-owned boundaries', () 
   ];
   assert.equal(safeHistoryStart(messages, 3), 1);
   assert.equal(safeHistoryStart(messages, 0), 0);
-  assert.equal(nextTurnStart(messages, 2), 4);
-  assert.equal(nextTurnStart(messages, 5), 5);
 });
 
 test('appendConversationMessages keeps the newest context under the hard bound', () => {
@@ -119,12 +119,19 @@ test('appendConversationMessages keeps the newest context under the hard bound',
   const produced = [
     { role: 'assistant', content: 'new-answer' },
   ];
-  const next = appendConversationMessages(existing, 'new', produced, 3);
-  assert.deepEqual(next, [
+  const { messages, dropped } = appendConversationMessages(existing, 'new', produced, 3);
+  assert.deepEqual(messages, [
     { role: 'assistant', content: 'old-answer' },
     { role: 'user', content: 'new' },
     { role: 'assistant', content: 'new-answer' },
   ]);
+  // The cut is reported, because it is context the model loses.
+  assert.equal(dropped, 1);
+});
+
+test('a turn that fits the bound reports no drop', () => {
+  const { dropped } = appendConversationMessages([{ role: 'user', content: 'a' }], 'b', [{ role: 'assistant', content: 'c' }], 400);
+  assert.equal(dropped, 0);
 });
 
 test('appendConversationMessages does not insert a second user turn on resume', () => {
@@ -134,7 +141,7 @@ test('appendConversationMessages does not insert a second user turn on resume', 
     { role: 'tool', content: 'file contents' },
   ];
   const produced = [{ role: 'assistant', content: 'finished the remaining work' }];
-  const next = appendConversationMessages(existing, 'implement undo', produced, 400, true);
+  const { messages: next } = appendConversationMessages(existing, 'implement undo', produced, 400, true);
   assert.deepEqual(next.map(message => message.role), ['user', 'assistant', 'tool', 'assistant']);
   assert.equal(next.filter(message => message.role === 'user').length, 1);
   assert.equal(next.at(-1)?.content, 'finished the remaining work');
@@ -226,13 +233,13 @@ test('a repair that leaves nothing to say removes the empty step', () => {
 
 test('a stopped turn persists a history the next request can send', () => {
   // End to end: append a turn that was cut off mid-tool, then select it.
-  const stored = appendConversationMessages(
+  const { messages: stored } = appendConversationMessages(
     [{ role: 'user', content: 'earlier' }, { role: 'assistant', content: 'answer' }],
     'now do this',
     [{ role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c9', toolName: 'write_file', input: {} }] }],
     400,
   );
-  const selected = selectStructuredHistory(stored, 100_000, message => String(message.content ?? '').length);
+  const selected = prepareStructuredHistory(stored);
   assert.ok(selected.length >= 2);
   const calls = selected.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(part => part.type === 'tool-call');
   assert.deepEqual(calls, [], 'no unanswered tool call may reach the provider');

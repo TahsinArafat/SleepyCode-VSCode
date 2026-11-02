@@ -13,21 +13,23 @@ function retryLoopSource() {
   return agent.slice(start, end);
 }
 
+/** The one request layer every provider gets, as source text. */
 function fetchLayerSource() {
-  const start = agent.indexOf('fetch: async (input, init) =>');
+  const start = agent.indexOf('private resilientProviderFetch(');
   assert.ok(start > 0, 'request layer not found');
-  return agent.slice(start, start + 5_000);
+  return agent.slice(start, start + 6_000);
 }
 
-test('a retry attempt starts from an empty message accumulator', () => {
-  // The loop restarts the stream from baseStreamPrompt each attempt. Carrying the
-  // previous attempt's messages re-stacked the whole turn onto structured history on
-  // every retry until the request overflowed the context window.
+test('a retry attempt keeps the tool results it already produced', () => {
+  // `runMessages` is the turn's live slice: the tool calls and results this attempt
+  // already produced. Clearing it meant a retried turn re-read every file it had
+  // already read. It cannot stack onto the stored history either, because each attempt
+  // sends `iterationRequestMessages(history, runMessages, …)` and runMessages is
+  // appended to the conversation once, when the turn settles.
   const loop = retryLoopSource();
-  const resetAt = loop.indexOf('runMessages = [];');
-  assert.ok(resetAt >= 0, 'runMessages must be reset per attempt');
-  const resumeAt = loop.indexOf('retryBudget.take(');
-  assert.ok(resumeAt > resetAt, 'the reset must happen inside the loop, before the retry resumes');
+  assert.doesNotMatch(loop, /runMessages = \[\];/, 'the live slice must survive a retry');
+  assert.match(loop, /iterationRequestMessages\(history, runMessages, streamPrompt\)/);
+  assert.match(agent, /let runMessages: ModelMessage\[\] = \[\];/, 'it starts empty once per turn');
 });
 
 test('the SDK does not retry behind the run loop’s classification gate', () => {
@@ -40,8 +42,11 @@ test('the SDK does not retry behind the run loop’s classification gate', () =>
 });
 
 test('one retry budget is created per turn and both layers draw from it', () => {
+  // Two callers create one each: the run loop (per turn) and the compaction
+  // summarizer (per summary). Neither the request layer nor the loop creates a
+  // second one for its own kind of failure.
   const created = agent.match(/createRetryBudget\(\)/g) ?? [];
-  assert.equal(created.length, 1, 'exactly one budget is created per turn, not one per layer or per kind');
+  assert.equal(created.length, 2, 'one budget for the turn, one for the summarizer call');
   const loop = retryLoopSource();
   const layer = fetchLayerSource();
   for (const [name, source] of [['run loop', loop], ['request layer', layer]]) {

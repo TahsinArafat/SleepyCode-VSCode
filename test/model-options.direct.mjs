@@ -13,11 +13,15 @@ test('an override replaces the discovered context window', () => {
   assert.equal(applied.maxOutputLimit, 8_000);
 });
 
-test('an override only raises or lowers the window; it never invents one', () => {
+test('a chosen window applies even when the provider reported none', () => {
   const applied = opts.applyOverrides({}, { max_context: 200_000 });
-  // Nothing was discovered, so there is nothing to override: guessing a window
-  // would mis-budget every request.
-  assert.equal(applied.contextWindow, undefined);
+  // Many compatible endpoints report no window at all, and a relay fronting several
+  // vendors cannot describe them. The user's choice is the only correct number left,
+  // and it is a decision rather than a guess, so it is used.
+  assert.equal(applied.contextWindow, 200_000);
+  // An output limit still cannot be invented: asking for more than the provider
+  // advertises makes strict providers reject the request.
+  assert.equal(opts.applyOverrides({}, { max_output: 8_000 }).maxOutputLimit, undefined);
 });
 
 test('a zero or negative override is ignored', () => {
@@ -50,8 +54,14 @@ test('an overridden value shows as the current selection', () => {
   assert.equal(list[0].value, '200000');
 });
 
-test('a model with no known limits gets no options, not empty ones', () => {
-  assert.deepEqual(opts.optionsFor({}, {}), []);
+test('a model with no known window still offers the control that sets one', () => {
+  const list = opts.optionsFor({}, {});
+  assert.deepEqual(list.map(o => o.key), ['max_context']);
+  // No current value, but every choice is there to pick from.
+  assert.equal(list[0].value, '');
+  assert.ok(list[0].values.includes('128000'));
+  // Nothing to raise for an output limit nobody advertised, so no row either.
+  assert.ok(!list.some(o => o.key === 'max_output'));
 });
 
 test('resetting removes only that model', () => {

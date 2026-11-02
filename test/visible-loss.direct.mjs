@@ -2,22 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { assertSource } from './source-assert.mjs';
-import { droppedMessageCount } from '../src/iteration-core.ts';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
 const runtime = readFileSync(new URL('../src/webview/runtime.ts', import.meta.url), 'utf8');
 
-test('droppedMessageCount reports how much context a cut removed', () => {
-  assert.equal(droppedMessageCount([{ role: 'user' }, { role: 'assistant' }], [{ role: 'assistant' }]), 1);
-  assert.equal(droppedMessageCount([{ role: 'user' }], [{ role: 'user' }]), 0);
-  assert.equal(droppedMessageCount(undefined, []), 0);
-  assert.equal(droppedMessageCount([], []), 0);
-});
-
-test('a history cut is announced instead of silently narrowing the window', () => {
-  // Silently trimming is what makes a long conversation read as the agent forgetting.
-  assert.match(agent, /droppedMessageCount\(conversation\.messages, selected\)/);
-  assert.match(agent, /type: 'contextNotice'[\s\S]{0,320}still saved in this conversation/);
+test('a conversation is never shrunk by cutting messages out of the request', () => {
+  // Cutting stored messages to fit a budget is the loss itself: the model repeats work
+  // it already did, or edits a file it can no longer see, and the transcript on screen
+  // stops matching what it was told. Compaction is the only reducer.
+  assert.doesNotMatch(agent, /droppedMessageCount/);
+  assert.doesNotMatch(agent, /left this request to stay within/);
+  assert.match(agent, /await this\.compactForRun\(conversation, 'stored history exceeds the window'\)/);
 });
 
 test('a deliberate stop is not reported as a failure', () => {

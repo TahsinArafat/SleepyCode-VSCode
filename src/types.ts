@@ -469,8 +469,18 @@ export type { ProjectIntelligence };
 
 export const MAX_FILE_BYTES = 250_000;
 export const MAX_TOOL_OUTPUT = 40_000;
-/** Hard cap on the structured model history persisted per conversation. */
-export const MAX_STORED_MESSAGES = 400;
+/**
+ * Hard memory guard on the structured model history persisted per conversation.
+ *
+ * A count bound is not a budget: a message is one assistant tool-call plus one tool
+ * result, so the old 400 was ~200 tool steps — a single long agentic turn at the
+ * default 200-step limit could reach it by itself and silently lose its own earlier
+ * results. Compaction is what keeps a conversation small (it fires on the model's
+ * token window, far below this count), and this only stops a pathological
+ * conversation from growing without bound. Bounded tighter than MAX_STORED_ITEMS
+ * because a message carries tool payloads and an item carries the display text.
+ */
+export const MAX_STORED_MESSAGES = 1_000;
 /** @deprecated Use DEFAULT_PERSISTED_REASONING from reasoning-core. Kept as the raised default. */
 export const MAX_PERSISTED_REASONING = 32_000;
 /** Hard memory guard only — history is not routinely trimmed at this size. */
