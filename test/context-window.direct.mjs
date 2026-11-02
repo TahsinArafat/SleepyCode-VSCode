@@ -10,6 +10,7 @@ import {
 import {
   DEFAULT_CONTEXT_WINDOW,
   STRUCTURED_HISTORY_BUDGET_TOKENS,
+  estimateHistoryTokens,
   estimateMessageTokens,
   shouldAutoCompact,
   structuredHistoryBudget,
@@ -160,4 +161,28 @@ test('a 200k model with a 32k output limit no longer drops anything at 167k', ()
   // The budget is now only a compaction trigger. Compaction fires before the window
   // fills, and it leaves a summary; it never removes a message from the request.
   assert.equal(shouldAutoCompact(0, window, budget, budget), true, 'reaching the budget triggers a summary');
+});
+
+test('a 200k model with a 32k output limit no longer cuts at 167k', () => {
+  // The reported symptom: "every request after almost 167k context window starts
+  // message dropping". 166_500 is exactly 200_000 - 1_500 overhead - 32_000 output
+  // reserve, so the drop point was the send budget, not anything the model said.
+  const window = 200_000;
+  const outputLimit = 32_000;
+  const budget = structuredHistoryBudget(window, outputLimit);
+  assert.equal(budget, 166_500);
+
+  const page = 'x'.repeat(4_000);
+  const messages = [];
+  while (estimateHistoryTokens(messages, estimateMessageTokens) <= budget) {
+    messages.push({ role: messages.length % 2 ? 'assistant' : 'user', content: page });
+  }
+  assert.ok(estimateHistoryTokens(messages, estimateMessageTokens) > budget, 'the fixture exceeds the old cut line');
+
+  // Sent whole. The budget is a compaction trigger now, never a cut: it decides when
+  // to summarize, not what to leave out of the request.
+  assert.equal(prepareStructuredHistory(messages).length, messages.length);
+  // And reaching that budget does trigger a summary, so the conversation still shrinks
+  // — with a summary the user can read and undo, not by silently forgetting.
+  assert.equal(shouldAutoCompact(0, window, budget, budget), true);
 });
