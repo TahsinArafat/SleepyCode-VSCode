@@ -20,7 +20,7 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
-import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS, MAX_STORED_MESSAGES } from './types';
+import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
@@ -28,7 +28,7 @@ import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessa
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
 import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
-import { AUTO_COMPACT_BUDGET_RATIO, AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, COMPACTION_PROMPT_MAX_CHARS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
+import { AUTO_COMPACT_BUDGET_RATIO, AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, COMPACTION_PROMPT_MAX_CHARS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, storedMessageLimit, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
 import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, prepareStructuredHistory, recoverPendingHistory } from './iteration-core';
 import { contextWindowFromError, pickContextWindow } from './context-window-core';
 import { contextPressure } from './context-guard';
@@ -2507,7 +2507,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           // into the structured history so the next message keeps that work, then
           // mark the turn as interrupted so the user knows it did not finish.
           const pending = conversation.pending;
-          conversation.messages = recoverPendingHistory(conversation.messages, pending, MAX_STORED_MESSAGES);
+          // The limit is per model, and the catalog may not be resolved this early; the
+          // floor it falls back to is still far above a conversation that has been
+          // compacting on its token budget.
+          conversation.messages = recoverPendingHistory(conversation.messages, pending, this.storedMessageLimitFor(conversation));
           if (pending) {
             const last = items[items.length - 1];
             const alreadyShown = last?.role === 'assistant' && (last.kind === 'error' || last.paused);
@@ -2718,20 +2721,36 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * user turn that produced them. The count bound is a memory guard; when it discards
    * anything, that is context loss and it is said out loud rather than cut silently.
    */
+  /**
+   * How many stored messages this conversation's model may accumulate.
+   *
+   * Derived from the model's window rather than fixed, because a fixed count is a wall
+   * at a token size that has nothing to do with what the model can hold: the old 400
+   * bit at ~167k tokens, so a 1M-window model lost history at a sixth of its capacity.
+   * Falling back to the floor when the window is not resolved yet is safe — the guard
+   * then only risks being low, and it no longer discards anything without saying so.
+   */
+  private storedMessageLimitFor(conversation: Conversation): number {
+    const selection = this.selectionFor(conversation);
+    const info = this.getEffectiveModelInfo(selection.provider, selection.model);
+    return storedMessageLimit(info.contextWindow, info.maxOutputLimit);
+  }
+
   private appendConversationMessages(conversation: Conversation, userText: string, produced: ModelMessage[], reuseUser = false): void {
-    const { messages, dropped } = appendConversationMessages(conversation.messages, userText, produced, MAX_STORED_MESSAGES, reuseUser);
+    const limit = this.storedMessageLimitFor(conversation);
+    const { messages, dropped } = appendConversationMessages(conversation.messages, userText, produced, limit, reuseUser);
     conversation.messages = messages;
     if (dropped <= 0) return;
     // Reported here, recovered at the run's end: compaction must not run while this
     // turn is still committing, so `maybeAutoCompact` fires it once the run is gone.
     if (this.historyBoundNoticed.has(conversation.id)) return;
     this.historyBoundNoticed.add(conversation.id);
-    this.log('warn', 'conversation.history.bound', `${conversation.id}: dropped ${dropped} messages at the ${MAX_STORED_MESSAGES}-message guard`);
+    this.log('warn', 'conversation.history.bound', `${conversation.id}: dropped ${dropped} messages at the ${limit}-message guard`);
     this.post({
       type: 'contextNotice',
       conversationId: conversation.id,
       kind: 'trimmed',
-      text: `${dropped} of the oldest message${dropped === 1 ? '' : 's'} left this conversation's model history (limit ${MAX_STORED_MESSAGES.toLocaleString()}). It is being summarized so the conversation keeps its context.`,
+      text: `${dropped} of the oldest message${dropped === 1 ? '' : 's'} left this conversation's model history (limit ${limit.toLocaleString()}). It is being summarized so the conversation keeps its context.`,
     });
   }
 
@@ -6103,7 +6122,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // tool steps reaches it long before a small window's token budget does. Reaching it
     // already forced a cut, so summarize here — from the full transcript — instead of
     // letting the conversation sit at the guard and lose more on every turn.
-    const atCountGuard = (conversation.messages?.length ?? 0) >= MAX_STORED_MESSAGES;
+    const atCountGuard = (conversation.messages?.length ?? 0) >= storedMessageLimit(modelInfo.contextWindow, modelInfo.maxOutputLimit);
     if (!atCountGuard && !shouldAutoCompact(contextTokens, modelInfo.contextWindow, historyTokens, budgetTokens)) return;
     const now = Date.now();
     if (now - (this.lastAutoCompactAt.get(conversation.id) ?? 0) < 120_000) return;

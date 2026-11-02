@@ -6,10 +6,14 @@ import {
   CONTEXT_SYSTEM_OVERHEAD_TOKENS,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_RESPONSE_RESERVE_TOKENS,
+  ASSUMED_MIN_TOKENS_PER_MESSAGE,
+  MAX_STORED_MESSAGES,
+  MIN_STORED_MESSAGES,
   MIN_STRUCTURED_HISTORY_BUDGET,
   STRUCTURED_HISTORY_BUDGET_TOKENS,
   estimateHistoryTokens,
   shouldAutoCompact,
+  storedMessageLimit,
   structuredHistoryBudget,
 } from '../src/compaction-core.ts';
 
@@ -73,4 +77,31 @@ test('estimateHistoryTokens sums every message including tool payloads', () => {
   assert.equal(estimateHistoryTokens(messages, estimate), 4 + 102);
   assert.equal(estimateHistoryTokens(undefined, estimate), 0);
   assert.equal(estimateHistoryTokens([], estimate), 0);
+});
+
+test('the stored-message guard scales with the model, not with a constant', () => {
+  // The reported symptom on a 1M-window model: history lost at ~167k tokens, a sixth
+  // of what that model holds. 400 messages is ~167k tokens of tool-heavy conversation
+  // whatever the window, so the wall was the count — the same one for every model.
+  assert.equal(MIN_STORED_MESSAGES, 1_000);
+  assert.equal(MAX_STORED_MESSAGES, 10_000);
+
+  // A small model keeps the floor; the count can never be the first thing to bite,
+  // because token compaction fires far below it.
+  assert.equal(storedMessageLimit(128_000), MIN_STORED_MESSAGES);
+  assert.equal(storedMessageLimit(200_000, 32_000), MIN_STORED_MESSAGES);
+  // A large window gets room proportional to it.
+  const big = storedMessageLimit(1_000_000, 32_000);
+  assert.ok(big > 4_000, `1M window guard ${big}`);
+  assert.equal(big, 4_833, 'a 1M window keeps every message its budget could hold');
+  assert.ok(big <= MAX_STORED_MESSAGES);
+  // Whatever the window, the guard sits above the messages the token budget can hold,
+  // so compaction always gets to run first.
+  for (const window of [128_000, 200_000, 400_000, 1_000_000, 2_000_000]) {
+    const budget = structuredHistoryBudget(window, 32_000);
+    assert.ok(storedMessageLimit(window, 32_000) * ASSUMED_MIN_TOKENS_PER_MESSAGE >= budget,
+      `guard for ${window} must not bind before its own budget`);
+  }
+  // An unresolved window is still a usable guard, not zero.
+  assert.equal(storedMessageLimit(undefined), MIN_STORED_MESSAGES);
 });

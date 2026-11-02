@@ -468,7 +468,10 @@ test('error item preserves partial streamed text for retry continuation', () => 
 test('structured model history persists across turns instead of flattening to text', () => {
   // Conversation stores the real model-visible message array alongside display items.
   assert.match(types, /messages\?: ModelMessage\[\]/);
-  assert.match(types, /export const MAX_STORED_MESSAGES/);
+  // The stored-history guard is per model, not a constant: a fixed count is a wall at
+  // a token size that has nothing to do with what the model can hold.
+  assert.doesNotMatch(types, /export const MAX_STORED_MESSAGES/);
+  assert.match(read('src/compaction-core.ts'), /export function storedMessageLimit\(/);
   // The run seeds the provider with real messages when structured history exists,
   // including the live tool-call slice of the current iteration — in full. Neither
   // the stored history nor the live slice is shrunk to fit: a request with its older
@@ -533,7 +536,7 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   assert.match(agent, /conversation\.pending = undefined;/);
   // A reload/crash recovers the pending turn into structured history on load.
   assert.match(agent, /const pending = conversation\.pending;/);
-  assert.match(agent, /recoverPendingHistory\(conversation\.messages, pending, MAX_STORED_MESSAGES\)/);
+  assert.match(agent, /recoverPendingHistory\(conversation\.messages, pending, this\.storedMessageLimitFor\(conversation\)\)/);
   // Exactly one declaration, in the outer run scope so catch/finally can reach it.
   assert.equal((agent.match(/let runMessages: ModelMessage\[\] = \[\];/g) || []).length, 1);
   // A mid-run checkpoint writes only the project that owns the dirty conversation.

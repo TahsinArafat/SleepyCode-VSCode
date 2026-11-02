@@ -102,6 +102,20 @@ export const DEFAULT_RESPONSE_RESERVE_TOKENS = 16_000;
 /** Floor for the structured-history budget on tiny windows. */
 export const MIN_STRUCTURED_HISTORY_BUDGET = 8_000;
 
+/** Floor for the stored-message guard: a small model still keeps a real conversation. */
+export const MIN_STORED_MESSAGES = 1_000;
+
+/**
+ * Ceiling for the stored-message guard.
+ *
+ * `storedMessageLimit` derives the guard from the window, so a 1M-window model asks for
+ * ~4,800 messages and a 2M one for ~9,800. This caps what is persisted regardless,
+ * because the guard protects VS Code's globalState as much as it protects a request. It
+ * is set above what the largest realistic window needs, so for every real model the
+ * derived value governs and token compaction still fires first.
+ */
+export const MAX_STORED_MESSAGES = 10_000;
+
 /**
  * Estimated tokens the next run would consume for the given transcript:
  * fixed system overhead plus a chars/4 estimate over the recent history window.
@@ -232,6 +246,39 @@ export function structuredHistoryBudget(
   const reserve = maxOutputLimit && maxOutputLimit > 0 ? maxOutputLimit : DEFAULT_RESPONSE_RESERVE_TOKENS;
   const budget = contextWindow - CONTEXT_SYSTEM_OVERHEAD_TOKENS - reserve;
   return Math.max(MIN_STRUCTURED_HISTORY_BUDGET, Math.floor(budget));
+}
+
+/**
+ * Smallest message this assumes when sizing the stored-history guard.
+ *
+ * It exists to convert a token budget into a message count, and a message here is one
+ * assistant tool-call plus one tool result — the pair a single tool step writes. 200 is
+ * deliberately below what any real step costs, so the derived count is above the number
+ * of messages the budget could hold, and the guard never binds before token-based
+ * compaction does.
+ */
+export const ASSUMED_MIN_TOKENS_PER_MESSAGE = 200;
+
+/**
+ * How many stored messages a conversation may keep, derived from its window.
+ *
+ * This used to be one number for every model, which is why a 1M-window model and a
+ * 200k-window model both started losing messages at the same ~167k tokens: the wall
+ * was the count, not the window. 400 messages is roughly 167k tokens of tool-heavy
+ * conversation whatever the model can hold, so the larger the window, the more wrong
+ * the fixed count was.
+ *
+ * The guard stays a guard — a bound on what is persisted, not a budget — so it is set
+ * above the messages the token budget could contain. Bytes stay bounded for the same
+ * reason the tokens are: reaching the count means the messages were small.
+ */
+export function storedMessageLimit(
+  contextWindow?: number | null,
+  maxOutputLimit?: number | null,
+): number {
+  const budget = structuredHistoryBudget(contextWindow, maxOutputLimit);
+  const derived = Math.ceil(budget / ASSUMED_MIN_TOKENS_PER_MESSAGE);
+  return Math.max(MIN_STORED_MESSAGES, Math.min(MAX_STORED_MESSAGES, derived));
 }
 
 /** True when the estimated occupancy reaches the auto-compaction threshold.
