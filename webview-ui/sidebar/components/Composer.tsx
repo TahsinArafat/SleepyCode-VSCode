@@ -205,10 +205,16 @@ function newAttachId() {
   return `a_${Date.now()}_${attachCounter++}`;
 }
 
-const TEXT_EXT = /\.(txt|md|json|ya?ml|toml|csv|log|js|jsx|ts|tsx|py|java|c|cpp|h|hpp|cs|go|rs|rb|php|html|css|scss|sh|xml|sql)$/i;
+const TEXT_EXT = /\.(txt|md|json|ya?ml|toml|csv|log|js|jsx|ts|tsx|py|java|c|cpp|h|hpp|cs|go|rs|rb|php|html|css|scss|sh|xml|sql|swift|kt|kts|m|mm|scala|lua|pl|pm|hs|ex|exs|erl|vue|svelte|dart|zig|r|R|jl|clj|cljs|fs|fsx|v|sv|vhd|vhdl|ml|mli|nim|cr|groovy|gradle|ps1|psm1|bat|cmd|fish|zsh|bash|conf|ini|cfg|env|dockerfile|makefile|cmake|proto|graphql|gql|tf|hcl|pug|jade|ejs|hbs|mustache|liquid|twig|astro|mdx|rst|tex|bib|sty|cls|dtd|xsd|xsl|wasm|wat|s|asm)$/i;
+
+const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20 MB
 
 function fileToAttachment(file: File): Promise<Attachment | null> {
   return new Promise((resolve) => {
+    if (file.size > MAX_ATTACHMENT_SIZE) {
+      resolve(null);
+      return;
+    }
     const isImage = file.type.startsWith("image/");
     const isText = !isImage && (file.type.startsWith("text/") || TEXT_EXT.test(file.name));
     if (!isImage && !isText) {
@@ -221,7 +227,7 @@ function fileToAttachment(file: File): Promise<Attachment | null> {
         id: newAttachId(),
         name: file.name || (isImage ? "pasted-image.png" : "file.txt"),
         mime: file.type || (isImage ? "image/png" : "text/plain"),
-        data: String(reader.result || ""),
+        data: typeof reader.result === "string" ? reader.result : "",
         kind: isImage ? "image" : "text",
       });
     };
@@ -1498,15 +1504,18 @@ export function Composer({
   const handleMentionKeys = (e: React.KeyboardEvent): boolean => {
     if (!mentionOpenRef.current) return false;
     if (e.nativeEvent.isComposing || e.keyCode === 229) return false;
+    // Read from refs so event handlers always see the latest values,
+    // even when React hasn't flushed a batched state update yet.
+    const cat = mentionCatRef.current;
     // Top-level: quick file hits (max 3) then category rows.
-    const quick = mentionCat === null ? Math.min(3, mentionItems.length) : 0;
-    const count = mentionCat === null ? quick + filteredCats.length : mentionItems.length;
+    const quick = cat === null ? Math.min(3, mentionItems.length) : 0;
+    const count = cat === null ? quick + filteredCats.length : mentionItems.length;
     if (count) {
       if (e.key === "ArrowDown") { setIndex((mentionIndexRef.current + 1) % count); return true; }
       if (e.key === "ArrowUp") { setIndex((mentionIndexRef.current - 1 + count) % count); return true; }
       if (e.key === "Enter" || e.key === "Tab") {
         const i = mentionIndexRef.current;
-        if (mentionCat === null) {
+        if (cat === null) {
           if (i < quick) pickMention(mentionItems[i]);
           else pickCategory(filteredCats[i - quick].id);
         } else {
@@ -1515,8 +1524,8 @@ export function Composer({
         return true;
       }
     }
-    if (e.key === "Escape" || (e.key === "Backspace" && mentionCat !== null && !mentionQuery)) {
-      if (mentionCat !== null) {
+    if (e.key === "Escape" || (e.key === "Backspace" && cat !== null && !mentionQueryRef.current)) {
+      if (cat !== null) {
         // Back out to the category menu.
         setCat(null);
         setMentionItems([]);
@@ -1728,8 +1737,11 @@ export function Composer({
       setDragOver(false);
       const dt = e.dataTransfer;
       if (!dt) return;
+      // Binary files (images, etc.) → attach; skip URI/path parsing for the
+      // same drop so the file isn't double-inserted as an attachment AND a pill.
       if (dt.files.length) {
         addFiles(dt.files);
+        return;
       }
       const raws = [
         dt.getData("text/uri-list"),
@@ -1744,9 +1756,17 @@ export function Composer({
           const name = p.split(/[\\/]/).pop() || p;
           insertMention({ path: p, name, kind: "file" });
         }
-      } else if (!dt.files.length) {
+      } else {
         const plain = dt.getData("text/plain");
-        if (plain) insertTextAtCaret(plain);
+        if (plain) {
+          // Match paste-handler behaviour: bare URLs become @Link pills.
+          const t = plain.trim();
+          if (/^https?:\/\/\S+$/.test(t) && !t.includes("\n")) {
+            insertMention({ kind: "link", path: t, name: t.replace(/^https?:\/\//, "").replace(/\/$/, "") });
+          } else {
+            insertTextAtCaret(plain);
+          }
+        }
       }
     };
     const over = (e: DragEvent) => {
@@ -1953,7 +1973,7 @@ export function Composer({
   // only possible via an explicit click on the stop button.
   const submit = () => {
     const text = serialize();
-    if (!text && attachments.length === 0) {
+    if (!text.trim() && attachments.length === 0) {
       // Empty editor + queued messages: fire the next queued one immediately
       // (replaces the current run if one is in flight).
       if ((queuedCount ?? 0) > 0) onRunNextQueued?.();
@@ -2147,7 +2167,19 @@ export function Composer({
               .filter((it) => it.kind === "file")
               .map((it) => it.getAsFile())
               .filter((f): f is File => !!f);
-            if (files.length) {
+            // Only treat as file attachment when at least one file is a
+            // genuine media/binary type (image, video, audio, pdf, …).
+            // Browsers often include text-flavoured "file" items
+            // (text/uri-list, text/html) when copying a URL — those should
+            // fall through to the text-paste path instead of becoming a
+            // broken attachment. Similarly, application/json and friends are
+            // text-like despite not starting with "text/".
+            const isTextLikeMime = (type: string) =>
+              type.startsWith("text/") || /^application\/(json|javascript|xml|ya?ml|x-ya?ml|typescript|x-sh)/.test(type);
+            const hasMediaFile = files.some(
+              (f) => f.type && !isTextLikeMime(f.type),
+            );
+            if (files.length && hasMediaFile) {
               e.preventDefault();
               addFiles(files);
               return;
@@ -2172,8 +2204,19 @@ export function Composer({
             // Ask the host to locate the text; insert on reply (fast round-trip).
             if (!plain && t.includes("\n") && !/^(?: {0,3}(?:#{1,6} |`{3,}|~{3,}|[-*+] |>|\d+\. ))/m.test(t) && getCodeLanguage(t).id !== "plaintext") {
               const id = ++mentionReqId;
+              // If a previous paste was still waiting for a host reply, insert it
+              // as plain text so the user's content is never silently swallowed.
+              if (pastePendingRef.current) insertTextAtCaret(pastePendingRef.current.text);
               pastePendingRef.current = { id, text };
               post({ type: "resolvePastedCode", text: t, requestId: id });
+              // Safety net: if the host never replies (crash, reload, lost message),
+              // fall back to plain-text insertion after 2 seconds.
+              setTimeout(() => {
+                if (pastePendingRef.current?.id === id) {
+                  pastePendingRef.current = null;
+                  insertTextAtCaret(text, !plain);
+                }
+              }, 2000);
               return;
             }
             insertTextAtCaret(text, !plain);

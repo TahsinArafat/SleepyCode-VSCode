@@ -43,6 +43,7 @@ const webviewOptions = {
   sourcesContent: false,
   sourcemap: !watch,
   minify: !watch,
+  treeShaking: true,
 };
 
 if (watch) {

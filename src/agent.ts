@@ -384,6 +384,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Minimum gap between coalesced mid-run checkpoint writes. */
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
+  private webviewVisible = true;
   private reactMode = false;
   /** Conversations whose React transcript is live-streaming (see `post`). */
   private readonly reactStreaming = new Set<string>();
@@ -508,21 +509,35 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (cached) void cached.close().catch(() => { });
   }
 
+  private editorContextTimer: ReturnType<typeof setTimeout> | undefined;
+  private sendEditorContextDebounced(): void {
+    if (this.editorContextTimer || !this.webviewVisible) return;
+    this.editorContextTimer = setTimeout(() => {
+      this.editorContextTimer = undefined;
+      if (this.webviewVisible) this.sendEditorContext();
+    }, 250);
+  }
+
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
     const onFsEvent = (uri: vscode.Uri): void => {
       this.fsVersion++;
       this.scheduleProjectReindex(uri);
     };
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+    // Narrow the watcher glob to source-like files. The handler already filters
+    // node_modules/dist/etc., but a broad '**/*' watcher still delivers thousands
+    // of events during npm install or builds, each incurring IPC from the file
+    // watcher process to the extension host. The RelativePattern approach is not
+    // supported for multi-root, so we use an explicit extension list instead.
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,rs,rb,java,c,cpp,h,hpp,cs,swift,kt,scala,vue,svelte,dart,lua,zig,json,yaml,yml,toml,md,mdx,html,css,scss,less,sql,graphql,proto,tf,sh,bash,zsh,fish,ps1,bat,makefile,dockerfile,xml,svg,conf,ini,cfg,env,lock}');
     context.subscriptions.push(
       watcher,
       watcher.onDidCreate(onFsEvent),
       watcher.onDidChange(onFsEvent),
       watcher.onDidDelete(onFsEvent),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.onWorkspaceFoldersChanged()),
-      vscode.window.onDidChangeActiveTextEditor(() => this.sendEditorContext()),
-      vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContext()),
+      vscode.window.onDidChangeActiveTextEditor(() => { if (this.webviewVisible) this.sendEditorContext(); }),
+      vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContextDebounced()),
     );
     this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
@@ -1013,6 +1028,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       });
     });
     view.onDidDispose(() => this.disposePendingNotifies());
+    view.onDidChangeVisibility(() => {
+      this.webviewVisible = view.visible;
+      // Flush latest editor context when the webview reappears so the
+      // file/selection indicator is current even though updates were paused.
+      if (view.visible) this.sendEditorContext();
+    });
     this.loaded = true;
     // loadProjects runs after the webview is live, so an escaped throw rendered an
     // empty chat with nothing in the UI to explain it. Keep whatever loaded.

@@ -653,13 +653,17 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
     () => ({ ...turn, blocks: collapsePlanBlocks(turn.blocks) }),
     [turn],
   );
-  const { activity, conclusion } = splitWork(collapsedTurn, running);
+  const { activity, conclusion } = React.useMemo(
+    () => splitWork(collapsedTurn, running),
+    [collapsedTurn, running],
+  );
+  const activityItems = React.useMemo(() => groupBlocks(activity), [activity]);
+  const conclusionItems = React.useMemo(() => (conclusion.length ? groupBlocks(conclusion) : []), [conclusion]);
   const forceOpen = turn.blocks.some(block => block.kind === "tool" && (
     !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
     block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")
   ));
-  const render = (blocks: AssistantBlock[], live: boolean) => {
-    const items = groupBlocks(blocks);
+  const renderItems = (items: RenderItem[], live: boolean) => {
     return items.map((block, index) => {
       if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
         live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
@@ -679,8 +683,8 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
     });
   };
   return <WorkingSection running={running} startedAt={turn.startedAt} endedAt={turn.endedAt} durationMs={turn.durationMs}
-    hasActivity={activity.length > 0} forceOpen={forceOpen} activity={render(activity, running)}
-    conclusion={conclusion.length ? render(conclusion, false) : undefined}
+    hasActivity={activity.length > 0} forceOpen={forceOpen} activity={renderItems(activityItems, running)}
+    conclusion={conclusionItems.length ? renderItems(conclusionItems, false) : undefined}
     status={phase ? <div className="phase-row"><ThinkingStatus text={phase} /></div> : undefined} />;
 });
 
@@ -1213,6 +1217,8 @@ export function App() {
   };
   const active = sessionFor(activeId);
   const turns = active.turns;
+  const turnsRef = React.useRef(turns);
+  turnsRef.current = turns;
   const isRunning = active.running;
   const status = active.status;
   // The host supplies a fresh transcript whenever a conversation is selected.
@@ -1388,8 +1394,9 @@ export function App() {
 
   // Keep the view anchored as content changes: pin a freshly sent message to the
   // top once, otherwise follow the bottom only while the user is already there.
-  // Runs after every render (streaming deltas); all scrolls are instant/idempotent
-  // so re-running is cheap and never fights itself.
+  // The core stick-to-bottom scroll is a pure assignment (el.scrollTop =
+  // el.scrollHeight) which is cheap when already at the bottom and bypasses the
+  // forced-layout reads that sizeSpacer triggers.
   React.useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1418,10 +1425,11 @@ export function App() {
         if (n-- > 0) requestAnimationFrame(snap);
       };
       requestAnimationFrame(snap);
+      return;
     }
-    sizeSpacer();
     if (pinTopRef.current) {
       pinTopRef.current = false;
+      sizeSpacer();
       // Autoscroll stays ON by default after a send: the pinned-to-top position
       // IS the scroll bottom (the spacer sizes it that way), so follow mode and
       // the pin agree. Only a manual scroll-up turns follow off.
@@ -1437,6 +1445,10 @@ export function App() {
       }
       return;
     }
+    // Fast path during streaming: just clamp scrollTop without reading layout
+    // metrics. sizeSpacer is already scheduled via the ResizeObserver and runs
+    // when the container actually resizes, so calling it on every delta was
+    // redundant and caused layout thrashing.
     if (stickRef.current) {
       selfScrollRef.current = true;
       el.scrollTop = el.scrollHeight; // instant; no-op when already at the bottom
@@ -2091,17 +2103,20 @@ export function App() {
     return m;
   }, [activeApprovals]);
   // Nested tool approvals → parent Task callId (shown on the subagent card).
+  // Uses turnsRef so the O(n*m) scan only re-runs when approvals change, not on
+  // every streaming frame (turns changes every frame during streaming).
   const approvalsByTask = React.useMemo(() => {
     if (!activeApprovals.length) return NO_TASK_APPROVALS;
     const m: Record<string, ApprovalRequestInfo[]> = {};
     for (const r of activeApprovals) {
       if (!r.callId) continue;
-      const parent = parentTaskCallId(turns, r.callId);
+      const parent = parentTaskCallId(turnsRef.current, r.callId);
       if (!parent) continue;
       (m[parent] ??= []).push(r);
     }
     return m;
-  }, [activeApprovals, turns]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeApprovals]);
   const orphanApprovals = activeApprovals.filter((r) => !r.callId);
   /**
    * The question the run is currently blocked on, for the sticky card above the
@@ -2195,6 +2210,8 @@ export function App() {
   const onRetryResponse = useStableCallback((index: number) => retryResponse(index));
   const onDecideApproval = useStableCallback((id: string, approved: boolean) => decideApproval(activeIdRef.current ?? "", id, approved));
   const onPreviewImage = React.useCallback((images: Attachment[], id: string) => setImagePreview({ images, activeId: id }), []);
+
+  const turnGroups = React.useMemo(() => groupTurns(turns), [turns]);
 
   return (
     <div className={"app" + (uiPrefs.chatTextSize !== "default" ? ` text-${uiPrefs.chatTextSize}` : "")}>
@@ -2353,13 +2370,13 @@ export function App() {
           onClose={() => setHistoryOpen(false)}
         />
       )}
-      {signInBanner(accountStatus).visible && (
+      {(() => { const banner = signInBanner(accountStatus); return banner.visible && (
         <div className="signin-banner" role="status">
           <Icon name="shieldWarning" size={13} />
-          <span>{signInBanner(accountStatus).text}</span>
-          <button className="btn-ghost" onClick={() => post({ type: "signIn" })}>{signInBanner(accountStatus).actionLabel}</button>
+          <span>{banner.text}</span>
+          <button className="btn-ghost" onClick={() => post({ type: "signIn" })}>{banner.actionLabel}</button>
         </div>
-      )}
+      ); })()}
       {activeId && goals[activeId] && <GoalBanner goal={goals[activeId]} onStatus={(status) => post({ type: "setGoalStatus", convId: activeId, status })} />}
       {workspaceRoot && <div className="worktree-banner" title={workspaceRoot}><Icon name="gitBranch" size={12} /><span>Isolated worktree · {workspaceRoot.split(/[\\/]/).pop()}</span><button className="btn-ghost" onClick={() => post({ type: "openMention", kind: "folder", path: workspaceRoot })}>Show folder</button></div>}
       {workflowDialog && <WorkflowDialog kind={workflowDialog} onClose={() => setWorkflowDialog(null)}
@@ -2495,7 +2512,7 @@ export function App() {
           </div>
         ) : (
           // Keep each user message and its assistant response in one scroll group.
-          groupTurns(turns).map((group, gi, all) => (
+          turnGroups.map((group, gi, all) => (
             // Pin-to-top space only on the last group when it isn't the first one.
             <div className="chat-turn-group" key={gi} ref={gi === all.length - 1 && all.length > 1 ? lastGroupRef : undefined}>
               {group.map(({ turn, index }) =>
