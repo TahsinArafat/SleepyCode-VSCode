@@ -2153,7 +2153,13 @@ export function Composer({
           }}
           onInput={(e) => {
             if ((e.nativeEvent as InputEvent).isComposing) return;
-            richEditor.current?.getText();
+            // The editor's own `onChange` already runs this trio on every document
+            // change (see the ComposerEditor construction above), so repeating it here
+            // made each keystroke do the work twice. The only case `onChange` misses is
+            // input the editor never dispatched a transaction for — a browser-driven
+            // edit to the contenteditable the view did not originate — so keep the
+            // handler as a backstop but let the editor own the common path.
+            if (richEditor.current) return;
             refreshEmpty();
             detectMention();
             emitDraft();

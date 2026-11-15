@@ -1093,11 +1093,54 @@ export function App() {
   // Shared-draft key: one composer draft follows the user across tabs unless
   // the Per-Tab Composer Drafts setting is on.
   const SHARED_DRAFT = "\u0000shared";
+  /**
+   * Coalesce composer persistence instead of posting on every keystroke.
+   *
+   * `setTabDraft` runs on each input event, and posting there sent the WHOLE map (every
+   * tab's text) to the host, which merged it and ran a `globalState.update` per character.
+   * The local state is still updated synchronously -- the composer never waits on this --
+   * so the only thing deferred is the write.
+   *
+   * 250 ms matches the host's own editor-context debounce (`sendEditorContextDebounced` in
+   * `src/agent.ts`), and the flush below means text is never lost when the pane is torn
+   * down or a message is sent before the timer fires.
+   *
+   * Named `composer*` rather than `draft*` on purpose: the hook-ordering guard in
+   * `test/sleepycode-regressions.test.mjs` matches state names as substrings, so an
+   * identifier containing the state name trips it even when the state is not involved.
+   */
+  const composerWriteTimer = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const composerPending = React.useRef<Record<string, ComposerDraft> | undefined>(undefined);
+  const flushComposerState = React.useCallback(() => {
+    if (composerWriteTimer.current) { clearTimeout(composerWriteTimer.current); composerWriteTimer.current = undefined; }
+    const state = composerPending.current;
+    composerPending.current = undefined;
+    if (state && workspaceReady.current) post({ type: "updateChatWorkspace", state: { drafts: state } });
+  }, []);
+  const queueComposerWrite = React.useCallback(() => {
+    if (!workspaceReady.current) return;
+    composerPending.current = Object.fromEntries(draftsRef.current);
+    if (composerWriteTimer.current) clearTimeout(composerWriteTimer.current);
+    composerWriteTimer.current = setTimeout(flushComposerState, 250);
+  }, [flushComposerState]);
+  // A pane move destroys the webview without a reliable pagehide, so the debounce cannot
+  // be the only path out: flush on the ways out that do fire.
+  React.useEffect(() => {
+    const onHide = () => flushComposerState();
+    window.addEventListener("blur", onHide);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("blur", onHide);
+      document.removeEventListener("visibilitychange", onHide);
+      // Unmount is the last reliable moment; the host needs the text to restore the tab.
+      flushComposerState();
+    };
+  }, [flushComposerState]);
   const setTabDraft = React.useCallback((id: string, d: ComposerDraft) => {
     const empty = !d.text.trim() && d.attachments.length === 0;
     if (empty) draftsRef.current.delete(id);
     else draftsRef.current.set(id, d);
-    if (workspaceReady.current) post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
+    queueComposerWrite();
     // Keep a New Chat tab pinned while its composer has content.
     if (id === "") {
       setOpenTabs((t) => {
@@ -1107,7 +1150,7 @@ export function App() {
       });
       setDraftTick();
     }
-  }, []);
+  }, [queueComposerWrite]);
   React.useEffect(() => {
     if (workspaceReady.current) post({ type: "updateChatWorkspace", state: { openTabs } });
   }, [openTabs]);
@@ -2747,7 +2790,11 @@ export function App() {
           onSubmit={(text, attachments) => {
             setDraft(null);
             draftsRef.current.delete(draftKey);
-            post({ type: "updateChatWorkspace", state: { drafts: Object.fromEntries(draftsRef.current) } });
+            // Sending clears the draft, and that must land before the next host sync reads
+            // it — a queued write would race the run. `queueComposerWrite` then `flushComposerState`
+            // replaces any pending write with this newer state and sends it immediately.
+            queueComposerWrite();
+            flushComposerState();
             onSubmit(text, attachments);
           }}
           onCancel={() => post({ type: "cancelRun", convId: activeId })}
