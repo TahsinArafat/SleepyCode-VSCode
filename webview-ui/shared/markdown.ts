@@ -147,6 +147,33 @@ function renderWhole(src: string): string {
 }
 
 /**
+ * A code fence that is still being streamed, rendered as escaped text.
+ *
+ * It carries the same chrome as the closed path (`codeBlockHtml`) so nothing shifts when
+ * the closing delimiter arrives: same wrapper, same language chip, same copy control, same
+ * `pre > code`. Only the body differs -- escaped text instead of highlight `<span>`s --
+ * and the line count that drives the collapse control is derived the same way.
+ *
+ * Not cached: the block's raw text changes on every delta, so there is nothing to reuse
+ * and caching the revisions would retain a copy of the whole fence per frame.
+ */
+function openFenceHtml(block: { raw: string; token: any }): string {
+  const token = block.token ?? {};
+  const lang = String(token.lang ?? "").trim().split(/\s+/, 1)[0];
+  const code = String(token.text ?? "").replace(/\n$/, "") + "\n";
+  const resolved = getCodeLanguage(code, lang);
+  // Escape the body rather than highlighting it, and escape the label with the same
+  // helper the closed path uses so a language named from the fence cannot inject markup.
+  // `textDirections` runs here too: the closed path sets `dir` on `pre`/`code`, and
+  // skipping it would reflow the block the moment the closing delimiter arrives.
+  return textDirections(sanitize(codeBlockHtml({
+    language: resolved.id,
+    label: resolved.label,
+    content: escapeCodeHtml(code),
+  })));
+}
+
+/**
  * Render markdown as filtered HTML fragments, one per top-level block. Joined
  * together they equal the whole-document render.
  */
@@ -160,7 +187,19 @@ export function renderMarkdownBlocks(srcIn: string): readonly string[] {
     // The highlight budget is shared across blocks in document order, so it is
     // part of the cache key: an identical block later in a long reply may get less.
     let budget = HIGHLIGHT_BUDGET;
-    for (const block of split.blocks) {
+    const lastIndex = split.blocks.length - 1;
+    for (let i = 0; i < split.blocks.length; i++) {
+      const block = split.blocks[i];
+      // A fence still being streamed is emitted as escaped text, not highlighted code.
+      // Its cache key is its raw text, which changes every delta, so highlighting it
+      // would be redone from scratch each frame and then thrown away -- and a
+      // highlighted fence is ~1,400x more DOM nodes to sanitize than escaped text.
+      // It gets highlighted once, on the delta that closes it. See `isOpenFence` in
+      // `src/markdown-blocks.ts` for the measurements.
+      if (split.openFence && i === lastIndex) {
+        blocks.push(openFenceHtml(block));
+        continue;
+      }
       const start = budget;
       const entry = cached(`${start}\u0000${block.key}`, () => {
         highlightRemaining = start;

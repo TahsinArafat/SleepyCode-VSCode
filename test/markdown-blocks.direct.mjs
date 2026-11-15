@@ -103,3 +103,65 @@ test('the key carries the block type, so the same text in another context re-ren
   // A paragraph "x" and an h1 "x" must not share a cache entry.
   assert.notEqual(split('x').blocks[0].key, split('# x').blocks[0].key);
 });
+
+/*
+ * An unterminated fence is reported so the renderer can emit it as escaped text instead
+ * of highlighted code. That is the difference between ~9,853 DOM elements and 7 for the
+ * same 64k of code, and `sanitize` pays per element — measured 6,262 ms versus 178 ms to
+ * stream a 64k fence. While the fence is open its block key changes every delta, so the
+ * highlight would be redone and discarded each frame; it happens once, on the closing
+ * delta. These pin the boundary, because getting it wrong is a visible regression in
+ * either direction: too eager and closed code never highlights, too lax and the cost is
+ * quadratic again.
+ */
+const openFence = (src) => split(src).openFence;
+
+test('a fence with no closing delimiter is reported open', () => {
+  assert.equal(openFence('intro\n\n```ts\nconst a = 1;\n'), true);
+  assert.equal(openFence('```\ncode\n'), true);
+  assert.equal(openFence('```ts'), true, 'a bare opener is open');
+});
+
+test('a fence with its closing delimiter is not open', () => {
+  assert.equal(openFence('intro\n\n```ts\nconst a = 1;\n```\n'), false);
+  assert.equal(openFence('```\ncode\n```'), false);
+  assert.equal(openFence('```\n```'), false, 'an empty closed fence is closed');
+});
+
+test('a tilde fence is detected the same way as a backtick fence', () => {
+  assert.equal(openFence('~~~\ncode\n'), true);
+  assert.equal(openFence('~~~\ncode\n~~~\n'), false);
+});
+
+test('a longer closing delimiter still closes the fence', () => {
+  assert.equal(openFence('````\ncode\n````\n'), false);
+  assert.equal(openFence('````\ncode\n'), true);
+});
+
+test('an open fence is only reported for the trailing block', () => {
+  // A closed fence followed by prose is not open, and the prose is the last block.
+  assert.equal(openFence('```ts\nconst a = 1;\n```\n\nand then some prose'), false);
+});
+
+test('an indented code block is never open, because no delimiter can close it', () => {
+  assert.equal(openFence('intro\n\n    indented code\n    more code\n'), false);
+});
+
+test('prose and empty documents are not open fences', () => {
+  assert.equal(openFence('just a paragraph'), false);
+  assert.equal(openFence('# a heading\n\ntext'), false);
+  assert.equal(openFence(''), false);
+  assert.equal(openFence('\n\n'), false);
+});
+
+test('a fence containing a line that looks like a delimiter stays open until a real close', () => {
+  // A ``` inside a fenced block is content, not a terminator: marked only closes on a
+  // delimiter line, so a document ending inside the block is still open.
+  assert.equal(openFence('````\n```\nstill inside\n'), true);
+});
+
+test('raw HTML still renders whole, and reports no open fence', () => {
+  const result = split('<div>open\n\nstill inside</div>');
+  assert.equal(result.whole, true);
+  assert.equal(result.openFence, false);
+});
