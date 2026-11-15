@@ -154,6 +154,12 @@ export type FileSnapshot = {
   path: string;
   existed: boolean;
   content: string;
+  /**
+   * The file was too large to snapshot, so `content` is empty and this record cannot restore
+   * it. Set explicitly rather than leaving `content: ''` bare, so undo reports "could not
+   * restore" instead of blanking a file it has no copy of.
+   */
+  oversized?: boolean;
 };
 
 

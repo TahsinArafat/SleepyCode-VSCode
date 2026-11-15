@@ -119,15 +119,15 @@ function abortableTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: Abo
   });
 }
 
-/** Capture a file's pre-edit content so undo can restore it outside Git. `before` avoids a disk read when the tool already supplied it. */
+/**
+ * Capture a file's pre-edit content so undo can restore it outside Git.
+ *
+ * The rule, the size cap and the reasoning behind both live in `file-snapshot-core.ts`, which
+ * is pure and directly tested; this stays a one-line forwarder so the call sites in this file
+ * read the same as before.
+ */
 function captureFileSnapshot(rootPath: string, relative: string, before?: unknown, existed?: boolean): FileSnapshot {
-  if (typeof before === 'string') return { path: relative, existed: existed ?? true, content: before };
-  try {
-    const absolute = path.join(rootPath, relative);
-    return { path: relative, existed: existed ?? true, content: readFileSync(absolute, 'utf8') };
-  } catch {
-    return { path: relative, existed: false, content: '' };
-  }
+  return captureSnapshot(rootPath, relative, before, existed);
 }
 
 function readWorkspaceText(rootPath: string, relative: string): string {
@@ -2186,8 +2186,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         else for (const tree of await listWorktrees(root.fsPath)) rows.push({ id: tree.name, title: tree.name, detail: `${tree.branch} · ${tree.commit.slice(0, 8)}${tree.isMain ? ' · main' : ''}` });
       } else if (panel === 'index') {
         const index = await this.loadRepoIndex(root);
-        const symbols = index.indexSymbols();
-        rows.push({ title: `${index.files.length} files indexed`, detail: `${symbols.length} symbols` });
+        // `symbolCount()` reads the memoized index; this used to call `indexSymbols()`,
+        // which extracts every symbol in the workspace (~3.8 s, ~120 MB on 4,000 files)
+        // purely to print the count.
+        rows.push({ title: `${index.files.length} files indexed`, detail: `${index.symbolCount()} symbols` });
         for (const edge of index.architectureMap().edges.slice(0, 60)) rows.push({ title: edge.from, detail: `imports ${edge.to}` });
         hint = 'Ask the agent to use repo_search or repo_symbol for symbol and semantic search.';
       } else if (panel === 'tasks') {
@@ -2219,6 +2221,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     for (const snap of snapshots) {
       const uri = vscode.Uri.file(path.join(rootPath, snap.path));
       try {
+        if (!isRestorable(snap)) {
+          // No content was kept, so there is nothing to write back. Reported as a failure
+          // rather than writing `''`, which would blank a file the user could still recover
+          // by hand. Checked before `existed`, because an oversized snapshot of a file that
+          // did not exist would otherwise be "restored" by deleting the file the agent made.
+          failures.push(unrestorableReason(snap));
+          continue;
+        }
         if (snap.existed) {
           await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
           await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(snap.content));
@@ -3555,13 +3565,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const root = this.workspaceRoot();
       const assistantItem = [...popped.popped].reverse().find(item => item.role === 'assistant');
       if (root && assistantItem?.fileSnapshot?.length) {
-        popped.snapshot.redoFiles = assistantItem.fileSnapshot.map(snap => {
-          try {
-            return { path: snap.path, existed: true, content: readFileSync(path.join(root.fsPath, snap.path), 'utf8') };
-          } catch {
-            return { path: snap.path, existed: false, content: '' };
-          }
-        });
+        // Read through the same bounded capture as the forward path. These entries are
+        // retained in `turnUndo`/`turnRedo` (up to 5 turns) for the life of the session, so
+        // an unbounded read here pinned the current contents of every edited file in memory.
+        const rootPath = root.fsPath;
+        popped.snapshot.redoFiles = assistantItem.fileSnapshot.map(snap => captureRedoSnapshot(rootPath, snap.path));
       }
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
       if (gitTracked && root) {
