@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs';
 import { assertSource } from './source-assert.mjs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { ESCAPE_HTML_SOURCE, HTML_ESCAPES_SOURCE } from '../src/webview/runtime-core.ts';
+import { ESCAPE_HTML_SOURCE, HTML_ESCAPES_SOURCE } from '../src/html-escape-core.ts';
 import { HIGHLIGHT_SOURCE } from '../src/webview/highlight.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));

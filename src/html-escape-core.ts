@@ -1,10 +1,17 @@
 /**
- * Pure helpers shared by the webview runtime.
+ * HTML escaping for untrusted text, as a pure testable module.
  *
- * `runtime.ts` is a single `String.raw` template of browser JavaScript, so nothing in it
- * can be imported or unit-tested. Anything that must be *proven* correct — especially
- * escaping, which sits between untrusted model output and `innerHTML` — lives here
- * instead and is injected into the template.
+ * Everything that reaches `innerHTML` comes from somewhere untrusted: model output, file
+ * names, conversation titles, and file paths derived from them. Missing one of the five
+ * metacharacters is an injection point, so they are escaped together and covered by tests
+ * rather than trusted to review.
+ *
+ * This module was `src/webview/runtime-core.ts`, extracted from the vanilla webview's
+ * `String.raw` template so it could be tested at all. That webview is being removed, but this
+ * file is not going with it: escaping is exactly the code that must survive a UI rewrite,
+ * because a rewrite is when hand-rolled copies multiply. The `*_SOURCE` exports remain for
+ * the one remaining template consumer, and `test/webview-escape.direct.mjs` pins this module
+ * as the single implementation.
  */
 
 const HTML_ESCAPES: Record<string, string> = {

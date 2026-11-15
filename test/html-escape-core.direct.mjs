@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { ESCAPE_HTML_SOURCE, escapeAttribute, escapeHtml } from '../src/webview/runtime-core.ts';
+import { ESCAPE_HTML_SOURCE, HTML_ESCAPES_SOURCE, escapeAttribute, escapeHtml } from '../src/html-escape-core.ts';
+
+/*
+ * Escaping is the boundary between untrusted text -- model output, file names, conversation
+ * titles, paths derived from them -- and `innerHTML`. One missed metacharacter is an injection
+ * point, so it is tested directly rather than trusted to review.
+ *
+ * It is also the code most at risk during a UI rewrite, because a rewrite is exactly when
+ * hand-rolled local copies multiply. `dev-refs.ts` and `ComposerEditor.ts` each had their own
+ * four-character version, omitting the apostrophe -- not exploitable while every attribute is
+ * double-quoted, but a live hazard the moment one is not. Both now import this module.
+ */
 
 test('escapeHtml neutralises every HTML metacharacter', () => {
   // Model output, file names and titles all reach innerHTML. One missed character
@@ -29,17 +39,14 @@ test('escaping is idempotent-safe and does not double-encode the entities it emi
   assert.equal(escapeHtml(escapeHtml('<')), '&amp;lt;');
 });
 
-test('the injected template sanitizer is the same implementation', () => {
-  // A hand-written second copy in the template is how sanitizers drift.
+test('the exported template sources carry all five escapes', () => {
+  // `ESCAPE_HTML_SOURCE` is still injected into the one remaining `String.raw` template
+  // consumer. A hand-written second copy in that template is how sanitizers drift, so the
+  // table it injects is asserted here rather than trusted.
   assert.match(ESCAPE_HTML_SOURCE, /const esc=s=>String\(s\)\.replace/);
   assert.match(ESCAPE_HTML_SOURCE, /escAttr=esc/);
   for (const pair of ["'&':'&amp;'", "'<':'&lt;'", "'>':'&gt;'", "'\"':'&quot;'", "\"'\":'&#39;'"]) {
     assert.ok(ESCAPE_HTML_SOURCE.includes(pair), `missing escape ${pair}`);
+    assert.ok(HTML_ESCAPES_SOURCE.includes(pair), `missing escape ${pair}`);
   }
-});
-
-test('the runtime no longer keeps its own copy of the escape table', () => {
-  const runtime = readFileSync(new URL('../src/webview/runtime.ts', import.meta.url), 'utf8');
-  assert.ok(runtime.includes('${ESCAPE_HTML_SOURCE}'), 'runtime must inject the shared source');
-  assert.equal(runtime.includes("{'&':'&amp;','<':'&lt;'"), false, 'no duplicate table in the template');
 });

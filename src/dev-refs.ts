@@ -15,6 +15,12 @@
  * hand it an honest path.
  */
 
+// The shared escaper, not a local copy: it covers the apostrophe as well as the other four
+// metacharacters. These attributes are double-quoted today, so the gap is not exploitable, but
+// a future single-quoted attribute would be an injection point, and two escaping helpers in one
+// codebase is one too many.
+import { escapeHtml } from './html-escape-core.ts';
+
 /**
  * A reference: an optional `file://` prefix, path segments with separators, a
  * filename with an extension, and an optional `:line[:col]`.
@@ -30,7 +36,7 @@ const REF_RE = new RegExp(
 );
 
 function escapeAttribute(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escapeHtml(value);
 }
 
 function escapeText(value: string): string {

@@ -1,4 +1,4 @@
-import { ESCAPE_HTML_SOURCE } from './runtime-core';
+import { ESCAPE_HTML_SOURCE } from '../html-escape-core';
 import { CONTEXT_WINDOW_INFER_SOURCE } from '../context-window-core';
 import { HIGHLIGHT_SOURCE } from './highlight';
 import { STREAM_FRAME_SOURCE, STREAM_RENDER_SOURCE } from './stream-render';

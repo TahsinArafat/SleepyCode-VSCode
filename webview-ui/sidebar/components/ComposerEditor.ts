@@ -18,6 +18,7 @@ import { keymap } from "prosemirror-keymap";
 import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { highlightCode, normalizeCodeLanguage } from "../../shared/codeLanguages";
 import { highlightCacheKey, rememberTokens } from "../../../src/highlight-cache.ts";
+import { escapeHtml as escapeAttribute } from "../../../src/html-escape-core.ts";
 import type { MentionItem } from "../types";
 
 interface HighlightToken { from: number; to: number; className: string }
@@ -66,7 +67,6 @@ interface ComposerEditorOptions {
 
 let codeId = 0;
 const newCodeId = () => `composer-code-${++codeId}`;
-const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const decodeAttribute = (value: string) => value.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
 const basicSchema = defaultMarkdownParser.schema;
