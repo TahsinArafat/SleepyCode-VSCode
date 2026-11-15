@@ -1,31 +1,17 @@
 import { readFileSync } from 'node:fs';
 
-const raw = readFileSync('src/webview.ts', 'utf8');
-const runtimeRaw = readFileSync('src/webview/runtime.ts', 'utf8');
-const runtimeMatch = runtimeRaw.match(/return String\.raw`([\s\S]*?)`;\r?\n}/);
-if (!runtimeMatch) throw new Error('webview runtime template not found');
-// The template interpolates a few identifiers at build time. The syntax check works on
-// the template source, so substitute them here too — otherwise the checker sees raw
-// `${NAME}` and reports a syntax error that the real build never produces.
-const { ESCAPE_HTML_SOURCE } = await import('../src/webview/runtime-core.ts');
-const { STREAM_RENDER_SOURCE, STREAM_FRAME_SOURCE } = await import('../src/webview/stream-render.ts');
-const { HIGHLIGHT_SOURCE } = await import('../src/webview/highlight.ts');
-const { MARKDOWN_CACHE_SOURCE } = await import('../src/webview/markdown-cache.ts');
-const { CONTEXT_WINDOW_INFER_SOURCE } = await import('../src/context-window-core.ts');
-const js = runtimeMatch[1]
-  .replaceAll('${gitTracked}', () => 'true')
-  .replaceAll('${markUri}', () => 'mark')
-  .replaceAll('${ESCAPE_HTML_SOURCE}', () => ESCAPE_HTML_SOURCE)
-  .replaceAll('${STREAM_RENDER_SOURCE}', () => STREAM_RENDER_SOURCE)
-  .replaceAll('${STREAM_FRAME_SOURCE}', () => STREAM_FRAME_SOURCE)
-  .replaceAll('${HIGHLIGHT_SOURCE}', () => HIGHLIGHT_SOURCE)
-  .replaceAll('${MARKDOWN_CACHE_SOURCE}', () => MARKDOWN_CACHE_SOURCE)
-  .replaceAll('${CONTEXT_WINDOW_INFER_SOURCE}', () => CONTEXT_WINDOW_INFER_SOURCE);
-await import('node:child_process').then(({ execFileSync }) => {
-  execFileSync(process.execPath, ['--check', '--input-type=module', '-'], { input: js, stdio: 'pipe' });
-  console.log('webview JS: syntax OK');
-});
-const webviewCode = raw + '\n' + runtimeRaw;
+/*
+ * The context-manager checks below used to grep the vanilla webview's source text for
+ * element ids and a hand-built context object. That renderer is gone; the live chat is the
+ * React webview, which takes the same context state from `src/context-panel.ts` -- a shared
+ * module both paths use. Asserting against that module tests the BEHAVIOUR (the toggles
+ * exist, they map onto the fields the host reads, and a request carries them) instead of
+ * pinning markup that is free to change.
+ */
+const contextPanel = readFileSync('src/context-panel.ts', 'utf8');
+const adapter = readFileSync('src/webview-adapter.ts', 'utf8');
+const composer = readFileSync('webview-ui/sidebar/components/Composer.tsx', 'utf8');
+const reactApp = readFileSync('webview-ui/sidebar/App.tsx', 'utf8');
 
 const src = readFileSync('src/providers.ts', 'utf8');
 const nonTextMatch = src.match(/const NON_TEXT = (.*);/);
@@ -61,17 +47,32 @@ for (const [id, expected] of cases) {
 if (failed) throw new Error(`${failed} filter case(s) failed`);
 console.log(`text filter: ${cases.length} cases OK`);
 
-if (!webviewCode.includes('projectIndicatorName.textContent=editorContext.activeFile||projectIndicatorFolder')) {
-  throw new Error('project indicator does not prefer the active file path');
+// --- Context manager --------------------------------------------------------------------------
+// Each toggle must exist, carry the field name the host reads, and reach the request payload.
+// A toggle that renders but is not sent is the failure this section exists to catch, and it is
+// invisible in the UI: the chip looks right and the model never sees the file.
+// Anchored to the `CONTEXT_TOGGLES` array so the union type in the `ContextToggle` interface
+// (which lists the same field names) is not counted as a fourth toggle.
+const toggleBlock = contextPanel.slice(contextPanel.indexOf('export const CONTEXT_TOGGLES'));
+const toggleFields = [...toggleBlock.matchAll(/field:\s*'(includeProjectIndex|includeActiveFile|includeSelection)'/g)].map(m => m[1]);
+for (const field of ['includeProjectIndex', 'includeActiveFile', 'includeSelection']) {
+  if (!toggleFields.includes(field)) throw new Error(`context toggle ${field} is missing`);
 }
-if (!webviewCode.includes('includeActiveFile=true') || !webviewCode.includes('data-context-toggle="active"')) {
-  throw new Error('active-file context toggle is missing');
+console.log(`context toggles: ${toggleFields.join(', ')} OK`);
+
+// The composer must render them, or the user has no way to change what a request includes.
+if (!/CONTEXT_TOGGLES\.map\(/.test(composer)) {
+  throw new Error('the composer does not render the context toggles');
 }
-if (!/const context\s*=\s*\{\s*includeProjectIndex\s*,\s*includeActiveFile\s*,\s*includeSelection/.test(webviewCode)) {
-  throw new Error('composer context toggles are not sent with requests');
+
+// And the adapter must forward the switches, or a toggle that is off is still sent as on.
+if (!/for \(const field of \['includeProjectIndex', 'includeActiveFile', 'includeSelection'\]/.test(adapter)) {
+  throw new Error('the webview adapter does not forward the context switches');
 }
-if (!webviewCode.includes('id="contextSummaryButton"') || !webviewCode.includes('id="contextPanel"')) {
-  throw new Error('explicit context manager UI is missing');
+
+// Project intelligence: the host has always posted the index status; the panel has to show it
+// with a reindex action, or the feature is unreachable from the UI.
+if (!/reindexProject/.test(reactApp) || !/indexCard\(indexStatus\)/.test(reactApp)) {
+  throw new Error('project intelligence status and its reindex action are missing');
 }
-if (!webviewCode.includes('Project intelligence') || !webviewCode.includes('reindexProject')) throw new Error('project intelligence context UI is missing');
-console.log('context manager UI: project index, active file, selection, attachments, and request delivery OK');
+console.log('context manager UI: toggles, request delivery, and project intelligence OK');
