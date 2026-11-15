@@ -432,7 +432,14 @@ const MentionText = React.memo(function MentionText({ text }: { text: string }) 
   );
 });
 
-/** Run paused at the step limit: Continue button with an "always auto continue" dropdown. */
+/**
+ * The run paused with work unfinished: Continue, plus an "always auto continue" dropdown.
+ *
+ * Two causes, and they are not interchangeable to a reader. A step-limit pause means the
+ * agent stopped making progress; a truncated response means the model was cut off mid-answer
+ * and the text above is incomplete. Saying "Paused after N steps" for a truncation would
+ * misdescribe it, and "Continue" is the right verb for both.
+ */
 function MaxStepsCard({ block, running }: { block: import("./types").AssistantBlock & { kind: "max-steps" }; running: boolean }) {
   const [menu, setMenu] = React.useState(false);
   const [resumed, setResumed] = React.useState(false);
@@ -444,16 +451,24 @@ function MaxStepsCard({ block, running }: { block: import("./types").AssistantBl
     return () => window.removeEventListener("mousedown", close);
   }, [menu]);
   const go = (always?: boolean) => { setMenu(false); setResumed(true); post({ type: "continueRun", always }); };
+  const truncated = block.reason === "max-tokens";
   return (
-    <div className="approval-card inline">
+    <div className={"approval-card inline" + (truncated ? " truncated" : "")}>
       <div className="ap-head">
         <Icon name="clock" size={14} />
-        <span className="ap-title">Paused after {block.steps} steps</span>
+        <span className="ap-title">
+          {truncated ? "Response truncated" : `Paused after ${block.steps} steps`}
+        </span>
       </div>
+      <p className="ap-note">
+        {truncated
+          ? "The model reached its output limit, so this answer is incomplete."
+          : `Reached the ${block.steps}-step limit with work still in progress.`}
+      </p>
       {!resumed && !running && (
         <div className="ap-actions">
           <div className="ap-approve-group" ref={menuRef}>
-            <button className="ap-btn allow" onClick={() => go()}>Continue</button>
+            <button className="ap-btn allow" onClick={() => go()}>{truncated ? "Continue response" : "Continue"}</button>
             <button className="ap-btn allow ap-arrow" title="Continue options" onClick={() => setMenu((v) => !v)}>
               <Icon name="chevD" size={11} />
             </button>

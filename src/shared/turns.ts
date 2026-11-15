@@ -107,10 +107,20 @@ export interface CompactionBlock {
   /** The generated summary (once done). */
   summary?: string;
 }
-/** Run paused at the step limit — chat shows a Continue button. */
+/**
+ * The run paused with work still unfinished, so the answer on screen is incomplete.
+ *
+ * Two causes needing different words: `max-steps` is the bounded iteration limit, and
+ * `max-tokens` is a response the provider cut off at its output limit. The host has always
+ * distinguished them (`TranscriptItem.pauseReason`); this block carries the distinction
+ * through so the card can say which one happened.
+ */
 export interface MaxStepsBlock {
   kind: "max-steps";
+  /** Iterations completed before the step limit stopped the run. */
   steps: number;
+  /** Why the run stopped. Absent means the step limit, for turns stored before this existed. */
+  reason?: "max-steps" | "max-tokens";
   /** Set once the user continued (hides the button). */
   resumed?: boolean;
 }

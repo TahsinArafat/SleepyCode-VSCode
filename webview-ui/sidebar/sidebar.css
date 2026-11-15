@@ -1271,6 +1271,19 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	flex: 1;
 	min-width: 0;
 }
+/* The one-line explanation under a pause card: which limit stopped the run, and what that
+   means for the answer above it. Secondary weight, because the title already says "paused". */
+.ap-note {
+	margin: var(--sp-1) 0 0;
+	font-size: var(--fs-sm);
+	font-weight: 400;
+	color: var(--fg-faint);
+}
+/* A truncated response is a different situation from a step-limit pause: the answer on screen
+   is incomplete rather than merely unfinished, so the card is marked rather than silent. */
+.approval-card.truncated {
+	border-color: var(--vscode-editorWarning-foreground, #cca700);
+}
 .ap-tool {
 	max-width: 100%;
 	min-width: 0;

@@ -2036,6 +2036,61 @@ test('a missing model or time is omitted rather than sent as undefined fields', 
   assert.equal('timestamp' in turns[0], false, 'no duplicate of startedAt');
 });
 
+// ---------------------------------------------------------------- a paused turn
+//
+// The host pauses a turn two ways and marks the item both times (`paused` + `pauseReason`,
+// set in `agent.ts` when the step limit stops a run or the provider cuts a response off at
+// its output limit). The legacy webview drew a card with a Continue button for each. The
+// React projection was never written, so a truncated answer rendered as an ordinary completed
+// one, and the `continueRun` message the host still accepts had nothing that could send it.
+//
+// These pin the projection: which reason reaches the block, and that it lands AFTER the text
+// so the card annotates the partial answer rather than replacing it.
+
+const pauseBlock = item => {
+  const blocks = adapter.itemsToTurns([{ role: 'user', text: 'go' }, item])[1].blocks;
+  return { blocks, card: blocks.find(b => b.kind === 'max-steps') };
+};
+
+test('a truncated response projects a card that says it was truncated', () => {
+  const { card } = pauseBlock({ role: 'assistant', text: 'half an answer', paused: true, pauseReason: 'max_tokens' });
+  assert.ok(card, 'a paused turn must produce a card');
+  assert.equal(card.reason, 'max-tokens', 'the two causes are not interchangeable to a reader');
+  assert.equal(card.steps, 0, 'a token cut-off has no step count');
+});
+
+test('a step-limit pause projects a card carrying its limit', () => {
+  const { card } = pauseBlock({ role: 'assistant', text: 'partial', paused: true, pauseReason: 'max_steps', pauseLimit: 50 });
+  assert.ok(card);
+  assert.equal(card.reason, 'max-steps');
+  assert.equal(card.steps, 50);
+});
+
+test('the card comes after the partial answer, not instead of it', () => {
+  // The reader needs the text that WAS produced; the card annotates it.
+  const { blocks } = pauseBlock({ role: 'assistant', text: 'half an answer', paused: true, pauseReason: 'max_tokens' });
+  assert.deepEqual(blocks.map(b => b.kind), ['text', 'max-steps']);
+});
+
+test('a completed turn produces no pause card', () => {
+  const { card } = pauseBlock({ role: 'assistant', text: 'all done' });
+  assert.equal(card, undefined, 'only a paused item is incomplete');
+});
+
+test('an unknown or missing pause reason is treated as the step limit', () => {
+  // A turn stored before the reason existed has `paused` but no `pauseReason`. The step-limit
+  // wording is the safe default: it claims less about the answer than "truncated" does.
+  const { card } = pauseBlock({ role: 'assistant', text: 'partial', paused: true });
+  assert.equal(card.reason, 'max-steps');
+  assert.equal(card.steps, 0, 'no limit recorded');
+});
+
+test('a missing step limit does not become NaN in the card', () => {
+  // The card renders `Paused after {steps} steps`, so NaN would print on screen.
+  const { card } = pauseBlock({ role: 'assistant', text: 'p', paused: true, pauseReason: 'max_steps' });
+  assert.equal(Number.isFinite(card.steps), true);
+});
+
 test('the footer names the model from the catalog, falling back to the id', () => {
   // The catalog carries display names; the transcript carries ids. A footer that
   // shows a raw id is worse than one that shows nothing, so the id is only a

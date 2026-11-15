@@ -1050,6 +1050,20 @@ export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
       blocks.push({ kind: 'text', text: item.text });
     }
 
+    // A paused turn is incomplete, and it has to say so. The host marks the item (`paused` +
+    // `pauseReason`, set at `agent.ts:5913-5920`) and the legacy webview drew a card with a
+    // Continue button for both causes. This projection was never written for the React path,
+    // so a truncated answer rendered as an ordinary completed one, and the `continueRun` the
+    // host still accepts had nothing that could trigger it. Appended after the text so the
+    // card reads as a note on the partial answer rather than replacing it.
+    if (item.paused) {
+      blocks.push({
+        kind: 'max-steps',
+        steps: Number.isFinite(item.pauseLimit) ? Number(item.pauseLimit) : 0,
+        reason: item.pauseReason === 'max_tokens' ? 'max-tokens' : 'max-steps',
+      });
+    }
+
     turns.push({
       role: 'assistant',
       blocks,
