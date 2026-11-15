@@ -19,7 +19,7 @@ import { prepareStructuredHistory } from '../src/iteration-core.ts';
 import { assertSource } from './source-assert.mjs';
 
 const agent = readFileSync('src/agent.ts', 'utf8');
-const runtime = readFileSync('src/webview/runtime.ts', 'utf8');
+const composer = readFileSync('webview-ui/sidebar/components/Composer.tsx', 'utf8');
 
 test('a learned window beats a reported one beats a price-list one beats a name guess', () => {
   assert.deepEqual(pickContextWindow(128_000, 128_000, 'gpt-4o', 64_000), { window: 64_000, source: 'learned' });
@@ -119,9 +119,13 @@ test('the window is read from the price list too, not only the catalog', () => {
 });
 
 test('the meter is fed by the shared resolver instead of a private copy', () => {
-  assertSource(runtime, /\$\{CONTEXT_WINDOW_INFER_SOURCE\}/);
-  assertSource(runtime, /if\(!ctxLimit\)ctxLimit=inferContextWindow\(effectiveModel\)\|\|128000/);
-  assert.doesNotMatch(runtime, /low\.includes\('256k'\)/, 'the hand-copied guess must be gone');
+  // The webview used to carry its own hand-copied family guess, and a second copy of a
+  // resolution rule is a copy that drifts. The React composer reads the limit the host
+  // resolved through `pickContextWindow` rather than inferring one of its own.
+  assertSource(agent, /pickContextWindow\(entry\?\.contextWindow, price\?\.contextWindow, modelId, this\.learnedContextWindows\[modelId\]\)/);
+  assertSource(composer, /sessionStats\?\.contextLimit/, 'the ring reads the host-resolved limit');
+  assert.doesNotMatch(composer, /low\.includes\('256k'\)/, 'the hand-copied guess must be gone');
+  assert.doesNotMatch(composer, /inferContextWindow\s*\(/, 'the webview must not resolve a window itself');
 });
 
 test('nothing on the send path trims history to a token budget', () => {

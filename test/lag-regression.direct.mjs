@@ -202,3 +202,21 @@ test('the symbol index is built once and reused, not rebuilt per tool call', () 
   assertSource(agent, /index\.symbolCount\(\)/, 'the panel uses the count accessor');
 });
 
+
+test('the React markdown cache is bounded by entries, bytes and a per-entry ceiling', () => {
+  // The behavioural tests in `test/markdown-cache-ui.direct.mjs` prove output stays correct
+  // under churn, but eviction affects MEMORY, not output -- removing the eviction loop
+  // entirely still passes them. So the bounds themselves are pinned here, where they are
+  // visible. The vanilla webview's superseded cache had these three limits and 8 unit tests;
+  // this is the React-side replacement for that guard.
+  const markdown = readFileSync('webview-ui/shared/markdown.ts', 'utf8');
+  assertSource(markdown, /const CACHE_LIMIT = 240;/, 'an entry cap');
+  assertSource(markdown, /const CACHE_BYTES = 4 \* 1024 \* 1024;/, 'a byte budget');
+  assertSource(markdown, /const MAX_ENTRY_BYTES = 512 \* 1024;/, 'a per-entry ceiling');
+  assertSource(markdown, /while \(cache\.size > CACHE_LIMIT \|\| cacheBytes > CACHE_BYTES\)/, 'the eviction loop runs on both limits');
+  // Eviction must subtract from the running byte total, or the budget drifts and the cache
+  // grows forever while `cacheBytes` still reads as bounded.
+  assertSource(markdown, /cacheBytes -= \(oldest\.length \+ cache\.get\(oldest\)!\.html\.length\) \* 2;/, 'eviction decrements the byte total');
+  // An oversized entry is returned WITHOUT being cached, so its bytes are never counted.
+  assertSource(markdown, /if \(bytes > MAX_ENTRY_BYTES\) return entry;/, 'an oversized entry is not retained');
+});
