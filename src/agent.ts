@@ -2549,7 +2549,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       onlyDefaultModels: this.config().onlyDefaultModels,
       confirmDelete: this.confirmDeleteConversations(),
       compactionModel: config.compactionModel,
-      compact: this.context.globalState.get<boolean>('sleepycode.compact', false),
+      // `compact` is deliberately absent: compact density was a pre-React setting, and the
+      // React UI expresses it as `chatTextSize` in `uiPrefs`. `feature-prefs.normalizePrefs`
+      // still reads the stored flag once so an existing preference carries over.
       maxPersistedReasoning: config.maxPersistedReasoning,
       useCli: config.useCli,
       initialSetup,
@@ -3937,7 +3939,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.context.globalState.update('sleepycode.onlyDefaultModels', Boolean(message.onlyDefaultModels));
         await this.context.globalState.update('sleepycode.confirmDelete', message.confirmDelete !== false);
         await this.context.globalState.update('sleepycode.compactionModel', (message.compactionModel ?? '').trim());
-        await this.context.globalState.update('sleepycode.compact', Boolean(message.compact));
         await this.context.globalState.update('sleepycode.subagentModels', {
           explorer: (message.subagentModels?.explorer ?? '').trim(),
           reviewer: (message.subagentModels?.reviewer ?? '').trim(),

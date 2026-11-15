@@ -48,15 +48,28 @@ function clampTabCount(value: unknown): number | undefined {
   return Math.min(MAX_TAB_COUNT_CEILING, Math.max(1, Math.floor(value)));
 }
 
-/** Read stored preferences, replacing anything unusable with the default. */
+/**
+ * Read stored preferences, replacing anything unusable with the default.
+ *
+ * Also folds in the legacy `compact` flag, which the pre-React webview stored as its own
+ * boolean next to these preferences. The React UI replaced it with the three-way
+ * `chatTextSize`, but the host kept reading and writing `sleepycode.compact`, so a user who
+ * had turned compact density on saw the preference do nothing after the switch. Migrating it
+ * here means it is honoured once and then expressed through the setting that still exists,
+ * rather than silently dropped.
+ */
 export function normalizePrefs(value: unknown): ChatPrefs {
   if (!value || typeof value !== 'object') return { ...DEFAULT_CHAT_PREFS };
   const input = value as Record<string, unknown>;
   const tabs = clampTabCount(input.maxTabCount);
+  // An explicit chatTextSize always wins: it is the current setting, and a user who has
+  // chosen a size since the migration must not be overridden by a stale boolean.
   return {
     chatTextSize: TEXT_SIZES.includes(input.chatTextSize as ChatTextSize)
       ? (input.chatTextSize as ChatTextSize)
-      : DEFAULT_CHAT_PREFS.chatTextSize,
+      : input.compact === true
+        ? 'compact'
+        : DEFAULT_CHAT_PREFS.chatTextSize,
     motion: MOTIONS.includes(input.motion as MotionPreference)
       ? (input.motion as MotionPreference)
       : DEFAULT_CHAT_PREFS.motion,

@@ -244,20 +244,30 @@ check(/type: 'requestExtensionLogs'/.test(webviewRuntime) && /getElementById\('e
 // The round trip has three legs: webview payload -> host globalState -> config() -> webview restore.
 // A gap in any one of them is a setting that silently forgets itself on the next launch, which is the
 // failure mode users describe as "the toggle doesn't work" rather than "the setting isn't saved".
-check(webviewRuntime.includes('compact: Boolean(compactDensity && compactDensity.checked),')
-  && agent.includes("globalState.update('sleepycode.compact', Boolean(message.compact))")
-  && agent.includes("globalState.get<boolean>('sleepycode.compact', false)"),
-  'compact density round-trips through saveSettings and comes back on the next session');
+// Compact density was a pre-React setting stored as its own boolean. The React UI replaced it
+// with the three-way `chatTextSize` in `uiPrefs`, but the host kept reading and writing
+// `sleepycode.compact`, so the preference silently stopped working after the switch. These
+// three checks follow the replacement: the value must still round-trip, must apply without a
+// reload, and must clamp rather than hide.
+const featurePrefs = read('src/feature-prefs.ts');
+const reactApp = read('webview-ui/sidebar/App.tsx');
+const reactStyles = read('webview-ui/sidebar/sidebar.css');
+check(featurePrefs.includes('chatTextSize: TEXT_SIZES.includes(input.chatTextSize as ChatTextSize)')
+  && agent.includes('uiPrefs: this.readChatPrefs()')
+  && /private readChatPrefs\(\): featurePrefs\.ChatPrefs \{[\s\S]{0,200}normalizePrefs\(stored\?\.prefs\)/.test(agent),
+  'text size round-trips through the chat preferences and comes back on the next session');
 // It is a view preference, so it must not wait for a settings round trip to become visible.
-check(/function applyDensity\(compact\)/.test(webviewRuntime)
-  && /document\.body\.classList\.toggle\('compact'/.test(webviewRuntime)
-  && /compactDensity\.addEventListener\('change', \(\) => \{ applyDensity\(compactDensity\.checked\)/.test(webviewRuntime),
-  'compact density applies to the document immediately rather than after a reload');
+check(/uiPrefs\.chatTextSize !== "default" \? ` text-\$\{uiPrefs\.chatTextSize\}` : ""/.test(reactApp)
+  && /\.app\.text-compact \{/.test(reactStyles),
+  'text size applies to the rendered tree rather than after a reload');
 // Clamped, not removed. A density preference that hides text the user cannot get back is a content
 // preference wearing a disguise, and this one has to survive someone who never opens settings again.
-check(/body\.compact \.reasoning\{[^}]*-webkit-line-clamp/.test(webviewStyles)
-  && !/body\.compact \.reasoning\{[^}]*display:none/.test(webviewStyles),
-  'compact density clamps reasoning instead of hiding it');
+check(/\.thinking-card \.thinking-body \{[^}]*max-height: 220px;[^}]*overflow: auto;/.test(reactStyles)
+  && !/\.thinking-card \.thinking-body \{[^}]*display:\s*none/.test(reactStyles),
+  'compact reasoning is scrollable rather than hidden');
+// The legacy boolean is still read once, so a user who set it before the switch keeps the choice.
+check(/input\.compact === true/.test(featurePrefs),
+  'the pre-React compact flag migrates into the text size that replaced it');
 
 // --- Turn timeline -------------------------------------------------------------------------------
 // The chips have to be a real list: a row of spans with no role reads as decorative text to a screen

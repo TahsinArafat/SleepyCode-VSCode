@@ -31,6 +31,20 @@ test('a partial stored value keeps the fields it does carry', () => {
   assert.equal(p.perTabDrafts, prefs.DEFAULT_CHAT_PREFS.perTabDrafts);
 });
 
+test('the legacy compact flag migrates into the text size that replaced it', () => {
+  // The pre-React webview stored compact density as its own boolean. The React UI replaced
+  // it with the three-way `chatTextSize`, but the host kept reading and writing
+  // `sleepycode.compact`, so a user who had switched compact density on saw the preference
+  // silently stop working. It is folded in here, where every read passes.
+  assert.equal(prefs.normalizePrefs({ compact: true }).chatTextSize, 'compact');
+  // An explicit size always wins: a user who has chosen one since must not be overridden
+  // by a stale boolean left behind by the old UI.
+  assert.equal(prefs.normalizePrefs({ compact: true, chatTextSize: 'large' }).chatTextSize, 'large');
+  // Only `true` migrates. A missing or false flag is not a preference.
+  assert.equal(prefs.normalizePrefs({ compact: false }).chatTextSize, prefs.DEFAULT_CHAT_PREFS.chatTextSize);
+  assert.equal(prefs.normalizePrefs({}).chatTextSize, prefs.DEFAULT_CHAT_PREFS.chatTextSize);
+});
+
 test('a nonsense tab count is clamped to a usable range, not accepted', () => {
   // A stored 0 would allow no tabs at all and a huge number would defeat the
   // setting's purpose; both are read from disk, so both are bounded here.
