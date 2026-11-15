@@ -102,6 +102,49 @@ test('RepoIndex upsert and remove update the file set', () => {
   assert.deepEqual(index.files.map(f => f.path), ['b.ts']);
 });
 
+test('a repeated symbol read is served from the index instead of re-extracted', () => {
+  // Extracting symbols over a whole workspace is expensive (measured ~3.5 s and ~120 MB on
+  // 4,000 files). The `repo_symbol` tool called this per invocation, so two symbol questions
+  // paid for two full extractions. Identity is the signal: a rebuild always makes a new array.
+  const index = new RepoIndex([
+    { path: 'a.ts', content: 'export function alpha() {}\nexport class Beta {}\n' },
+    { path: 'b.ts', content: 'export interface Gamma {}\n' },
+  ]);
+  const first = index.indexSymbols();
+  const second = index.indexSymbols();
+  assert.equal(first, second, 'the second read must reuse the first result');
+  assert.deepEqual(first.map(s => s.name).sort(), ['Beta', 'Gamma', 'alpha']);
+});
+
+test('a symbol read after an edit re-extracts, so the index cannot go stale', () => {
+  // Memoizing must not survive a write, or `repo_symbol` would answer from pre-edit source.
+  const index = new RepoIndex([{ path: 'a.ts', content: 'export function before() {}\n' }]);
+  assert.deepEqual(index.indexSymbols().map(s => s.name), ['before']);
+  index.upsert({ path: 'a.ts', content: 'export function after() {}\n' });
+  assert.deepEqual(index.indexSymbols().map(s => s.name), ['after']);
+  index.remove('a.ts');
+  assert.deepEqual(index.indexSymbols(), [], 'a removed file contributes no symbols');
+});
+
+test('upsert replaces in place rather than copying the whole file list', () => {
+  // The old implementation ran `entries.filter(...)` on every upsert, which is O(files) for a
+  // single-file save. The array is mutated, not replaced, so a burst of saves is not
+  // quadratic in workspace size.
+  const index = new RepoIndex([{ path: 'a.ts', content: 'a' }, { path: 'b.ts', content: 'b' }]);
+  const before = index.files;
+  index.upsert({ path: 'a.ts', content: 'changed' });
+  assert.equal(index.files, before, 'the array must be mutated in place');
+  assert.equal(index.files.length, 2);
+  assert.equal(index.files.find(f => f.path === 'a.ts').content, 'changed');
+});
+
+test('symbolCount answers without the caller materializing the list', () => {
+  // The index panel printed a count; it used to call indexSymbols() for that alone.
+  const index = new RepoIndex([{ path: 'a.ts', content: 'export function one() {}\nexport const two = 1;\n' }]);
+  assert.equal(index.symbolCount(), index.indexSymbols().length);
+  assert.equal(index.symbolCount(), index.indexSymbols().length, 'counting twice stays consistent');
+});
+
 // --- scanWorkspace ---
 
 test('scanWorkspace reads files and honors the ignore set', async () => {

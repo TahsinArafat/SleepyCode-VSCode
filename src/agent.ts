@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
@@ -63,6 +63,7 @@ import { MEMORY_RELATIVE_PATH, openProjectMemory, readProjectMemory, writeProjec
 import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
 import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
+import { captureFileSnapshot as captureSnapshot, captureRedoSnapshot, isRestorable, unrestorableReason } from './file-snapshot-core';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
 import { diffLines, fileChangeStats } from './line-diff';
 import { createWorktree, listWorktrees } from './worktrees';
@@ -448,9 +449,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private sessionAutoApproveEditRoots = new Set<string>();
   private lastSleepyAccountRefresh = 0;
   private readonly projectIndex: ProjectIndexService;
-  private repoIndexCache?: { root: string; index: RepoIndex; symboled: boolean };
+  private repoIndexCache?: { root: string; index: RepoIndex };
   private readonly browser = new BrowserController();
   private readonly browserPreview = new BrowserPreviewPanel();
+  /** Armed by `startWorkspaceWatcher` on first view resolve, not at construction. */
+  private workspaceWatcher?: vscode.FileSystemWatcher;
   private browserPreviewTimer: NodeJS.Timeout | undefined;
   private projectIndexTimer?: NodeJS.Timeout;
   private schedulerTimer?: NodeJS.Timeout;
@@ -520,25 +523,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
-    const onFsEvent = (uri: vscode.Uri): void => {
-      this.fsVersion++;
-      this.scheduleProjectReindex(uri);
-    };
-    // Narrow the watcher glob to source-like files. The handler already filters
-    // node_modules/dist/etc., but a broad '**/*' watcher still delivers thousands
-    // of events during npm install or builds, each incurring IPC from the file
-    // watcher process to the extension host. The RelativePattern approach is not
-    // supported for multi-root, so we use an explicit extension list instead.
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,rs,rb,java,c,cpp,h,hpp,cs,swift,kt,scala,vue,svelte,dart,lua,zig,json,yaml,yml,toml,md,mdx,html,css,scss,less,sql,graphql,proto,tf,sh,bash,zsh,fish,ps1,bat,makefile,dockerfile,xml,svg,conf,ini,cfg,env,lock}');
+    // The workspace watcher is started by `resolveWebviewView`, not here.
+    //
+    // `activationEvents` includes `onUri` as well as `onView`, so an MCP OAuth callback
+    // activates the extension without the chat ever being opened — and the constructor
+    // used to arm a watcher over a 45-extension glob in that case, purely to maintain
+    // `fsVersion` for a git-tree cache that only `run()` reads (and `run()` cannot happen
+    // before the view exists). For a large repo that is thousands of file events during a
+    // build or `npm install`, each one IPC from the file-watcher process, for a session
+    // that will never send a message.
     context.subscriptions.push(
-      watcher,
-      watcher.onDidCreate(onFsEvent),
-      watcher.onDidChange(onFsEvent),
-      watcher.onDidDelete(onFsEvent),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.onWorkspaceFoldersChanged()),
       vscode.window.onDidChangeActiveTextEditor(() => { if (this.webviewVisible) this.sendEditorContext(); }),
       vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContextDebounced()),
     );
+    // Scheduled tasks stay on the constructor's interval on purpose: they are meant to fire
+    // whether or not anyone has the chat open, so gating this on the view would silently
+    // stop every schedule. `runDueScheduledTasks` early-returns with no tasks configured,
+    // and the timer is cleared in `dispose`.
     this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
     context.subscriptions.push({ dispose: () => { void this.shutdownCli(); } });
@@ -937,6 +939,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private onWorkspaceFoldersChanged(): void {
     this.projectIndex.invalidate();
     invalidateGitTrackedCache();
+    // The cached repo index belongs to the folder set that produced it. It was previously
+    // left in place here, so switching workspaces kept the whole previous tree resident
+    // (~150 MB on a 4,000-file repo) and served its paths to searches in the new one.
+    this.releaseRepoIndex();
     if (!this.loaded) return;
     this.reanchorToWorkspace();
     void this.ensureProjectIntelligence(false);
@@ -948,8 +954,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const relative = path.relative(root.fsPath, uri.fsPath).replace(/\\/g, '/');
     if (/(^|\/)(node_modules|\.git|dist|out|build|coverage|\.next|target|vendor)(\/|$)/.test(relative)) return;
     this.projectIndex.invalidate(root.fsPath);
+    this.refreshRepoIndexEntry(root, relative, uri);
     if (this.projectIndexTimer) clearTimeout(this.projectIndexTimer);
     this.projectIndexTimer = setTimeout(() => { void this.ensureProjectIntelligence(true); }, 1_800);
+  }
+
+  /**
+   * Bring one file's entry in the cached repo index up to date, without dropping the index.
+   *
+   * Dropping the whole cache here would force a full rescan (up to 4,000 files) on the next
+   * search, which is far more expensive than the update. Doing nothing — the previous
+   * behaviour — left the index holding the pre-edit contents of every file the agent then
+   * read through it, so a search could return source that no longer existed.
+   *
+   * A delete or an over-size file removes the entry; anything else re-reads it. The derived
+   * indices are dropped by `upsert`/`remove`, so the next symbol or semantic search rebuilds
+   * them lazily.
+   */
+  private refreshRepoIndexEntry(root: vscode.Uri, relative: string, uri: vscode.Uri): void {
+    const cached = this.repoIndexCache;
+    if (!cached || cached.root !== root.fsPath) return;
+    try {
+      const stat = statSync(uri.fsPath);
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) cached.index.remove(relative);
+      else cached.index.upsert({ path: relative, content: readFileSync(uri.fsPath, 'utf8') });
+    } catch {
+      // Gone, or unreadable: the index must not keep it either way.
+      cached.index.remove(relative);
+    }
   }
 
   private async ensureProjectIntelligence(force: boolean): Promise<ProjectIntelligence | undefined> {
@@ -980,7 +1012,37 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Arm the workspace watcher. Called from `resolveWebviewView`, once.
+   *
+   * It maintains two things the session needs only once there is a chat: `fsVersion`, which
+   * gates reuse of the cached git tree in `run()`, and the debounced project reindex. Both
+   * are dead weight while the view is closed, and the watcher is not free — see the note in
+   * the constructor.
+   */
+  private startWorkspaceWatcher(): void {
+    if (this.workspaceWatcher) return;
+    const onFsEvent = (uri: vscode.Uri): void => {
+      this.fsVersion++;
+      this.scheduleProjectReindex(uri);
+    };
+    // Narrow the watcher glob to source-like files. The handler already filters
+    // node_modules/dist/etc., but a broad '**/*' watcher still delivers thousands
+    // of events during npm install or builds, each incurring IPC from the file
+    // watcher process to the extension host. The RelativePattern approach is not
+    // supported for multi-root, so we use an explicit extension list instead.
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,rs,rb,java,c,cpp,h,hpp,cs,swift,kt,scala,vue,svelte,dart,lua,zig,json,yaml,yml,toml,md,mdx,html,css,scss,less,sql,graphql,proto,tf,sh,bash,zsh,fish,ps1,bat,makefile,dockerfile,xml,svg,conf,ini,cfg,env,lock}');
+    this.workspaceWatcher = watcher;
+    this.context.subscriptions.push(
+      watcher,
+      watcher.onDidCreate(onFsEvent),
+      watcher.onDidChange(onFsEvent),
+      watcher.onDidDelete(onFsEvent),
+    );
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
+    this.startWorkspaceWatcher();
     this.view = view;
     this.reactMode = this.context.globalState.get<boolean>('useReactWebview', true);
     view.webview.options = { enableScripts: true };
@@ -2314,18 +2376,52 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return vscode.Uri.joinPath(this.context.globalStorageUri, 'observations').fsPath;
   }
 
+  /**
+   * The workspace index, built once and reused until the workspace changes.
+   *
+   * This is the single largest retainer in the extension, so its lifetime is explicit:
+   * `releaseRepoIndex` drops it, and `onWorkspaceFoldersChanged` calls that, so switching
+   * workspaces does not keep the previous tree resident. The index itself is ~150 MB on a
+   * 4,000-file workspace, dominated by the symbol table (`indexSymbols`), which is now
+   * built lazily on first use and memoized rather than rebuilt per call.
+   */
   private async loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
-    if (this.repoIndexCache?.root === root.fsPath) {
-      if (!this.repoIndexCache.symboled) {
-        this.repoIndexCache.index.indexSymbols();
-        this.repoIndexCache.symboled = true;
-      }
-      return this.repoIndexCache.index;
-    }
+    if (this.repoIndexCache?.root === root.fsPath) return this.repoIndexCache.index;
+    // A different root means the cached tree is for a workspace we are no longer in.
+    this.repoIndexCache = undefined;
     const index = new RepoIndex(await scanWorkspace(root.fsPath));
-    index.indexSymbols();
-    this.repoIndexCache = { root: root.fsPath, index, symboled: true };
+    this.repoIndexCache = { root: root.fsPath, index };
     return index;
+  }
+
+  /** Drop the workspace index. Called on workspace change and on dispose. */
+  private releaseRepoIndex(): void {
+    this.repoIndexCache = undefined;
+  }
+
+  /**
+   * Drop every per-conversation record for a conversation that is being removed.
+   *
+   * Each of these maps is keyed by conversation id and grew once per conversation with no
+   * way to shrink: `reactItems` alone holds a full copy of the transcript, so a session that
+   * created and deleted conversations kept every one of them alive. The delete and archive
+   * handlers cleaned the queue and the compaction stacks by hand and missed the rest.
+   *
+   * One method, called from both removal paths, so a map added later has an obvious home
+   * instead of silently joining the leak. `test/lag-regression.direct.mjs` asserts this list
+   * stays complete.
+   */
+  private forgetConversation(id: string): void {
+    this.reactItems.delete(id);
+    this.reactChangeTarget.delete(id);
+    this.reactPendingPaths.delete(id);
+    this.reactLastToolCall.delete(id);
+    this.reactStreaming.delete(id);
+    this.checkpointAtByConversation.delete(id);
+    this.historyBoundNoticed.delete(id);
+    this.cliModelNotices.delete(id);
+    this.mcpNoticeSignatures.delete(id);
+    this.lastAutoCompactAt.delete(id);
   }
 
   private loadRepoMemory(root: vscode.Uri): SourceCitedMemory {
@@ -2501,7 +2597,33 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.browserPreview.dispose();
     this.stopBrowserPreviewPolling();
     this.disposePendingNotifies();
+    // Every timer this class owns, so a deactivate cannot leave one running against a
+    // disposed provider. `editorContextTimer` and `mcpWarmTimer` were the gaps: neither was
+    // cleared anywhere, so a reload left them firing into a dead object.
+    //
+    // `dispose()` is reached via `context.subscriptions` (the provider is pushed in
+    // `activate`), so VS Code calls it on deactivate — the empty `deactivate()` export is
+    // not itself a leak.
     if (this.projectIndexTimer) clearTimeout(this.projectIndexTimer);
+    if (this.editorContextTimer) clearTimeout(this.editorContextTimer);
+    if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
+    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    // Stop in-flight work. A run that outlives the provider keeps making network calls and
+    // editing the workspace with nobody watching it; aborting is what makes shutdown mean
+    // "stop". Guarded because disposal must not throw, and `run`'s own catch handles the
+    // rejection through its `finally`.
+    const controllers: AbortController[] = [
+      ...this.compactionControllers.values(),
+      ...[...this.runs.values()].map(active => active.controller),
+    ];
+    for (const controller of controllers) {
+      try { controller.abort(); } catch { /* already settled */ }
+    }
+    this.compactionControllers.clear();
+    this.runs.clear();
+    // The workspace index is the largest thing this object retains; drop it so a deactivate
+    // does not leave a whole tree to be collected with the provider.
+    this.releaseRepoIndex();
     for (const folder of this.reviewTempDirs) void rm(folder, { recursive: true, force: true });
     this.reviewTempDirs.clear();
   }
@@ -3340,6 +3462,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!project || !conversation || this.runs.has(message.id)) return;
       this.queue = this.queue.filter(entry => entry.conversationId !== message.id);
       conversation.archived = !conversation.archived;
+      if (conversation.archived) {
+        // Archiving is reversible, so the transcript copy and the checkpoint clock stay:
+        // un-archiving has to render the conversation as it was. Only the streaming state
+        // is dropped, because those are per-frame caches that a hidden tab will rebuild if
+        // it is ever reopened.
+        this.reactStreaming.delete(message.id);
+        this.reactLastToolCall.delete(message.id);
+        this.reactPendingPaths.delete(message.id);
+      }
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       if (conversation.archived && project.activeConversationId === conversation.id) {
@@ -3377,6 +3508,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // here would let a later conversation that reuses this id silently adopt
       // the deleted one's session.
       this.cliSessions?.forget(message.id);
+      // Release everything keyed by this conversation. `reactItems` is a full transcript
+      // copy, so leaving it behind kept the deleted conversation's whole history resident.
+      this.forgetConversation(message.id);
       void this.context.globalState.update(`sleepycode.compactionSnapshots.${message.id}`, undefined);
       project.conversations = project.conversations.filter(item => item.id !== message.id);
       project.updatedAt = Date.now();
