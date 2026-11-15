@@ -8,10 +8,17 @@
  */
 
 import { Marked } from "marked";
+import katex from "katex";
 import { escapeCodeHtml, getCodeLanguage, highlightCode } from "./codeLanguages";
 import { codeBlockHtml } from "../../src/code-block-html.ts";
 import { linkifyDevRefs } from "../../src/dev-refs.ts";
 import { splitMarkdownBlocks } from "../../src/markdown-blocks.ts";
+import {
+  createMathRenderer,
+  protectInlineMath,
+  restoreMath,
+  type MathRenderer,
+} from "../../src/math-blocks.ts";
 import {
   attributeAllowed,
   hrefAllowed,
@@ -25,6 +32,9 @@ import {
 // through, so the output is filtered before it reaches the webview.
 // Keep highlighting bounded across all blocks in a streaming response.
 const HIGHLIGHT_BUDGET = 128_000;
+// And math bounded separately: a formula is rendered by KaTeX, which is not cheap, and a
+// reply that is one enormous formula must not stall the frame it arrives on.
+const MATH_BUDGET = 64_000;
 let highlightRemaining = 0;
 const marked = new Marked({
   gfm: true,
@@ -130,14 +140,71 @@ function cached(key: string, compute: () => Rendered): Rendered {
   return entry;
 }
 
+/**
+ * KaTeX, statically imported.
+ *
+ * A dynamic `import("katex")` does NOT work here: esbuild leaves a bare-specifier dynamic
+ * import as a runtime `import()`, which the webview cannot resolve ("Failed to resolve module
+ * specifier 'katex'") because the CSP allows only a nonce'd inline script and there is no
+ * module loader. A static import is inlined into the IIFE bundle instead, so it just works --
+ * it costs ~280 KB in `sidebar.js`, which is the trade for math actually rendering.
+ *
+ * `trust: false` is deliberate: `\href` and `\includegraphics` would let model output reach
+ * the network or the filesystem, and the whole point of sanitising is that it cannot.
+ */
+const katexRender: MathRenderer = (tex, displayMode) =>
+  katex.renderToString(tex, {
+    displayMode: Boolean(displayMode),
+    throwOnError: false,
+    errorColor: "var(--vscode-errorForeground, #f14c4c)",
+    strict: "ignore",
+    trust: false,
+    output: "html",
+  });
+
+const math = createMathRenderer(katexRender);
+
+/** Kept for callers that want to warm the renderer; a static import needs no preload. */
+export function preloadMath(): void {}
+
+/**
+ * Pull the math out of one block so marked cannot mangle it.
+ *
+ * `token.raw` is what `marked.parser` re-reads, so protecting that is sufficient. A block with
+ * no math is returned untouched, which keeps the common case allocation-free.
+ */
+function protectBlockMath(block: { raw: string; token: any }): { token: any; html: string[] } {
+  const raw = String(block.token?.raw ?? "");
+  if (!raw.includes("$") && !raw.includes("\\(") && !raw.includes("\\[")) {
+    return { token: block.token, html: [] };
+  }
+  // Start the import the first time a formula is actually seen. The first one renders as a
+  // code span while the module loads; every later one is typeset, because the import resolves
+  // in a few milliseconds and the answer is still streaming.
+  preloadMath();
+  const budget = { remaining: MATH_BUDGET };
+  const split = protectInlineMath(raw, undefined, math, budget);
+  if (!split.html.length) return { token: block.token, html: [] };
+  // Re-lex the protected text so the token tree matches what will be parsed. The block is
+  // small relative to the document, and this only happens for blocks that contain math.
+  const tokens = marked.lexer(split.text);
+  return { token: tokens[0] ?? block.token, html: split.html };
+}
+
 /** Whole-document path, for documents whose blocks cannot be rendered independently. */
 function renderWhole(src: string): string {
   return cached("doc\u0000" + src, () => {
     try {
       highlightRemaining = HIGHLIGHT_BUDGET;
+      // Math is protected here too: this path is taken for any document with raw HTML, and a
+      // formula in one of those would otherwise reach marked unmangled.
+      if (src.includes("$") || src.includes("\\(") || src.includes("\\[")) preloadMath();
+      const mathBudget = { remaining: MATH_BUDGET };
+      const split = protectInlineMath(src, undefined, math, mathBudget);
       // References are linkified before filtering, so the anchors this creates go
       // through the same allowlist as everything else rather than bypassing it.
-      const html = textDirections(sanitize(linkifyDevRefs(marked.parse(src, { async: false }) as string)));
+      let html = textDirections(sanitize(linkifyDevRefs(marked.parse(split.text, { async: false }) as string)));
+      if (split.html.length) html = restoreMath(html, split.html);
       return { html, highlighted: HIGHLIGHT_BUDGET - highlightRemaining };
     } catch {
       // Fallback: render as escaped plain text on parser failure.
@@ -203,7 +270,14 @@ export function renderMarkdownBlocks(srcIn: string): readonly string[] {
       const start = budget;
       const entry = cached(`${start}\u0000${block.key}`, () => {
         highlightRemaining = start;
-        const html = textDirections(sanitize(linkifyDevRefs(marked.parser([block.token]))));
+        // Math is pulled out before marked sees the block, because marked reads `_`, `*`
+        // and `\` as markup and mangles LaTeX. The token's `raw` is what `parser` will
+        // re-read, so protecting that is enough; `restoreMath` puts the rendered HTML back
+        // after sanitising, so KaTeX output goes through the same allowlist as everything
+        // else rather than around it.
+        const protectedBlock = protectBlockMath(block);
+        let html = textDirections(sanitize(linkifyDevRefs(marked.parser([protectedBlock.token]))));
+        if (protectedBlock.html.length) html = restoreMath(html, protectedBlock.html);
         return { html, highlighted: start - highlightRemaining };
       });
       budget = start - entry.highlighted;
