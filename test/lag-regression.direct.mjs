@@ -6,7 +6,6 @@ import { assertSource, matchesSource } from './source-assert.mjs';
 
 const agent = readFileSync('src/agent.ts', 'utf8');
 const git = readFileSync('src/git.ts', 'utf8');
-const runtime = readFileSync('src/webview/runtime.ts', 'utf8');
 
 test('the conversation payload drops file snapshots the renderer never reads', () => {
   const items = [
@@ -38,7 +37,11 @@ test('a conversation with no snapshots is republished without copying', () => {
 });
 
 test('the snapshot was weight, not signal: the renderer never referenced it', () => {
-  assert.doesNotMatch(runtime, /fileSnapshot/, 'if this now matches, the projection can be revisited');
+  // `fileSnapshot` exists so a turn can be restored; the renderer never reads it, which is why
+  // `webviewTranscriptItems` strips it. The React bundle is the thing that renders, so check
+  // there instead of the legacy template that is being removed.
+  const bundle = readFileSync('webview-ui/shared/markdown.ts', 'utf8');
+  assert.doesNotMatch(bundle, /fileSnapshot/, 'if this now matches, the projection can be revisited');
   assertSource(agent, /type: 'conversation'[^}]*items: webviewTranscriptItems\(active\.items\)/, 'the conversation post must publish the projection');
 });
 
@@ -89,21 +92,35 @@ test('the conversation list sync stops copying and re-filtering per conversation
 });
 
 test('turns that are scrolled off screen are neither laid out nor painted', () => {
-  const styles = readFileSync('src/webview/styles.ts', 'utf8');
-  assertSource(styles, /\.turn\{[^}]*content-visibility:auto[^}]*contain-intrinsic-size:auto \d+px/, 'a long transcript must not pay for offscreen turns');
+  // The legacy webview did this on `.turn`; the React path does it on `.chat-turn-group`,
+  // which keeps a turn's user message and assistant content together.
+  const styles = readFileSync('webview-ui/sidebar/sidebar.css', 'utf8');
+  assertSource(styles, /\.chat-turn-group\s*\{[^}]*content-visibility:auto/, 'an off-screen group must skip layout and paint');
+  assertSource(styles, /\.chat-turn-group\s*\{[^}]*contain-intrinsic-size:auto \d+px/, 'contain-intrinsic-size keeps the scrollbar stable');
+  // `:last-child` is the one group that must stay measurable while it streams.
+  assertSource(styles, /\.chat-turn-group:last-child\s*\{[^}]*content-visibility:visible/, 'the live group stays measurable');
 });
 
-test('typing in the composer forces layout once, not once per handler', () => {
-  assertSource(runtime, /const height = Math\.min\(input\.scrollHeight, viewportCap\)/, 'the composer measures its own height once per keystroke');
-  assert.doesNotMatch(runtime, /input\.oninput = resize/, 'a single input handler drives the composer');
-  assertSource(runtime, /if \(height === composerInputHeight\) return;/, 'an unchanged composer skips the transcript work');
-  assertSource(runtime, /if \(composerEl\.offsetHeight === syncedComposerBoxHeight\) return;/, 'the observer ignores the echo of our own resize');
+test('the composer height is capped by CSS, so typing needs no layout probing', () => {
+  // The legacy webview measured its own height with `scrollHeight` once per keystroke and
+  // skipped the work when the height had not changed. The React composer does it with no
+  // measuring at all: a CSS cap with `overflow-y: auto`, so growth is the browser's problem.
+  const styles = readFileSync('webview-ui/sidebar/sidebar.css', 'utf8');
+  assertSource(styles, /\.composer \.editor\s*\{[^}]*max-height:min\(240px, 35vh\)/, 'the editor caps its own height in CSS');
+  assertSource(styles, /\.composer \.editor\s*\{[^}]*overflow-y:auto/, 'overflow scrolls rather than growing the composer forever');
+  // And nothing in the React composer probes scrollHeight per keystroke.
+  const editor = readFileSync('webview-ui/sidebar/components/ComposerEditor.ts', 'utf8');
+  assert.doesNotMatch(editor, /scrollHeight/, 'the React editor must not measure itself');
 });
 
-test('a fence that is still streaming is escaped, not tokenized every frame', () => {
-  assertSource(runtime, /const closeCode=\(open\)=>\{/, 'the tail knows whether the fence closed');
-  assertSource(runtime, /\(open \? esc\(body\) : highlight\(body, fenceLang\)\)/, 'only a closed fence is highlighted');
-  assertSource(runtime, /closeCode\(inCode\); return html/, 'an unterminated fence takes the plain-text path');
+test('a fence that is still streaming is escaped, not highlighted every frame', () => {
+  // The legacy webview escaped an unterminated fence instead of highlighting it. The
+  // React path does the same via `isOpenFence`: an open fence is emitted as escaped text
+  // and highlighted once when it closes. The vanilla form is covered by
+  // `test/open-fence.direct.mjs`; this pins that the React markdown module keeps the rule.
+  const markdown = readFileSync('webview-ui/shared/markdown.ts', 'utf8');
+  assertSource(markdown, /function openFenceHtml/, 'the escaped-open-fence path exists');
+  assertSource(markdown, /split\.openFence && i === lastIndex/, 'only the unterminated fence takes it');
 });
 
 test('the React path escapes an open fence too, rather than highlighting it per delta', () => {
