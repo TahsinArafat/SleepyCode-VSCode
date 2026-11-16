@@ -1813,9 +1813,11 @@ export function App() {
           // The host refused the update (a CLI-owned chat cannot take a mid-run
           // one). Roll back the note the composer drew the instant the user
           // pressed send, or the transcript claims guidance that never arrived.
-          for (const [convId, pending] of pendingSteeringRef.current) {
-            if (!pending.delete(msg.requestId)) continue;
-            if (!pending.size) pendingSteeringRef.current.delete(convId);
+          if (msg.requestId != null) {
+            for (const [convId, pending] of pendingSteeringRef.current) {
+              if (!pending.delete(msg.requestId)) continue;
+              if (!pending.size) pendingSteeringRef.current.delete(convId);
+            }
           }
           const session = sessionsRef.current.get(msg.convId);
           if (session) {
@@ -1977,7 +1979,9 @@ export function App() {
       // it drop this optimistic copy instead of rendering the words twice.
       const requestId = crypto.randomUUID();
       s.turns = applyEvent(s.turns, { type: "user-steering", text, requestId });
-      pendingSteeringRef.current.set(requestId, { id: requestId, text, status: "queued", createdAt: Date.now(), steering: true });
+      const pending = pendingSteeringRef.current.get(convId) ?? new Map<string, QueuedMessage>();
+      pending.set(requestId, { id: requestId, text, status: "queued", createdAt: Date.now(), steering: true });
+      pendingSteeringRef.current.set(convId, pending);
       force();
       post({ type: "steerMessage", convId, text, requestId } as any);
       return;
