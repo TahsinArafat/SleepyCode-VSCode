@@ -14,7 +14,8 @@ if (!existsSync(src)) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, 'fonts'), { recursive: true });
 
-cpSync(join(src, 'katex.min.js'), join(out, 'katex.min.js'));
+// The legacy runtime bundle is not shipped: the React chat bundles KaTeX from node_modules.
+// Only the stylesheet and its woff2 fonts are needed at build time.
 
 const fontsDir = join(src, 'fonts');
 for (const file of readdirSync(fontsDir)) {

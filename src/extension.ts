@@ -22,7 +22,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sleepycode.openChat', () => revealChat()),
     vscode.commands.registerCommand('sleepycode.focus', () => revealChat()),
     vscode.commands.registerCommand('sleepycode.settings', () => provider.openSettings()),
-    vscode.commands.registerCommand('sleepycode.toggleReactUi', () => provider.toggleReactWebview()),
     vscode.commands.registerCommand('sleepycode.settingsWindow', () => provider.openSettingsWindow()),
     vscode.commands.registerCommand('sleepycode.openLogs', () => provider.showLogs()),
     vscode.commands.registerCommand('sleepycode.signIn', () => provider.signIn()),

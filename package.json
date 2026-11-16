@@ -154,10 +154,6 @@
         "title": "SleepyCode: Undo History"
       },
       {
-        "command": "sleepycode.toggleReactUi",
-        "title": "SleepyCode: Toggle React UI (beta)"
-      },
-      {
         "command": "sleepycode.signIn",
         "title": "SleepyCode: Sign in to SleepyAI"
       },

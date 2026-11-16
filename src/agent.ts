@@ -34,7 +34,6 @@ import { contextWindowFromError, pickContextWindow } from './context-window-core
 import { contextPressure } from './context-guard';
 import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
-import { getWebviewHtml } from './webview';
 import * as adapter from './webview-adapter';
 import { isLegacyPersonaAgent } from './agent-options';
 import * as modeRules from './agent-mode';
@@ -386,7 +385,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
   private webviewVisible = true;
-  private reactMode = false;
+  // The classic webview was removed; the React chat is the only UI, so this is
+  // pinned on. It stays a field because the run path branches on it everywhere.
+  private readonly reactMode = true;
   /** Conversations whose React transcript is live-streaming (see `post`). */
   private readonly reactStreaming = new Set<string>();
   /** Let the next transcript snapshot through even if that conversation is streaming. */
@@ -1044,11 +1045,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     this.startWorkspaceWatcher();
     this.view = view;
-    this.reactMode = this.context.globalState.get<boolean>('useReactWebview', true);
+    // The classic webview was removed. A stored `false` gets flipped so the
+    // user is never stuck on a blank panel, and told once.
+    if (this.context.globalState.get<boolean>('useReactWebview') === false) {
+      void this.context.globalState.update('useReactWebview', true);
+      void vscode.window.showInformationMessage(
+        'SleepyCode: the classic chat view was removed. The React chat is now the only UI.',
+      );
+    }
     view.webview.options = { enableScripts: true };
-    view.webview.html = this.reactMode
-      ? renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode')
-      : getWebviewHtml(view.webview, this.context.extensionUri, this.workspaceRoot()?.fsPath);
+    view.webview.html = renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode');
     view.webview.onDidReceiveMessage((message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
       if (this.reactMode && message?.type === 'updateChatWorkspace') {
@@ -2135,13 +2141,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Start the SleepyAI browser sign-in, used by the command and the React nudge. */
   public signIn(): void {
     void this.onMessage({ type: 'sleepyLogin' } as WebMessage);
-  }
-
-  public toggleReactWebview(): void {
-    const cur = this.context.globalState.get<boolean>('useReactWebview', true);
-    void this.context.globalState.update('useReactWebview', !cur).then(() => {
-      void vscode.window.showInformationMessage(`React UI ${!cur ? 'enabled' : 'disabled'}. Reload the window to apply.`);
-    });
   }
 
   private apiKeysLoaded?: Promise<void>;

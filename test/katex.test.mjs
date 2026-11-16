@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const reactApp = read('webview-ui/shared/markdown.ts');
@@ -11,10 +11,11 @@ const pkg = JSON.parse(read('package.json'));
 
 test('katex is a dependency and the bundled media assets exist', () => {
   assert.ok(pkg.dependencies?.katex, 'katex must be a dependency');
-  const js = read('media/katex/katex.min.js');
+  // The standalone runtime (katex.min.js) is not shipped: the React chat bundles
+  // KaTeX from node_modules. Only the stylesheet and its fonts ship in the VSIX.
   const css = read('media/katex/katex.min.css');
-  assert.ok(js.includes('katex'), 'bundled KaTeX runtime looks valid');
   assert.ok(css.includes('.katex'), 'bundled KaTeX stylesheet looks valid');
+  assert.ok(existsSync(new URL('../media/katex/fonts', import.meta.url)), 'font assets exist for the stylesheet');
 });
 
 test('the React webview injects KaTeX assets and widens the CSP for fonts', () => {
