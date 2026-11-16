@@ -3,8 +3,8 @@
  *
  * `webview-ui/shared/markdown.ts` caches rendered blocks in a module-level `Map` bounded by an
  * entry cap (240), a byte budget (4 MiB) and a per-entry ceiling (512 KB). The vanilla webview
- * had the same concern in a superseded whole-document cache (`src/webview/markdown-cache.ts`),
- * which went with its 8 unit tests; this file is the React-side replacement for the part of
+ * had the same concern in a superseded whole-document cache, since deleted with the
+ * vanilla renderer along with its 8 unit tests; this file is the React-side replacement for the part of
  * that coverage that is observable from outside the module.
  *
  * HONEST SCOPE: the cache is module-private, and its bounds are invisible from outside --
