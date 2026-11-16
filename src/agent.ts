@@ -20,9 +20,9 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { buildTools } from './tools';
 import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentConfig, ExtensionLogEntry, FileChange, FileSnapshot, McpConnectionData, McpConnectionStatus, Project, ProviderModelGroup, ProviderModelItem, SubagentModelMap, TranscriptItem, WebMessage, WorkItem } from './types';
 import type { ModelMessage } from 'ai';
-import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_STORED_ITEMS } from './types';
+import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_PROJECT_BYTES, MAX_STORED_ITEMS, MAX_TURN_UNDO } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
-import { enqueuePersist, loadEach, splitProjectIndex } from './persist-core';
+import { enqueuePersist, loadEach, splitProjectIndex, trimPersistedConversations } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
@@ -381,6 +381,8 @@ function isProjectMeta(entry: unknown): entry is ProjectMetaEntry & { id: string
 export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static readonly LOG_KEY = 'sleepycode.extensionLogs';
   private static readonly LOG_LIMIT = 400;
+  /** Debounce for writing the in-memory log ring to `globalState`. */
+  private static readonly LOG_FLUSH_MS = 1_000;
   /** Minimum gap between coalesced mid-run checkpoint writes. */
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   private view?: vscode.WebviewView;
@@ -458,6 +460,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private browserPreviewTimer: NodeJS.Timeout | undefined;
   private projectIndexTimer?: NodeJS.Timeout;
   private schedulerTimer?: NodeJS.Timeout;
+  /** Live log ring; `undefined` until the first log line or read pulls it from storage. */
+  private logRing?: ExtensionLogEntry[];
+  private logFlushTimer?: NodeJS.Timeout;
   private lastModelGroups: ProviderModelGroup[] = [];
   private lastSleepyModelPrices: SleepyModelPrice[] = [];
   private lastSleepyPriceRefresh = 0;
@@ -1888,9 +1893,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.log('info', 'provider.key', `${id}: ${trimmed ? 'set' : 'cleared'}`);
         await this.refreshModels();
       },
-      readLogs: async () => this.context.globalState.get<unknown[]>(AgentViewProvider.LOG_KEY, []),
+      readLogs: async () => {
+        // Pending lines are flushed first so the settings panel never shows a stale ring.
+        await this.flushLogs();
+        return this.logRingEntries();
+      },
       clearLogs: async () => {
-        await this.context.globalState.update(AgentViewProvider.LOG_KEY, []);
+        this.logRing = [];
+        await this.flushLogs();
       },
       resetAll: async () => {
         // Reuse the handler the classic webview's reset posted, so there is one
@@ -2146,15 +2156,49 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private apiKeysLoaded?: Promise<void>;
 
   private log(level: ExtensionLogEntry['level'], event: string, detail?: string): void {
-    const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
+    const entries = this.logRingEntries();
     entries.push({ timestamp: Date.now(), level, event, detail });
-    void this.context.globalState.update(AgentViewProvider.LOG_KEY, entries.slice(-AgentViewProvider.LOG_LIMIT));
+    // Trim in memory, not on each write to storage: this array is the live ring.
+    if (entries.length > AgentViewProvider.LOG_LIMIT) entries.splice(0, entries.length - AgentViewProvider.LOG_LIMIT);
+    this.scheduleLogFlush();
     // The React settings window has no log view, so the log is also written to
     // the standard Output panel where View -> Output -> SleepyCode reaches it.
     // Without this, a failed MCP connection had no readable trace anywhere.
     this.outputChannel().appendLine(
       `[${new Date().toISOString()}] ${level.toUpperCase()} ${event}${detail ? `: ${detail}` : ''}`,
     );
+  }
+
+  /**
+   * The log ring, read from storage once and then kept in memory.
+   *
+   * `log()` used to do a `globalState.get` of the 400-entry array, a push, and a full
+   * `globalState.update` on **every** call (~115 call sites, several per model call).
+   * Each one deserialized and re-persisted the whole ring. The ring now lives here and
+   * is flushed on a short debounce and on dispose, so a burst of logging costs one write.
+   */
+  private logRingEntries(): ExtensionLogEntry[] {
+    this.logRing ??= this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
+    return this.logRing;
+  }
+
+  private scheduleLogFlush(): void {
+    if (this.logFlushTimer) return;
+    this.logFlushTimer = setTimeout(() => {
+      this.logFlushTimer = undefined;
+      void this.flushLogs();
+    }, AgentViewProvider.LOG_FLUSH_MS);
+  }
+
+  /** Write the ring out now. Called by the debounce, by dispose, and by any reader. */
+  private async flushLogs(): Promise<void> {
+    if (this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer);
+      this.logFlushTimer = undefined;
+    }
+    const entries = this.logRing;
+    if (!entries) return;
+    await this.context.globalState.update(AgentViewProvider.LOG_KEY, entries.slice(-AgentViewProvider.LOG_LIMIT));
   }
 
   private output?: vscode.OutputChannel;
@@ -2196,7 +2240,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private sendExtensionLogs(): void {
-    const entries = this.context.globalState.get<ExtensionLogEntry[]>(AgentViewProvider.LOG_KEY, []);
+    const entries = this.logRingEntries();
     this.post({ type: 'extensionLogs', logs: entries.map(entry => '[' + new Date(entry.timestamp).toISOString() + '] ' + entry.level.toUpperCase() + ' ' + entry.event + (entry.detail ? ': ' + entry.detail : '')) });
   }
   private loadApiKeys(): Promise<void> {
@@ -2609,6 +2653,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.editorContextTimer) clearTimeout(this.editorContextTimer);
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    // Flush the log ring before the debounce would have fired. Without this, the last
+    // second of log lines (the ones near a failure, when they matter) died with dispose.
+    // `flushLogs` also clears the timer, so no callback survives into a dead provider.
+    if (this.logRing) void this.flushLogs().catch(() => { /* shutdown must not throw */ });
     // Stop in-flight work. A run that outlives the provider keeps making network calls and
     // editing the workspace with nobody watching it; aborting is what makes shutdown mean
     // "stop". Guarded because disposal must not throw, and `run`'s own catch handles the
@@ -2685,8 +2733,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             }
             conversation.pending = undefined;
           }
-          if (!Array.isArray(conversation.turnUndo)) conversation.turnUndo = [];
-          if (!Array.isArray(conversation.turnRedo)) conversation.turnRedo = [];
+          // Clamp on load, not only on push. `turnUndo`/`turnRedo` are stored input and
+          // were previously only defaulted to `[]` here, so a stack longer than the
+          // in-memory cap survived a reload and stayed unbounded for the session.
+          conversation.turnUndo = Array.isArray(conversation.turnUndo) ? conversation.turnUndo.slice(-MAX_TURN_UNDO) : [];
+          conversation.turnRedo = Array.isArray(conversation.turnRedo) ? conversation.turnRedo.slice(-MAX_TURN_UNDO) : [];
           return { ...conversation, items };
         }),
       };
@@ -2957,18 +3008,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         ...this.unreadableProjectEntries,
       ]);
       for (const project of projects) {
-        const conversations = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
-        if (conversations.length < project.conversations.length) {
-          const dropped = project.conversations.length - conversations.length;
-          this.post({ type: 'contextNotice', conversationId: project.activeConversationId, kind: 'trimmed', text: `${dropped} older conversation${dropped === 1 ? '' : 's'} in this project were not saved (limit ${MAX_PERSISTED_CONVERSATIONS}).` });
-        }
         await this.context.globalState.update(`sleepycode.project.${project.id}`, {
-          conversations,
+          conversations: this.persistedConversationsFor(project),
           activeConversationId: project.activeConversationId,
         });
       }
     }, error => this.reportPersistFailure(error));
     return this.persistChain;
+  }
+
+  /**
+   * The conversations a project is allowed to store, after the count and byte limits.
+   *
+   * Both limits are reported rather than applied silently: a user who loses the older
+   * half of a project should be told which limit took it, not discover it after a reload.
+   */
+  private persistedConversationsFor(project: Project): Conversation[] {
+    const byCount = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
+    if (byCount.length < project.conversations.length) {
+      const dropped = project.conversations.length - byCount.length;
+      this.post({ type: 'contextNotice', conversationId: project.activeConversationId, kind: 'trimmed', text: `${dropped} older conversation${dropped === 1 ? '' : 's'} in this project were not saved (limit ${MAX_PERSISTED_CONVERSATIONS}).` });
+    }
+    // The count limit is display-ordered (most recent first), which is also the order
+    // the byte budget evicts in. The active conversation is never evicted.
+    const trimmed = trimPersistedConversations(
+      byCount,
+      MAX_PERSISTED_PROJECT_BYTES,
+      conversation => JSON.stringify(conversation).length,
+      { keepId: project.activeConversationId },
+    );
+    if (!trimmed.dropped.length) return trimmed.kept;
+    // Evicting the transcript drops the turn's `fileSnapshot` too, so undo for those
+    // turns is gone on reload; the notice says "not saved" rather than "deleted" for
+    // that reason. The in-memory copy is untouched and still undoable this session.
+    this.log('warn', 'persist.project.trimmed', `project=${project.id} dropped=${trimmed.dropped.length} bytes=${trimmed.bytes} limit=${MAX_PERSISTED_PROJECT_BYTES}`);
+    this.post({ type: 'contextNotice', conversationId: project.activeConversationId, kind: 'trimmed', text: `${trimmed.dropped.length} older conversation${trimmed.dropped.length === 1 ? '' : 's'} in this project were not saved (storage limit ${Math.round(MAX_PERSISTED_PROJECT_BYTES / 1_000_000)} MB).` });
+    return trimmed.kept;
   }
 
   /**
@@ -2995,9 +3070,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private persistProject(project: Project): Promise<void> {
     this.persistChain = enqueuePersist(this.persistChain, async () => {
-      const conversations = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
       await this.context.globalState.update(`sleepycode.project.${project.id}`, {
-        conversations,
+        conversations: this.persistedConversationsFor(project),
         activeConversationId: project.activeConversationId,
       });
     }, error => this.reportPersistFailure(error));
@@ -3307,7 +3381,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'clearExtensionLogs') {
-      await this.context.globalState.update(AgentViewProvider.LOG_KEY, []);
+      this.logRing = [];
+      await this.flushLogs();
       this.sendExtensionLogs();
       return;
     }
@@ -3726,7 +3801,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           return;
         }
       }
-      conversation.turnUndo = [...(conversation.turnUndo ?? []), popped.snapshot].slice(-5);
+      conversation.turnUndo = [...(conversation.turnUndo ?? []), popped.snapshot].slice(-MAX_TURN_UNDO);
       conversation.turnRedo = [];
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
@@ -3770,7 +3845,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // restored the transcript. Reverse both if workspace restoration fails.
         popLastTurn(conversation);
         conversation.turnRedo = conversation.turnRedo?.slice(0, -1) ?? [];
-        conversation.turnUndo = [...(conversation.turnUndo ?? []), snapshot].slice(-5);
+        conversation.turnUndo = [...(conversation.turnUndo ?? []), snapshot].slice(-MAX_TURN_UNDO);
         void vscode.window.showErrorMessage(`Could not redo turn files: ${errorMessage(error)}`);
         return;
       }

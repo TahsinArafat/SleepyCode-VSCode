@@ -67,3 +67,64 @@ export function loadEach<T, R>(
     }
   });
 }
+
+/**
+ * Trim a persisted conversation list to a byte budget, oldest-first.
+ *
+ * The stored record carries every transcript item, and an item carries the complete
+ * pre-edit contents of every file the turn touched. Neither had a cap: the only limits
+ * were counts (projects, conversations, items), so a handful of conversations editing
+ * large files could write tens of megabytes into `globalState` on every checkpoint.
+ *
+ * Two rules make this safe to apply to a live product:
+ *
+ * - **Never drop a conversation that is still open in the window.** The active
+ *   conversation is the one the user is looking at; trimming it to satisfy a budget
+ *   turns a storage limit into apparent data loss.
+ * - **Trim in removal order, not display order.** The caller passes conversations
+ *   already sorted most-recent-first, and `pinned` entries sort first. Pinned
+ *   conversations are protected because the user asked to keep them.
+ *
+ * Returns the kept list plus what was dropped, so the caller can report the loss the
+ * way the conversation-count limit already does.
+ */
+export function trimPersistedConversations<T extends { id: string; pinned?: boolean }>(
+  conversations: readonly T[],
+  budgetBytes: number,
+  measure: (conversation: T) => number,
+  options: { keepId?: string } = {},
+): { kept: T[]; dropped: T[]; bytes: number } {
+  const sizes = conversations.map(conversation => measure(conversation));
+  let total: number;
+  try {
+    total = sizes.reduce((sum, size) => sum + size, 0);
+  } catch {
+    // A record that cannot be measured at all (circular or a throwing getter) is the
+    // caller's problem to report; do not let the budget logic be the thing that throws.
+    return { kept: [...conversations], dropped: [], bytes: 0 };
+  }
+  if (total <= budgetBytes) return { kept: [...conversations], dropped: [], bytes: total };
+
+  const dropped: T[] = [];
+  const kept: T[] = [];
+  // Decide removability first so the loop does not reconsider a protected entry.
+  const removable = conversations.map((conversation, index) =>
+    conversation.pinned === true || (options.keepId !== undefined && conversation.id === options.keepId) ? -1 : index);
+
+  // Walk from the least-recent end, which is the tail of the caller's ordering.
+  const evictionOrder = removable.filter(index => index >= 0).reverse();
+  const removed = new Set<number>();
+  for (const index of evictionOrder) {
+    if (total <= budgetBytes) break;
+    removed.add(index);
+    dropped.push(conversations[index]!);
+    total -= sizes[index]!;
+  }
+
+  for (let index = 0; index < conversations.length; index++) {
+    if (!removed.has(index)) kept.push(conversations[index]!);
+  }
+  // `dropped` reads oldest-first so the caller can name the count naturally.
+  dropped.reverse();
+  return { kept, dropped, bytes: Math.max(0, total) };
+}

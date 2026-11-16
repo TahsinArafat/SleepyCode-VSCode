@@ -487,6 +487,20 @@ export const MAX_PERSISTED_REASONING = 32_000;
 export const MAX_STORED_ITEMS = 2_000;
 export const MAX_PERSISTED_PROJECTS = 500;
 export const MAX_PERSISTED_CONVERSATIONS = 500;
+/**
+ * Turns kept in the per-conversation undo/redo stacks. Enforced in memory on every
+ * push and again on load: a stored stack is untrusted input, and a record written by
+ * an older build (or hand-edited) must not load unbounded.
+ */
+export const MAX_TURN_UNDO = 5;
+/**
+ * Soft byte budget for one project's persisted conversations.
+ *
+ * `globalState` is a JSON blob per key with no natural ceiling; this keeps a project's
+ * transcript from growing without one. Chosen well above any realistic working set so
+ * normal use never sees a trim — when it does fire, it is reported rather than silent.
+ */
+export const MAX_PERSISTED_PROJECT_BYTES = 8_000_000;
 
 export type ExtensionLogEntry = {
   timestamp: number;
