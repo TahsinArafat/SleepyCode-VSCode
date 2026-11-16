@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { assertSource } from './source-assert.mjs';
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 
 test('usage aggregate carries cache read and write tokens', () => {
@@ -33,18 +32,19 @@ test('agent reads provider cache token details', () => {
 });
 
 test('webview cost model bills cache reads at the cache rate', () => {
-  const runtime = read('src/webview/runtime.ts');
-  assertSource(runtime, /cacheReadPrice/);
-  assertSource(runtime, /cacheWritePrice/);
-  assertSource(runtime, /cachedRead=Math\.min\(cacheReadTok,inTok\)/);
-  assertSource(runtime, /uncachedInput=Math\.max\(0,inTok-cachedRead\)/);
-  assertSource(runtime, /cacheRead:cacheReadCost/);
-  assertSource(runtime, /total:inputCost\+cacheReadCost\+cacheWriteCost\+outputCost/);
+  // The React UI reads its numbers from the host's sessionStats, which come from
+  // `costOf` (src/cost-core.ts). The cache-rate split is pinned in detail by
+  // cost-core.direct.mjs -- this test used to pin it against the legacy webview's
+  // private copy of the same arithmetic.
+  assert.match(read('src/cost-core.ts'), /const cacheReadPrice = typeof price\.cacheReadPrice === 'number' \? price\.cacheReadPrice : inputPrice;/);
+  assert.match(read('src/cost-core.ts'), /const cacheWritePrice = typeof price\.cacheWritePrice === 'number' \? price\.cacheWritePrice : inputPrice;/);
+  assert.match(read('src/cost-core.ts'), /const cachedRead = Math\.min\(Math\.max\(0, tokens\.cacheRead \|\| 0\), input\);/);
+  assert.match(read('src/cost-core.ts'), /const uncachedInput = input - cachedRead;/);
 });
 
-test('webview live usage and session info surface cache tokens', () => {
-  const runtime = read('src/webview/runtime.ts');
-  assertSource(runtime, /cacheRead:m\.cacheReadTokens\|\|0/);
-  assertSource(runtime, /cacheReadTok\+=live\.cacheRead\|\|0/);
-  assertSource(runtime, /cacheCell/);
+test('usage aggregate reports the cache tokens the webview renders', () => {
+  const usage = read('src/usage.ts');
+  // Live tokens and session totals must both count cache reads/writes.
+  assert.match(usage, /cacheRead:/);
+  assert.match(usage, /cacheWrite:/);
 });

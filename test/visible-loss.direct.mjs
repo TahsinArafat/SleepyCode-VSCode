@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { assertSource } from './source-assert.mjs';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
-const runtime = readFileSync(new URL('../src/webview/runtime.ts', import.meta.url), 'utf8');
+const adapter = readFileSync(new URL('../src/webview-adapter.ts', import.meta.url), 'utf8');
+const history = readFileSync(new URL('../webview-ui/sidebar/components/History.tsx', import.meta.url), 'utf8');
+const app = readFileSync(new URL('../webview-ui/sidebar/App.tsx', import.meta.url), 'utf8');
 
 test('a conversation is never shrunk by cutting messages out of the request', () => {
   // Cutting stored messages to fit a budget is the loss itself: the model repeats work
@@ -17,9 +19,12 @@ test('a conversation is never shrunk by cutting messages out of the request', ()
 
 test('a deliberate stop is not reported as a failure', () => {
   assert.match(agent, /code: 'interrupted'/);
-  // Sidebar status must distinguish stopped from failed.
+  // The host marks the conversation 'stopped' (not 'failed'); the adapter relays it to
+  // the React thread list; the row renders a distinct status glyph and label.
   assert.match(agent, /errorInfo\?\.code === 'interrupted' \? 'stopped' : 'failed'/);
-  assertSource(runtime, /x\.status==='stopped'\?'Stopped'/);
+  assertSource(adapter, /conversation\.status === 'string' \? \{ status: conversation\.status \}/, 'the stopped status must reach the thread list');
+  assertSource(history, /hi-status/, 'the thread list renders a status marker');
+  assertSource(history, /statusLabel/, 'the status marker carries a human label');
 });
 
 test('an orphaned run failure leaves a persisted, retryable turn', () => {
@@ -35,8 +40,11 @@ test('an orphaned run failure leaves a persisted, retryable turn', () => {
 });
 
 test('the orphaned error renders with a retry action', () => {
-  // addError only draws a retry button when passed the flag; the error case passed none.
-  assertSource(runtime, /case'error':[\s\S]{0,400}addError\(m\.text,!!m\.keepTurn\)/);
+  // The host persists an error block; the adapter projects it; the assistant message
+  // footer offers the retry action whenever it is preceded by a user turn -- which is
+  // exactly the shape of an orphaned run.
+  assert.match(adapter, /kind: 'error', message:/, 'an error item is projected as an error block');
+  assertSource(app, /group\[0\]\.turn\.role === "user" \? onRetryResponse : undefined/, 'a persisted error preceded by a user turn offers a retry action');
 });
 
 test('a stopped turn still offers retry so its partial work is recoverable', () => {

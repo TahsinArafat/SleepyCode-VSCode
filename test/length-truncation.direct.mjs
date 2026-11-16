@@ -5,7 +5,7 @@ import { assertSource } from './source-assert.mjs';
 import { resumeFromLastAssistant } from '../src/session-core.ts';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
-const runtime = readFileSync(new URL('../src/webview/runtime.ts', import.meta.url), 'utf8');
+const app = readFileSync(new URL('../webview-ui/sidebar/App.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
 
 test('a response cut off by the output limit is not committed as a clean success', () => {
@@ -38,6 +38,9 @@ test('resume derives a max_tokens reason and does not build an error card', () =
 });
 
 test('the pause card explains a truncation instead of a step limit', () => {
-  assertSource(runtime, /item\.pauseReason==='max_tokens'/);
-  assertSource(runtime, /Response truncated/);
+  // The React pause card branches on the reason: a max-tokens cut-off shows the
+  // truncation title and an incomplete-answer note with a "Continue response" action.
+  assertSource(app, /block\.reason === "max-tokens"/, 'the card must branch on the reason');
+  assertSource(app, /Response truncated/, 'a truncation must be named as a truncation');
+  assertSource(app, /Continue response/, 'the action continues the response');
 });
