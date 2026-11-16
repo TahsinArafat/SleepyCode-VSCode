@@ -6,6 +6,7 @@ import { assertSource } from './source-assert.mjs';
 import { MAX_TURN_UNDO } from '../src/types.ts';
 
 const agent = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
+const sessionCore = readFileSync(new URL('../src/session-core.ts', import.meta.url), 'utf8');
 
 test('a failed write does not poison the persist chain', async () => {
   const written = [];
@@ -87,8 +88,13 @@ test('a stored undo stack longer than the cap is clamped on load', () => {
   // The in-memory push sites already slice to MAX_TURN_UNDO. Load is a separate
   // path over untrusted stored input: a record written by an older build (or a
   // hand-edited one) used to load unbounded and stay that way for the session.
-  assertSource(agent, 'conversation.turnUndo = Array.isArray(conversation.turnUndo) ? conversation.turnUndo.slice(-MAX_TURN_UNDO) : [];');
-  assertSource(agent, 'conversation.turnRedo = Array.isArray(conversation.turnRedo) ? conversation.turnRedo.slice(-MAX_TURN_UNDO) : [];');
+  //
+  // The clamp lives in session-core's restoreLoadedConversation now, so it is
+  // asserted there (behaviorally, in session-core.direct.mjs) and pinned here as
+  // the routing requirement: every stored conversation goes through that helper.
+  assertSource(sessionCore, 'conversation.turnUndo = Array.isArray(conversation.turnUndo) ? conversation.turnUndo.slice(-options.maxTurnUndo) : [];');
+  assertSource(sessionCore, 'conversation.turnRedo = Array.isArray(conversation.turnRedo) ? conversation.turnRedo.slice(-options.maxTurnUndo) : [];');
+  assertSource(agent, 'maxTurnUndo: MAX_TURN_UNDO,');
   // Both the undo and the redo-failure-reversal push must use the same constant;
   // a literal 5 here would drift from the load clamp.
   assertSource(agent, 'conversation.turnUndo = [...(conversation.turnUndo ?? []), popped.snapshot].slice(-MAX_TURN_UNDO);');

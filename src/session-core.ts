@@ -362,3 +362,88 @@ export function loadCompactionStacks<T>(stored: unknown): { undo: T[]; redo: T[]
   }
   return { undo: [], redo: [] };
 }
+
+/**
+ * Everything that must be true of a conversation recovered from storage.
+ *
+ * Loading a conversation is not "read the JSON back". A stored record can be truncated
+ * by a reload mid-run, written by an older build, or hand-edited, so the load path has
+ * three jobs that are easy to lose one at a time:
+ *
+ * 1. **Normalize each item**, degrading a single corrupt one instead of aborting the
+ *    whole load (a throw here used to render an empty chat with no explanation).
+ * 2. **Fold an interrupted run's checkpoint** onto the transcript, so the next message
+ *    keeps that work and the user can see the turn did not finish.
+ * 3. **Clamp the undo stacks.** They are bounded when pushed, but a stored stack longer
+ *    than the cap must not survive a reload.
+ *
+ * This lives here rather than in the provider so the rules are testable without a VS
+ * Code host, and so a future store cannot reimplement one of the three and miss another.
+ */
+export function restoreLoadedConversation<
+  TItem extends SessionTranscriptItem,
+  TMessage extends SessionHistoryMessage,
+  TConversation extends SessionConversation<TItem, TMessage> & { pending?: SessionPending<TMessage> },
+>(
+  conversation: TConversation,
+  options: {
+    /** Per-model history floor; see `storedMessageLimit`. */
+    maxStoredMessages: number;
+    /** Cap for the undo/redo stacks. */
+    maxTurnUndo: number;
+    /** Coerce one stored item, or throw to have it replaced by `fallbackItem`. */
+    normalizeItem: (item: unknown, index: number) => TItem;
+    /** The item substituted when one fails to normalize. */
+    fallbackItem: () => TItem;
+    /** The marker item appended when a run was interrupted with nothing already shown. */
+    interruptedItem: (extras: SessionPendingExtras) => TItem;
+    onCorruptItem?: (error: unknown, index: number) => void;
+  },
+): TConversation {
+  const stored = Array.isArray(conversation.items) ? conversation.items : [];
+  const items = loadEachLike(stored, options.normalizeItem, options.fallbackItem, options.onCorruptItem);
+  const pending = conversation.pending;
+  conversation.messages = recoverPendingHistory(conversation.messages, pending, options.maxStoredMessages);
+  if (pending) {
+    const last = items[items.length - 1];
+    const alreadyShown = last?.role === 'assistant' && (last.kind === 'error' || last.paused);
+    const extras = interruptedFieldsFromPending(pending);
+    if (!alreadyShown) {
+      const interrupted = options.interruptedItem(extras);
+      interrupted.partialText = extras.partialText ?? (typeof last?.partialText === 'string' ? last.partialText : undefined);
+      if (extras.work) interrupted.work = extras.work;
+      if (extras.changes) interrupted.changes = extras.changes;
+      if (extras.fileSnapshot) interrupted.fileSnapshot = extras.fileSnapshot;
+      if (extras.gitTree) interrupted.gitTree = extras.gitTree;
+      items.push(interrupted);
+    } else {
+      last.partialText ??= extras.partialText;
+      last.work ??= extras.work;
+      last.changes ??= extras.changes;
+      last.fileSnapshot ??= extras.fileSnapshot;
+      last.gitTree ??= extras.gitTree;
+    }
+    conversation.pending = undefined;
+  }
+  conversation.turnUndo = Array.isArray(conversation.turnUndo) ? conversation.turnUndo.slice(-options.maxTurnUndo) : [];
+  conversation.turnRedo = Array.isArray(conversation.turnRedo) ? conversation.turnRedo.slice(-options.maxTurnUndo) : [];
+  return { ...conversation, items };
+}
+
+/**
+ * `loadEach` from `persist-core`, redeclared here.
+ *
+ * `session-core` is deliberately import-free so the dependency-free direct suite can
+ * load it; importing `persist-core` would drag in the persistence layer for a helper
+ * that is six lines of map/try.
+ */
+function loadEachLike<T, R>(records: readonly T[], load: (record: T, index: number) => R, fallback: (record: T, index: number) => R, onError?: (error: unknown, index: number) => void): R[] {
+  return records.map((record, index) => {
+    try {
+      return load(record, index);
+    } catch (error) {
+      onError?.(error, index);
+      return fallback(record, index);
+    }
+  });
+}

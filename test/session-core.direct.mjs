@@ -13,6 +13,7 @@ import {
   popLastTurn,
   recoverPendingHistory,
   restoreCompaction,
+  restoreLoadedConversation,
   resumeFromLastAssistant,
   sliceMessagesToItems,
   takeTurnRedo,
@@ -304,4 +305,80 @@ test('compaction redo snapshots persist with the undo stack', () => {
   assert.equal(loaded.redo.length, 1);
   assert.deepEqual(loadCompactionStacks([snapshot]), { undo: [snapshot], redo: [] });
   assert.deepEqual(loadCompactionStacks(undefined), { undo: [], redo: [] });
+});
+
+// --- restoreLoadedConversation: the three rules a stored record must satisfy ---
+
+const loadedItem = (text, extra = {}) => ({ id: text, role: 'user', text, ...extra });
+
+test('a stored record has its undo stacks clamped, not just defaulted', () => {
+  // Pushing clamps to MAX_TURN_UNDO, but load reads untrusted input: an older build or
+  // a hand-edited record could carry a longer stack, and it used to load as-is.
+  const many = Array.from({ length: 9 }, (_, index) => ({ items: [], messages: [], marker: index }));
+  const restored = restoreLoadedConversation(
+    { items: [], messages: [], turnUndo: [...many], turnRedo: [...many] },
+    { maxStoredMessages: 100, maxTurnUndo: 3, normalizeItem: item => item, fallbackItem: () => loadedItem('fallback'), interruptedItem: () => loadedItem('interrupted') },
+  );
+  assert.equal(restored.turnUndo.length, 3, 'the undo stack is clamped to the cap');
+  assert.equal(restored.turnRedo.length, 3, 'the redo stack is clamped too');
+  // The most recent turns are the ones worth keeping.
+  assert.deepEqual(restored.turnUndo.map(entry => entry.marker), [6, 7, 8]);
+  assert.deepEqual(restored.turnRedo.map(entry => entry.marker), [6, 7, 8]);
+});
+
+test('a conversation with no stacks gets empty arrays rather than undefined', () => {
+  const restored = restoreLoadedConversation(
+    { items: [], messages: [] },
+    { maxStoredMessages: 100, maxTurnUndo: 5, normalizeItem: item => item, fallbackItem: () => loadedItem('fallback'), interruptedItem: () => loadedItem('interrupted') },
+  );
+  assert.deepEqual(restored.turnUndo, []);
+  assert.deepEqual(restored.turnRedo, []);
+});
+
+test('one corrupt item degrades alone instead of aborting the load', () => {
+  const errors = [];
+  const restored = restoreLoadedConversation(
+    { items: [{ ok: 1 }, { boom: true }, { ok: 3 }], messages: [] },
+    {
+      maxStoredMessages: 100,
+      maxTurnUndo: 5,
+      normalizeItem: item => { if (item.boom) throw new Error('corrupt'); return loadedItem(`item-${item.ok}`); },
+      fallbackItem: () => loadedItem('fallback'),
+      interruptedItem: () => loadedItem('interrupted'),
+      onCorruptItem: (error, index) => errors.push({ error, index }),
+    },
+  );
+  assert.deepEqual(restored.items.map(item => item.text), ['item-1', 'fallback', 'item-3'], 'the good items survive');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].index, 1, 'the failing index is reported so it can be logged');
+});
+
+test('an interrupted run is folded onto the transcript and marked', () => {
+  const restored = restoreLoadedConversation(
+    {
+      items: [loadedItem('question')],
+      messages: [{ role: 'user', content: 'question' }],
+      pending: { userText: 'question', messages: [{ role: 'user', content: 'question' }, { role: 'assistant', content: 'half an answer' }], startedAt: Date.now(), partialText: 'half an answer', work: [{ id: 'w1' }] },
+    },
+    { maxStoredMessages: 100, maxTurnUndo: 5, normalizeItem: item => item, fallbackItem: () => loadedItem('fallback'), interruptedItem: extras => loadedItem('interrupted', extras) },
+  );
+  const last = restored.items[restored.items.length - 1];
+  assert.equal(last.text, 'interrupted', 'the reload left a visible interrupted turn');
+  assert.equal(last.partialText, 'half an answer', 'the partial text is preserved');
+  assert.deepEqual(last.work, [{ id: 'w1' }]);
+  assert.equal(restored.pending, undefined, 'the checkpoint is consumed, so the next send does not replay it');
+});
+
+test('an interrupted run that already shows an error card is not duplicated', () => {
+  // Reloading twice must not stack a second interrupted card on the same turn.
+  const restored = restoreLoadedConversation(
+    {
+      items: [loadedItem('question'), loadedItem('Interrupted', { role: 'assistant', kind: 'error' })],
+      messages: [],
+      pending: { userText: 'question', messages: [], startedAt: Date.now(), partialText: 'late text' },
+    },
+    { maxStoredMessages: 100, maxTurnUndo: 5, normalizeItem: item => item, fallbackItem: () => loadedItem('fallback'), interruptedItem: () => loadedItem('interrupted') },
+  );
+  assert.equal(restored.items.length, 2, 'no extra item is appended');
+  assert.equal(restored.items[1].partialText, 'late text', 'the extras fold onto the existing card instead');
 });

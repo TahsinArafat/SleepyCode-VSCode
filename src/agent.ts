@@ -29,10 +29,10 @@ import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, 
 import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
 import { AUTO_COMPACT_BUDGET_RATIO, AUTO_COMPACT_RATIO, CHARS_PER_TOKEN, COMPACTION_HISTORY_ITEMS, COMPACTION_PROMPT_MAX_CHARS, compactionOutputBudget, compactionPromptInput, contextOccupancy, estimateHistoryTokens, estimateMessageTokens, selectCarriedItems, shouldAutoCompact, storedMessageLimit, structuredHistoryBudget, summarizeFileOperations, DEFAULT_CONTEXT_WINDOW } from './compaction-core';
-import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, prepareStructuredHistory, recoverPendingHistory } from './iteration-core';
+import { appendConversationMessages, iterationRequestMessages, pausedByStepLimit, prepareStructuredHistory } from './iteration-core';
 import { contextWindowFromError, pickContextWindow } from './context-window-core';
 import { contextPressure } from './context-guard';
-import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, interruptedFieldsFromPending, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
+import { applyTurnSnapshot, branchConversationState, clearForwardStacks, interruptedAssistantFields, INTERRUPTED_TURN_TEXT, loadCompactionStacks, persistCompactionStacks, popLastTurn, restoreCompaction, restoreLoadedConversation, resumeFromLastAssistant, sliceMessagesToItems, takeTurnRedo, workspaceGitRestoreFromSnapshot, workspaceRestoreFromSnapshot, type SessionCompactionSnapshot, type SessionTurnSnapshot } from './session-core';
 import { classifySubagentStep, harvestSubagentText, rememberVisibleText } from './subagent-core';
 import * as adapter from './webview-adapter';
 import { isLegacyPersonaAgent } from './agent-options';
@@ -2682,49 +2682,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
         conversations: conversations.map(conversation => {
           const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-          // A single corrupt record must not abort the load: an earlier unguarded
-          // `items.map` threw here, which left the panel rendering an empty chat with
-          // no error at all. Degrade that one conversation and keep the rest.
-          const items = loadEach(
-            Array.isArray(conversation.items) ? conversation.items : [],
-            (item, index) => normalizeTranscriptItem(item, baseTimestamp + index),
-            () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
-            error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
-          ) as TranscriptItem[];
-          // A run interrupted by a reload/crash left a partial turn behind. Fold it
-          // into the structured history so the next message keeps that work, then
-          // mark the turn as interrupted so the user knows it did not finish.
-          const pending = conversation.pending;
-          // The limit is per model, and the catalog may not be resolved this early; the
-          // floor it falls back to is still far above a conversation that has been
-          // compacting on its token budget.
-          conversation.messages = recoverPendingHistory(conversation.messages, pending, this.storedMessageLimitFor(conversation));
-          if (pending) {
-            const last = items[items.length - 1];
-            const alreadyShown = last?.role === 'assistant' && (last.kind === 'error' || last.paused);
-            const extras = interruptedFieldsFromPending(pending);
-            if (!alreadyShown) {
-              const interrupted = createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree);
-              interrupted.partialText = extras.partialText ?? (typeof last?.partialText === 'string' ? last.partialText : undefined);
-              if (extras.work) interrupted.work = extras.work as WorkItem[];
-              if (extras.changes) interrupted.changes = extras.changes as FileChange[];
-              if (extras.fileSnapshot) interrupted.fileSnapshot = extras.fileSnapshot as FileSnapshot[];
-              items.push(interrupted);
-            } else {
-              last.partialText ??= extras.partialText as string | undefined;
-              last.work ??= extras.work as WorkItem[] | undefined;
-              last.changes ??= extras.changes as FileChange[] | undefined;
-              last.fileSnapshot ??= extras.fileSnapshot as FileSnapshot[] | undefined;
-              last.gitTree ??= extras.gitTree;
-            }
-            conversation.pending = undefined;
-          }
-          // Clamp on load, not only on push. `turnUndo`/`turnRedo` are stored input and
-          // were previously only defaulted to `[]` here, so a stack longer than the
-          // in-memory cap survived a reload and stayed unbounded for the session.
-          conversation.turnUndo = Array.isArray(conversation.turnUndo) ? conversation.turnUndo.slice(-MAX_TURN_UNDO) : [];
-          conversation.turnRedo = Array.isArray(conversation.turnRedo) ? conversation.turnRedo.slice(-MAX_TURN_UNDO) : [];
-          return { ...conversation, items };
+          return restoreLoadedConversation(conversation as Conversation, {
+            // The limit is per model, and the catalog may not be resolved this early; the
+            // floor it falls back to is still far above a conversation that has been
+            // compacting on its token budget.
+            maxStoredMessages: this.storedMessageLimitFor(conversation),
+            maxTurnUndo: MAX_TURN_UNDO,
+            normalizeItem: (item, index) => normalizeTranscriptItem(item as Partial<TranscriptItem>, baseTimestamp + index),
+            fallbackItem: () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
+            interruptedItem: extras => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree as string | undefined),
+            onCorruptItem: error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
+          }) as Conversation;
         }),
       };
     });

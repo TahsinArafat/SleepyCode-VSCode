@@ -17,6 +17,7 @@ const cliEngine = read('src/cli-engine.ts');
 const cliProjection = read('src/cli-projection.ts');
 const types = read('src/types.ts');
 const iterationCore = read('src/iteration-core.ts');
+const sessionCore = read('src/session-core.ts');
 const pkg = JSON.parse(read('package.json'));
 
 test('SleepyCode rebrand removes the legacy product identity from primary surfaces', () => {
@@ -445,9 +446,12 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   assert.match(agent, /if \(run\.controller\.signal\.aborted\) \{[\s\S]{0,400}appendConversationMessages\(conversation, historyUserText, runMessages, Boolean\(resume\)\)/);
   // The error branch does the same so a retry continues rather than re-reading.
   assert.match(agent, /conversation\.pending = undefined;/);
-  // A reload/crash recovers the pending turn into structured history on load.
-  assert.match(agent, /const pending = conversation\.pending;/);
-  assert.match(agent, /recoverPendingHistory\(conversation\.messages, pending, this\.storedMessageLimitFor\(conversation\)\)/);
+  // A reload/crash recovers the pending turn into structured history on load. The rules
+  // moved into session-core (restoreLoadedConversation) so they are testable without a
+  // host; the provider must route every stored conversation through it.
+  assert.match(agent, /restoreLoadedConversation\(conversation as Conversation, \{/);
+  assert.match(agent, /maxStoredMessages: this\.storedMessageLimitFor\(conversation\)/);
+  assert.match(sessionCore, /recoverPendingHistory\(conversation\.messages, pending, options\.maxStoredMessages\)/);
   // Exactly one declaration, in the outer run scope so catch/finally can reach it.
   assert.equal((agent.match(/let runMessages: ModelMessage\[\] = \[\];/g) || []).length, 1);
   // A mid-run checkpoint writes only the project that owns the dirty conversation.
