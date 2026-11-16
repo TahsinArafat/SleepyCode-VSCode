@@ -153,3 +153,21 @@ test('both persist paths apply the byte budget, not just the count limit', () =>
   assertSource(agent, '{ keepId: project.activeConversationId },');
   assertSource(agent, "this.log('warn', 'persist.project.trimmed'");
 });
+
+test('archiving releases the compaction snapshot cache and un-archiving reloads it', () => {
+  // The compaction undo/redo stacks are the heaviest per-conversation cache: up to three
+  // snapshot pairs, each with a full transcript copy and model history on both sides.
+  // `deleteConversation` cleared them; `archiveConversation` did not, and archive is the
+  // ordinary "hide this" path — so every archived conversation kept them for the session.
+  const start = agent.indexOf("if (message.type === 'archiveConversation')");
+  const body = agent.slice(start, agent.indexOf("if (message.type === 'deleteConversation')"));
+  assertSource(body, /this\.compactionUndoStacks\.delete\(message\.id\);/, 'archiving drops the undo snapshots');
+  assertSource(body, /this\.compactionRedoStacks\.delete\(message\.id\);/, 'archiving drops the redo snapshots');
+  assertSource(body, /this\.loadCompactionSnapshots\(message\.id\);/, 'un-archiving restores them, because archive is reversible');
+
+  // The reload must come from the durable record, or un-archive would restore an empty stack.
+  assertSource(agent, /private loadCompactionSnapshots\(conversationId: string\): void \{/);
+  assertSource(agent, /sleepycode\.compactionSnapshots\.\$\{conversationId\}/);
+  // Startup and un-archive share one implementation; a second copy would drift.
+  assertSource(agent, /this\.loadCompactionSnapshots\(conversation\.id\);/);
+});

@@ -2453,6 +2453,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.lastAutoCompactAt.delete(id);
   }
 
+  /**
+   * Restore one conversation's compaction undo/redo stacks from their durable record.
+   *
+   * The stacks are persisted under `sleepycode.compactionSnapshots.<id>`, which makes the
+   * in-memory copies a cache rather than the source of truth. Two callers rely on that:
+   * startup (undo survives a reload) and un-archiving (see `releaseArchivedConversation`).
+   */
+  private loadCompactionSnapshots(conversationId: string): void {
+    const stored = this.context.globalState.get<unknown>(`sleepycode.compactionSnapshots.${conversationId}`, undefined);
+    let stacks: ReturnType<typeof loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>>;
+    try {
+      stacks = loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>(stored);
+    } catch (error) {
+      this.log('warn', 'compactionSnapshot.load.corrupt', errorMessage(error));
+      return;
+    }
+    const normalize = (snapshot: SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }) => ({
+      beforeItems: snapshot.beforeItems ?? snapshot.before ?? [],
+      afterItems: snapshot.afterItems ?? snapshot.after ?? [],
+      beforeMessages: snapshot.beforeMessages ?? [],
+      afterMessages: snapshot.afterMessages ?? [],
+    });
+    if (stacks.undo.length) this.compactionUndoStacks.set(conversationId, stacks.undo.slice(-3).map(normalize));
+    if (stacks.redo.length) this.compactionRedoStacks.set(conversationId, stacks.redo.slice(-3).map(normalize));
+  }
+
   private loadRepoMemory(root: vscode.Uri): SourceCitedMemory {
     const memory = new SourceCitedMemory();
     const json = loadMemoryJson(root.fsPath);
@@ -2700,24 +2726,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.projects = this.projects.filter(project => seenIds.has(project.id) ? false : (seenIds.add(project.id), true));
     // Rehydrate durable compaction snapshots so undo survives an extension reload.
     for (const project of this.projects) {
-      for (const conversation of project.conversations) {
-        const stored = this.context.globalState.get<unknown>(`sleepycode.compactionSnapshots.${conversation.id}`, undefined);
-        let stacks: ReturnType<typeof loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>>;
-        try {
-          stacks = loadCompactionStacks<SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }>(stored);
-        } catch (error) {
-          this.log('warn', 'compactionSnapshot.load.corrupt', errorMessage(error));
-          continue;
-        }
-        const normalize = (snapshot: SessionCompactionSnapshot<TranscriptItem, ModelMessage> & { before?: TranscriptItem[]; after?: TranscriptItem[] }) => ({
-          beforeItems: snapshot.beforeItems ?? snapshot.before ?? [],
-          afterItems: snapshot.afterItems ?? snapshot.after ?? [],
-          beforeMessages: snapshot.beforeMessages ?? [],
-          afterMessages: snapshot.afterMessages ?? [],
-        });
-        if (stacks.undo.length) this.compactionUndoStacks.set(conversation.id, stacks.undo.slice(-3).map(normalize));
-        if (stacks.redo.length) this.compactionRedoStacks.set(conversation.id, stacks.redo.slice(-3).map(normalize));
-      }
+      for (const conversation of project.conversations) this.loadCompactionSnapshots(conversation.id);
     }
     const root = this.workspaceRoot()?.fsPath;
     if (root) {
@@ -3500,6 +3509,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         this.reactStreaming.delete(message.id);
         this.reactLastToolCall.delete(message.id);
         this.reactPendingPaths.delete(message.id);
+        // Compaction undo/redo are the heaviest per-conversation cache left: up to three
+        // snapshot pairs each holding a full copy of the transcript *and* the model history
+        // on both sides. They were never released here, so every archived conversation kept
+        // them for the life of the session — and archive is the ordinary "hide this" path,
+        // not a rare one. The stacks are durable under
+        // `sleepycode.compactionSnapshots.<id>`, so dropping the in-memory copies costs
+        // nothing: un-archiving reloads them.
+        this.compactionUndoStacks.delete(message.id);
+        this.compactionRedoStacks.delete(message.id);
+      } else {
+        // Restored to the list: bring the stacks back so compact/undo behaves as it did
+        // before the conversation was archived. A conversation that never compacted has
+        // no stored record and simply gets nothing back.
+        this.loadCompactionSnapshots(message.id);
       }
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
