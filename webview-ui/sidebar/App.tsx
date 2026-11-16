@@ -1649,9 +1649,24 @@ export function App() {
           break;
         case "queueDraft": {
           const key = uiPrefsRef.current.perTabDrafts ? msg.convId : SHARED_DRAFT;
-          draftsRef.current.set(key, msg.draft);
-          if (activeIdRef.current === msg.convId) setDraft(msg.draft);
-          setDraftTick();
+          if (activeIdRef.current === msg.convId) {
+            const local = draftsRef.current.get(key);
+            // The host refunds a failed send's text. If the user has typed
+            // since, the composer is not ours to overwrite — the refund is
+            // dropped rather than clobbering what they wrote (the legacy
+            // webview guarded the same way).
+            if (local && local.text.trim().length > 0) break;
+            draftsRef.current.set(key, msg.draft);
+            setDraft(msg.draft);
+            setDraftTick();
+          } else if (uiPrefsRef.current.perTabDrafts) {
+            // Park the refund in the per-chat draft so it seeds the editor
+            // when that chat is opened; never write into this chat's composer.
+            draftsRef.current.set(key, msg.draft);
+            setDraftTick();
+          }
+          // Shared draft mode with another chat active: there is nowhere safe
+          // to put it; the refund is lost rather than typed over someone's chat.
           break;
         }
         case "toast":
