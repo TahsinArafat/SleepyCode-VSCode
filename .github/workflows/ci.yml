@@ -29,3 +29,10 @@ jobs:
       - run: npx playwright-core install --with-deps chromium-headless-shell
       - run: npm run check
       - run: npm run build
+      # The browser harnesses. `check` deliberately stays browser-free so a local run
+      # does not need Chromium; CI installs it, so this is the only place the shipping
+      # webview bundle is actually driven. perf-probe asserts the *shape* of streaming
+      # cost (early vs late delta), not wall-clock speed, so a slow runner cannot fail it
+      # and a quadratic re-render cannot pass it. ui-shots fails on overflow or console
+      # errors at three widths.
+      - run: npm run check:perf

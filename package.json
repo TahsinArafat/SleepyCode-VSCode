@@ -272,7 +272,8 @@
     "watch": "node esbuild.mjs --watch",
     "package": "npm run verify:release && npm run check && node scripts/verify-webview-bundles.mjs && vsce package",
     "test:core": "node --experimental-strip-types --test test/*.direct.mjs",
-    "verify:release": "node scripts/verify-release.mjs"
+    "verify:release": "node scripts/verify-release.mjs",
+    "check:perf": "npm run build && node scripts/perf-probe.mjs --check && node scripts/ui-shots.mjs --check"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^2.0.30",

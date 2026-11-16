@@ -13,6 +13,15 @@
  *   node scripts/perf-probe.mjs                # 3 runs x 120 turns, human-readable
  *   node scripts/perf-probe.mjs --json         # machine-readable, for before/after diffs
  *   node scripts/perf-probe.mjs --runs=1 --turns=300
+ *   node scripts/perf-probe.mjs --check        # fail the build on a quadratic regression
+ *
+ * Only `--check` asserts, and only on a **relative** signal. Absolute timings are not
+ * gateable: on the same machine, unchanged code, `openConversation.totalMs` measured
+ * 141 ms and then 30 ms on consecutive runs, so any wall-clock threshold either fails
+ * constantly or never fires. What is stable is the *shape* of streaming cost -- the
+ * delta between the first 25 deltas and the last 25 -- because it compares the code
+ * against itself under the same conditions. That is the O(N^2) regression this exists
+ * to catch, so it is the one thing worth enforcing.
  *
  * Requires `playwright`: npm i -D playwright && npx playwright install chromium
  */
@@ -23,6 +32,16 @@ const RUNS = Number(arg('runs') || 3);
 const TURNS = Number(arg('turns') || 120);
 const DELTAS = Number(arg('deltas') || 200);
 const JSON_OUT = process.argv.includes('--json');
+const CHECK = process.argv.includes('--check');
+/**
+ * Streaming cost may grow by at most this factor from the first quarter of a reply to
+ * the last. Baseline is 0.99-1.01 across runs and CI machines; a quadratic re-lex of
+ * the whole message lands several times over this. The gap is wide on purpose -- the
+ * gate is for a structural regression, not for a few percent of noise.
+ */
+const MAX_GROWTH_RATIO = 2.5;
+/** A single blocking task this long is felt as a visible stall while streaming. */
+const MAX_LONG_TASK_MS = 250;
 
 const pct = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
 const summarize = values => {
@@ -298,4 +317,30 @@ if (JSON_OUT) {
   streamLines('prose', report.stream);
   streamLines('code fence', report.streamCode);
   console.log('');
+}
+
+if (CHECK) {
+  // Assert the shape, never the speed. See the threshold comments at the top of this
+  // file for why wall-clock numbers are deliberately not gated.
+  const failures = [];
+  for (const [label, summary] of [['prose', report.stream], ['code fence', report.streamCode]]) {
+    if (summary.growthRatio > MAX_GROWTH_RATIO) {
+      failures.push(
+        `streaming ${label} cost grows ${summary.growthRatio}x from the first quarter of a reply to the last `
+        + `(limit ${MAX_GROWTH_RATIO}x): ${summary.earlyMs} ms -> ${summary.lateMs} ms per delta. `
+        + 'That is the O(N^2) shape -- markdown is being re-rendered over the whole accumulated message.',
+      );
+    }
+    if (summary.longTaskMs > MAX_LONG_TASK_MS) {
+      failures.push(
+        `streaming ${label} blocked the main thread for ${summary.longTaskMs} ms total in one scenario `
+        + `(limit ${MAX_LONG_TASK_MS} ms): a delta is doing far too much work per frame.`,
+      );
+    }
+  }
+  if (failures.length) {
+    for (const failure of failures) console.error(`perf-probe: ${failure}`);
+    process.exit(1);
+  }
+  console.log(`perf-probe: streaming cost stays flat (prose ${report.stream.growthRatio}x, code ${report.streamCode.growthRatio}x)`);
 }

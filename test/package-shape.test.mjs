@@ -57,3 +57,33 @@ test('the build task produces the React webview, not just the extension host', a
   }
   assert.ok(build.includes('dist/webview'), 'the webview bundle must be written where src/webview-react.ts reads it');
 });
+
+test('CI drives the shipping webview through the browser harnesses', async () => {
+  // The probes existed and were repaired (plan A6) but nothing ran them: `check` is
+  // browser-free by design, and CI stopped after `npm run build`. A perf guard nobody
+  // runs is the same as no guard, which is how the O(N^2) streaming shape came back
+  // once already.
+  const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.ok(ci.includes('npm run check:perf'), 'ci.yml must run the browser harnesses');
+
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(pkg.scripts['check:perf'], 'the task CI invokes must exist');
+  assert.ok(pkg.scripts['check:perf'].includes('perf-probe.mjs --check'), 'the perf probe must run in asserting mode, not report-only');
+  assert.ok(pkg.scripts['check:perf'].includes('ui-shots.mjs --check'), 'ui-shots must run in its failing mode');
+});
+
+test('the perf gate asserts a relative shape, never wall-clock speed', async () => {
+  // Absolute timings are not gateable: unchanged code measured 141 ms then 30 ms for
+  // the same scenario on the same machine. A wall-clock threshold would flake
+  // constantly on CI, so the gate must key off the early-vs-late growth ratio.
+  const probe = await readFile(new URL('../scripts/perf-probe.mjs', import.meta.url), 'utf8');
+  assert.ok(probe.includes('MAX_GROWTH_RATIO'), 'the gate needs a growth-ratio limit');
+  assert.ok(probe.includes('growthRatio > MAX_GROWTH_RATIO'), 'the growth ratio is what gets compared');
+  assert.ok(probe.includes('process.exit(1)'), 'a regression must fail the build');
+  // Guard the trap directly: no absolute millisecond threshold on the measured set.
+  assert.equal(
+    /totalMs\s*>\s*\d+/.test(probe),
+    false,
+    'a wall-clock threshold on measured timings would flake on slower CI runners',
+  );
+});
