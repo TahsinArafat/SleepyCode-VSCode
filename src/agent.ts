@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
@@ -61,7 +61,8 @@ import { TerminalManager } from './terminal';
 import { MEMORY_RELATIVE_PATH, openProjectMemory, readProjectMemory, writeProjectMemory } from './memory';
 import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
-import { RepoIndex, scanWorkspace, SourceCitedMemory, loadMemoryJson } from './repo-index';
+import { RepoIndex, SourceCitedMemory, loadMemoryJson } from './repo-index';
+import { RepoIndexService } from './repo-index-service';
 import { captureFileSnapshot as captureSnapshot, captureRedoSnapshot, isRestorable, unrestorableReason } from './file-snapshot-core';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
 import { diffLines, fileChangeStats } from './line-diff';
@@ -452,7 +453,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private sessionAutoApproveEditRoots = new Set<string>();
   private lastSleepyAccountRefresh = 0;
   private readonly projectIndex: ProjectIndexService;
-  private repoIndexCache?: { root: string; index: RepoIndex };
+  private readonly repoIndex = new RepoIndexService();
   private readonly browser = new BrowserController();
   private readonly browserPreview = new BrowserPreviewPanel();
   /** Armed by `startWorkspaceWatcher` on first view resolve, not at construction. */
@@ -978,16 +979,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * them lazily.
    */
   private refreshRepoIndexEntry(root: vscode.Uri, relative: string, uri: vscode.Uri): void {
-    const cached = this.repoIndexCache;
-    if (!cached || cached.root !== root.fsPath) return;
-    try {
-      const stat = statSync(uri.fsPath);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) cached.index.remove(relative);
-      else cached.index.upsert({ path: relative, content: readFileSync(uri.fsPath, 'utf8') });
-    } catch {
-      // Gone, or unreadable: the index must not keep it either way.
-      cached.index.remove(relative);
-    }
+    this.repoIndex.refreshEntry(root, relative, uri);
   }
 
   private async ensureProjectIntelligence(force: boolean): Promise<ProjectIntelligence | undefined> {
@@ -2233,7 +2225,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     }
     const memory = process.memoryUsage();
-    const indexed = this.repoIndexCache ? this.repoIndexCache.index.files.length : 0;
+    const indexed = this.repoIndex.fileCount;
     this.log('info', 'perf.memory',
       `heap ${mb(memory.heapUsed)}MB rss ${mb(memory.rss)}MB · ${this.projects.length} projects · ` +
       `${conversations} conversations · ${items} items · snapshots ${mb(snapshotChars)}MB · index ${indexed} files`);
@@ -2422,24 +2414,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /**
    * The workspace index, built once and reused until the workspace changes.
    *
-   * This is the single largest retainer in the extension, so its lifetime is explicit:
-   * `releaseRepoIndex` drops it, and `onWorkspaceFoldersChanged` calls that, so switching
-   * workspaces does not keep the previous tree resident. The index itself is ~150 MB on a
-   * 4,000-file workspace, dominated by the symbol table (`indexSymbols`), which is now
-   * built lazily on first use and memoized rather than rebuilt per call.
+   * The cache and its lifetime live in `RepoIndexService`, so there is one owner for
+   * the largest retainer in the extension rather than a field any method could leave
+   * assigned. This wrapper stays because the provider's callers think in terms of a
+   * root `Uri`; see `repo-index-service.ts` for the lifetime itself.
    */
-  private async loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
-    if (this.repoIndexCache?.root === root.fsPath) return this.repoIndexCache.index;
-    // A different root means the cached tree is for a workspace we are no longer in.
-    this.repoIndexCache = undefined;
-    const index = new RepoIndex(await scanWorkspace(root.fsPath));
-    this.repoIndexCache = { root: root.fsPath, index };
-    return index;
+  private loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
+    return this.repoIndex.load(root);
   }
 
   /** Drop the workspace index. Called on workspace change and on dispose. */
   private releaseRepoIndex(): void {
-    this.repoIndexCache = undefined;
+    this.repoIndex.dispose();
   }
 
   /**
@@ -5338,7 +5324,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       };
       // Never scan the repository synchronously during send. Reuse a cache if one
       // already exists (e.g. from the explicit Index panel), otherwise omit tools.
-      const repoIndex = this.repoIndexCache?.root === root.fsPath ? this.repoIndexCache.index : undefined;
+      const repoIndex = this.repoIndex.indexFor(root);
       const repoMemory = repoIndex ? this.loadRepoMemory(root) : undefined;
       this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex?.files.length ?? 0}`);
 

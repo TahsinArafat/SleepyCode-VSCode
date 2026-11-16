@@ -184,7 +184,15 @@ test('archiving releases only the transient records, because it is reversible', 
 test('the workspace index is released on a workspace change and on dispose', () => {
   // It is the largest retainer in the extension (~150 MB on a 4,000-file repo). It used to
   // be left in place across a folder change, keeping the previous tree resident.
-  assertSource(agent, /private releaseRepoIndex\(\): void \{\s*this\.repoIndexCache = undefined;/, 'there is one way to drop it');
+  //
+  // The cache and every way it can be dropped now live in `RepoIndexService`, so the
+  // guarantee is asserted at its owner rather than at the provider that delegates to it.
+  const service = readFileSync('src/repo-index-service.ts', 'utf8');
+  assertSource(service, /private cache\?: \{ root: string; index: RepoIndex \};/, 'the index has exactly one home');
+  assertSource(service, /dispose\(\): void \{\s*this\.cache = undefined;/, 'there is one way to drop it');
+  // The provider must not hold a second copy: that is the shape that leaked.
+  assert.doesNotMatch(agent, /repoIndexCache/, 'the provider keeps no cache of its own');
+  assertSource(agent, /private releaseRepoIndex\(\): void \{\s*this\.repoIndex\.dispose\(\);/, 'the provider drops it through the owner');
   const changed = agent.slice(agent.indexOf('private onWorkspaceFoldersChanged'), agent.indexOf('private scheduleProjectReindex'));
   assertSource(changed, /this\.releaseRepoIndex\(\);/, 'a folder change must drop the index');
   const dispose = agent.slice(agent.indexOf('dispose(): void {'), agent.indexOf('private loadProjects()'));
@@ -194,12 +202,13 @@ test('the workspace index is released on a workspace change and on dispose', () 
 test('a file change updates the index entry rather than leaving stale contents', () => {
   // The index holds full file contents. Before this, an edit left the pre-edit text in the
   // index, so a later search could hand the agent source that no longer existed.
-  assertSource(agent, /private refreshRepoIndexEntry\(root: vscode\.Uri, relative: string, uri: vscode\.Uri\): void \{/, 'there is a targeted refresh');
-  const refresh = agent.slice(agent.indexOf('private refreshRepoIndexEntry'), agent.indexOf('private async loadRepoIndex'));
-  assertSource(refresh, /cached\.index\.upsert\(\{ path: relative, content: readFileSync\(uri\.fsPath, 'utf8'\) \}\);/, 'an edited file is re-read');
-  assertSource(refresh, /cached\.index\.remove\(relative\)/, 'a removed or unreadable file is dropped');
+  const service = readFileSync('src/repo-index-service.ts', 'utf8');
+  assertSource(service, /refreshEntry\(root: vscode\.Uri, relative: string, uri: vscode\.Uri\): void \{/, 'there is a targeted refresh');
+  assertSource(service, /cached\.index\.upsert\(\{ path: relative, content: readFileSync\(uri\.fsPath, 'utf8'\) \}\);/, 'an edited file is re-read');
+  assertSource(service, /cached\.index\.remove\(relative\)/, 'a removed or unreadable file is dropped');
   const scheduled = agent.slice(agent.indexOf('private scheduleProjectReindex'), agent.indexOf('private async ensureProjectIntelligence'));
   assertSource(scheduled, /this\.refreshRepoIndexEntry\(root, relative, uri\);/, 'the file watcher calls it');
+  assertSource(agent, /private refreshRepoIndexEntry\(root: vscode\.Uri, relative: string, uri: vscode\.Uri\): void \{\s*this\.repoIndex\.refreshEntry\(root, relative, uri\);/, 'the provider delegates the refresh');
   assert.doesNotMatch(scheduled, /this\.releaseRepoIndex\(\);/, 'a single save must not force a full rescan');
 });
 
