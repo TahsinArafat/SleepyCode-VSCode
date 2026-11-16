@@ -158,13 +158,45 @@ test('dispose clears every timer the provider owns', () => {
 test('every per-conversation map is released when a conversation is deleted', () => {
   // These are keyed by conversation id and each grew once per conversation with no way to
   // shrink; `reactItems` holds a full transcript copy. The delete handler cleaned the queue
-  // and compaction stacks by hand and left the rest, so this asserts the whole set — a new
-  // map added to the class must be added to `forgetConversation` too.
+  // and compaction stacks by hand and left the rest.
+  //
+  // The set is *derived*, not listed. A hardcoded list only proves today's maps are
+  // released; it cannot notice one added tomorrow, which is the failure this guard exists
+  // for. Every string-keyed collection in the class must be either released by
+  // `forgetConversation` or explicitly classified below with the reason its lifetime is
+  // owned by something else — so silence is not an option.
   const start = agent.indexOf('private forgetConversation(id: string): void {');
   assert.ok(start > 0, 'forgetConversation must exist');
   const body = agent.slice(start, agent.indexOf('\n  }', start));
-  for (const map of ['reactItems', 'reactChangeTarget', 'reactPendingPaths', 'reactLastToolCall', 'reactStreaming', 'checkpointAtByConversation', 'historyBoundNoticed', 'cliModelNotices', 'mcpNoticeSignatures']) {
-    assertSource(body, new RegExp(`this\\.${map}\\.delete\\(id\\);`), `${map} must be released with the conversation`);
+
+  const NOT_CONVERSATION_KEYED = {
+    subagentControllers: 'subagent ids, released when each subagent settles',
+    runs: 'in-flight runs, released when the run settles; delete refuses while one is active',
+    compactionControllers: 'in-flight compactions, deleted in the `finally` of both paths',
+    pendingQuestions: 'tool-call ids, each resolved before its run ends',
+    agentPromptCache: 'agent ids, not conversations',
+    sessionAllowedCommands: 'command strings for the session grant',
+    sessionAutoApproveEditRoots: 'root paths for the session grant',
+    reviewTempDirs: 'temp dir paths, removed on dispose',
+    cliServer: 'server handles, not conversations',
+  };
+  // Released by the archive/delete handlers rather than `forgetConversation`, because
+  // archive keeps them durable under `sleepycode.compactionSnapshots.<id>` and reloads
+  // them on un-archive.
+  const RELEASED_ELSEWHERE = {
+    compactionUndoStacks: 'released by the archive and delete handlers',
+    compactionRedoStacks: 'released by the archive and delete handlers',
+  };
+
+  const declared = [...agent.matchAll(/private (?:readonly )?(\w+)(?::[^=]+)? = new (?:Map|Set)<string/g)].map(match => match[1]);
+  assert.ok(declared.length >= 15, `expected to find the class's string-keyed collections, found ${declared.length}`);
+  const classified = new Set([...Object.keys(NOT_CONVERSATION_KEYED), ...Object.keys(RELEASED_ELSEWHERE)]);
+  const unhandled = declared.filter(name => !classified.has(name) && !new RegExp(`this\\.${name}\\.delete\\(id\\);`).test(body));
+  assert.deepEqual(unhandled, [], 'a string-keyed collection must be released with the conversation, or classified with the reason its lifetime is owned elsewhere');
+
+  // Every declared name must be accounted for, so a stale classification is caught too.
+  for (const name of classified) {
+    assert.ok(declared.includes(name), `"${name}" is classified but no longer declared; the classification is stale`);
   }
   // And that it is actually reached from the delete path.
   const del = agent.slice(agent.indexOf("if (message.type === 'deleteConversation')"), agent.indexOf("if (message.type === 'restoreCheckpoint')"));
