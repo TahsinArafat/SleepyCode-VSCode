@@ -227,7 +227,7 @@ export type OutMessage =
   | { type: "cancelRun"; convId?: string }
   | { type: "cancelSubagent"; callId: string; reason?: "timeout" | "user" }
   | { type: "answerQuestion"; callId: string; answers: Record<string, string[]> }
-  | { type: "resolveApproval"; requestId: string; approve?: boolean; pattern?: string; addPattern?: "allow" | "deny"; setMode?: ApprovalMode }
+  | { type: "resolveApproval"; requestId: string; approve?: boolean; session?: boolean }
   | { type: "setMode"; mode: Mode }
   | { type: "setActiveTeams"; teamIds: string[] }
   | { type: "fetchModels" }

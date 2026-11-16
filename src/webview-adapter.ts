@@ -161,7 +161,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'notifyResponse', id: message.id, choice: message.choice };
 
     case 'resolveApproval':
-      return { type: 'notifyResponse', id: Number(message.requestId), choice: message.approve ? 'ok' : 'cancel' };
+      // The session marker is the host's 'secondary' choice — the only grant
+      // this engine honors beyond one-shot. There is no pattern allow/deny
+      // list here, and no auto-allow preset; those are not reachable from the
+      // React card.
+      return { type: 'notifyResponse', id: Number(message.requestId), choice: message.approve ? (message.session ? 'secondary' : 'ok') : 'cancel' };
 
     case 'revertToMessage':
       return { type: 'undoLastTurn', conversationId: message.conversationId ?? message.convId };

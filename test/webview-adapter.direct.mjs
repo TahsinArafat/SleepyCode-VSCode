@@ -307,6 +307,11 @@ test('resolveApproval deny -> notifyResponse cancel', () => {
   assert.deepEqual(out, { type: 'notifyResponse', id: 7, choice: 'cancel' });
 });
 
+test('resolveApproval session grant -> notifyResponse secondary', () => {
+  const out = adapter.toSleepyMessage({ type: 'resolveApproval', requestId: '7', approve: true, session: true });
+  assert.deepEqual(out, { type: 'notifyResponse', id: 7, choice: 'secondary' });
+});
+
 // ---------------------------------------------------------------- plan + tool names
 
 test('plan work items render as a WritePlan card', () => {

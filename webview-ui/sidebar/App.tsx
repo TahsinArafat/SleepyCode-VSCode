@@ -51,7 +51,7 @@ import { StaggerReveal, TextSwap } from "../shared/TextTransitions";
 import { AnimatedDisclosure } from "../shared/AnimatedDisclosure";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
 import { WorkflowDialog, GoalBanner, VerificationCard } from "./components/Workflow";
-import type { AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRequestInfo, AssistantBlock, AssistantTurn, Attachment, ConversationSummary, ErrorBlock, InMessage, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PendingChangeInfo, PersonaInfo, TeamInfo, ThinkingBlock, ToolBlock, Turn, UserTurn } from "./types";
+import type { AgentEvent, ApprovalPolicy, ApprovalRequestInfo, AssistantBlock, AssistantTurn, Attachment, ConversationSummary, ErrorBlock, InMessage, MentionItem, Mode, ModelDef, ModelOption, OutMessage, PendingChangeInfo, PersonaInfo, TeamInfo, ThinkingBlock, ToolBlock, Turn, UserTurn } from "./types";
 import { applyEvent, applyToBlocks, closeTrailingThinking, forceSettleOpenWork, parsePartialArgs, renderMentionTokens } from "./types";
 
 function post(msg: OutMessage) {
@@ -816,9 +816,11 @@ const ACTION_LABEL: Record<ApprovalRequestInfo["actionType"], string> = {
   web: "Web access",
 };
 
-/** In-chat approval prompt rendered on the tool/action card. Approve has a
- *  dropdown mirroring the Behavior settings for this action type (options
- *  update the global policy too). The agent stays blocked until resolved. */
+/** In-chat approval prompt rendered on the tool/action card. The approve
+ *  dropdown offers only what this engine can honor: the session grant (the
+ *  host's 'secondary' choice) and a jump to Behavior settings. There is no
+ *  pattern allow/deny list and no auto-allow preset here — SleepyCode's
+ *  approval engine has neither, so the card does not offer them. */
 function ApprovalCard({ request, inline, onDecide }: { request: ApprovalRequestInfo; inline?: boolean; onDecide?: (requestId: string, approved: boolean) => void }) {
   const [menu, setMenu] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement>(null);
@@ -850,7 +852,6 @@ function ApprovalCard({ request, inline, onDecide }: { request: ApprovalRequestI
       </div>
     );
   }
-  const label = ACTION_LABEL[request.actionType].toLowerCase();
   return (
     <div className={"approval-card" + (inline ? " inline" : "")} onClick={(e) => e.stopPropagation()}>
       <div className="ap-head">
@@ -862,7 +863,7 @@ function ApprovalCard({ request, inline, onDecide }: { request: ApprovalRequestI
       <div className="ap-actions">
         <div className="ap-approve-group" ref={menuRef}>
           <button className="ap-btn allow" onClick={() => resolve({ approve: true })}>Approve</button>
-          <button className="ap-btn allow ap-arrow" title="Approve options (these also update Behavior settings)" onClick={() => setMenu((v) => !v)}>
+          <button className="ap-btn allow ap-arrow" title="Approve options" onClick={() => setMenu((v) => !v)}>
             <Icon name="chevD" size={11} />
           </button>
           {menu && (
@@ -870,33 +871,10 @@ function ApprovalCard({ request, inline, onDecide }: { request: ApprovalRequestI
               {request.suggestion && (
                 <button
                   className="ap-menu-item"
-                  title={`Approve and add "${request.suggestion}" to the ${label} allow list`}
-                  onClick={() => resolve({ approve: true, pattern: request.suggestion, addPattern: "allow" })}
+                  title="Approve, and don't ask again for this action in this session"
+                  onClick={() => resolve({ approve: true, session: true })}
                 >
-                  Always allow <code>{request.suggestion}</code>
-                </button>
-              )}
-              <button
-                className="ap-menu-item"
-                title={`Approve and only ask for risky-looking ${label}s from now on`}
-                onClick={() => resolve({ approve: true, setMode: "review" })}
-              >
-                Auto review {label}s
-              </button>
-              <button
-                className="ap-menu-item"
-                title={`Approve and run every ${label} without asking from now on`}
-                onClick={() => resolve({ approve: true, setMode: "allow" })}
-              >
-                Run everything ({label}s)
-              </button>
-              {request.suggestion && (
-                <button
-                  className="ap-menu-item danger"
-                  title={`Reject and add "${request.suggestion}" to the deny list`}
-                  onClick={() => resolve({ approve: false, pattern: request.suggestion, addPattern: "deny" })}
-                >
-                  Always deny <code>{request.suggestion}</code>
+                  {request.suggestion}
                 </button>
               )}
               <button className="ap-menu-item" onClick={() => post({ type: "openSettings", section: "behavior" })}>
