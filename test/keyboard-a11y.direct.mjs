@@ -59,6 +59,8 @@ test('every picker trigger names the popover it controls with aria-controls', ()
   const portals = composer.match(/id=\{menuId\}/g) ?? [];
   assert.ok(triggers.length >= 7, `expected at least seven paired pickers, found ${triggers.length}`);
   assert.equal(portals.length, triggers.length, 'every trigger must point at a portal with the same id');
+  const expanded = composer.match(/aria-expanded=\{open\}/g) ?? [];
+  assert.ok(expanded.length >= 7, `every paired trigger must track aria-expanded (found ${expanded.length})`);
 });
 
 test('Escape does something defined', () => {
@@ -98,4 +100,70 @@ test('typing / opens the listbox with exactly one active option', async () => {
   } finally {
     await app.close();
   }
+});
+
+test('Tab reaches every shell control, so nothing needs a mouse', async () => {
+  const app = await openSidebar({ width: 460, height: 900 });
+  try {
+    await app.boot({ activeId: 'c1', conversations: [conversation('c1', 'A11y')], openTabs: ['c1'] });
+    const seen = [];
+    for (let i = 0; i < 40; i += 1) {
+      await app.page.keyboard.press('Tab');
+      const cls = await app.page.evaluate(() => document.activeElement?.className ?? '');
+      if (cls) seen.push(String(cls).split(' ')[0]);
+    }
+    // The send button is disabled until the composer has content, so a disabled
+    // control is legitimately out of the tab order here; pin the rest.
+    for (const cls of ['editor', 'ctx-ring', 'hicon', 'model-select', 'attach-btn']) {
+      assert.ok(seen.includes(cls), `${cls} should be reachable by Tab (saw ${[...new Set(seen)].join(', ')})`);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test('the model picker opens from the keyboard and returns focus on Escape', async () => {
+  const app = await openSidebar({ width: 460, height: 900 });
+  try {
+    await app.boot({ activeId: 'c1', conversations: [conversation('c1', 'A11y')], openTabs: ['c1'] });
+    await app.page.focus('.model-select');
+    await app.page.keyboard.press('Enter');
+    await app.page.waitForTimeout(140);
+    const opened = await app.page.evaluate(() => ({
+      expanded: document.querySelector('.model-select')?.getAttribute('aria-expanded'),
+      focusedPlaceholder: document.activeElement?.getAttribute('placeholder') ?? null,
+    }));
+    assert.equal(opened.expanded, 'true', 'Enter must open the picker');
+    assert.equal(opened.focusedPlaceholder, 'Search models', 'the picker must move focus into its search field');
+    await app.page.keyboard.press('Escape');
+    await app.page.waitForTimeout(140);
+    const closed = await app.page.evaluate(() => ({
+      expanded: document.querySelector('.model-select')?.getAttribute('aria-expanded'),
+      focusIsTrigger: document.activeElement === document.querySelector('.model-select'),
+    }));
+    assert.equal(closed.expanded, 'false', 'Escape must close the picker');
+    assert.equal(closed.focusIsTrigger, true, 'Escape must return focus to the trigger');
+  } finally {
+    await app.close();
+  }
+});
+
+test('live regions announce status politely, and the turn phase reaches one', () => {
+  // The vanilla suite asserted a single polite status region announced the
+  // turn's start and finish. In React the announcement lives in ThinkingStatus
+  // (polite, atomic, aria-labelled) and the phase that feeds it comes from the
+  // session status; MessageActions carries its own polite region for copy.
+  const thinking = read('webview-ui/shared/ThinkingStatus.tsx');
+  assert.match(thinking, /role="status" aria-live="polite" aria-atomic="true"/);
+  const app = read('webview-ui/sidebar/App.tsx');
+  assert.match(app, /<ThinkingStatus text=\{phase\}/);
+  const actions = read('webview-ui/sidebar/components/MessageActions.tsx');
+  assert.match(actions, /role="status" aria-live="polite"/);
+});
+
+test('focus is visible and does not rely on colour alone', () => {
+  assert.match(read('webview-ui/sidebar/sidebar.css'), /:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--control-ring\)/);
+  const theme = read('webview-ui/shared/theme.css');
+  assert.match(theme, /@media \(forced-colors: active\)/);
+  assert.match(theme, /--control-ring:\s*Highlight/);
 });
