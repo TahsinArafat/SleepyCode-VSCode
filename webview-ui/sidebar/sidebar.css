@@ -4952,3 +4952,12 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .approval-menu-option.is-selected {
 	background: color-mix(in srgb, var(--accent, #6c7086) 16%, transparent);
 }
+
+/* Thread status indicator in the history list: the host distinguishes stopped
+   (user interrupted), failed, paused and running; the row used to show only a
+   timestamp, so a stopped run read as completed. */
+.hi-status { flex: 0 0 auto; font-size: 12px; color: var(--fg-faint); }
+.hi-status-stopped { color: var(--fg-dim); }
+.hi-status-failed { color: var(--error, #f14c4c); }
+.hi-status-paused { color: var(--accent, #d7ba7d); }
+.hi-status-running { color: var(--vscode-terminal-ansiGreen, #89d185); }

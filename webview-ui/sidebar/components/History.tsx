@@ -22,6 +22,31 @@ function timeAgo(ts: number): string {
   return d + "d ago";
 }
 
+/**
+ * Status glyph for a thread's last turn. The host distinguishes stopped (user
+ * interrupted), failed, paused and running; the list used to show only the time,
+ * so a stopped run read as a finished one.
+ */
+function statusGlyph(status: string): string {
+  switch (status) {
+    case 'stopped': return '■';
+    case 'failed': return '✕';
+    case 'paused': return '⏸';
+    case 'running': return '▶';
+    default: return '•';
+  }
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'stopped': return 'Stopped by user';
+    case 'failed': return 'Failed';
+    case 'paused': return 'Paused';
+    case 'running': return 'Running';
+    default: return status;
+  }
+}
+
 export function History({
   list,
   activeId,
@@ -130,6 +155,16 @@ export function History({
                     <button className="hi-text" aria-current={c.id === activeId ? "true" : undefined} onClick={() => { onSelect(c.id); onClose(); }}>
                       {c.pinned && <span className="hi-pin" title="Kept at the top" aria-label="Kept at the top">★</span>}
                       <span className="hi-title">{c.title}</span>
+                      {c.status && c.status !== 'empty' && c.status !== 'done' && (
+                        <span
+                          className={`hi-status hi-status-${c.status}`}
+                          role="img"
+                          aria-label={statusLabel(c.status)}
+                          title={statusLabel(c.status)}
+                        >
+                          {statusGlyph(c.status)}
+                        </span>
+                      )}
                       <span className="hi-time">{timeAgo(c.updatedAt)}</span>
                       {c.excerpt && <span className="hi-excerpt">{c.excerpt}</span>}
                     </button>

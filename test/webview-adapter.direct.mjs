@@ -149,6 +149,32 @@ test('conversations payload maps to React list', () => {
   assert.deepEqual(out.runningConvIds, ['c1']);
 });
 
+test('a conversation status survives the projection into the thread list', () => {
+  // The host computes 'stopped' / 'failed' / 'paused' / 'done' for each thread
+  // (agent.ts: StatusSyncedConversation helper). The old adapter silently dropped
+  // `status`, so a stopped run read as an ordinary completed conversation in the
+  // React list -- the same invisible-failure class as the missing pause card.
+  const out = adapter.toReactMessage({
+    type: 'conversations',
+    activeId: 'a',
+    conversations: [
+      { id: 'a', title: 'Stopped thing', updatedAt: 5, archived: false, status: 'stopped' },
+      { id: 'b', title: 'Failed thing', updatedAt: 5, archived: false, status: 'failed' },
+      { id: 'c', title: 'Paused thing', updatedAt: 5, archived: false, status: 'paused' },
+    ],
+  });
+  assert.deepEqual(out.list.map(c => c.status), ['stopped', 'failed', 'paused']);
+});
+
+test('a missing status is omitted rather than sent as undefined', () => {
+  const out = adapter.toReactMessage({
+    type: 'conversations',
+    activeId: 'a',
+    conversations: [{ id: 'a', title: 'No status', updatedAt: 5, archived: false }],
+  });
+  assert.equal('status' in out.list[0], false, 'an unknown status is omitted, not written as undefined');
+});
+
 test('conversation items map to loadConversation turns', () => {
   const out = adapter.toReactMessage({
     type: 'conversation',

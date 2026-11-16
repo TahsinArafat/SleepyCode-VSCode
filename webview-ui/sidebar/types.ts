@@ -51,6 +51,13 @@ export interface ConversationSummary {
   /** Kept at the top of the list; the host sorts pinned threads first. */
   pinned?: boolean;
   excerpt?: string;
+  /**
+   * How the last turn ended: `stopped` (user interrupted), `failed` (error),
+   * `paused` (step or output limit), `done` (completed), `empty` (no answer yet),
+   * `running` (a run is in flight). Drives the status marker on each row.
+   * Omitted when unknown rather than sent as a value that would mis-state the turn.
+   */
+  status?: string;
 }
 
 export interface PersonaInfo {

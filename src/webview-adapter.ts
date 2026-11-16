@@ -923,6 +923,10 @@ function conversationsPayload(message: SleepyMsg): ReactMsg {
     // `false`, not `undefined`: the star renders from one shape.
     pinned: conversation.pinned === true,
     excerpt: conversation.excerpt,
+    // The host distinguishes a stopped turn from a failed one, and a paused one
+    // from a completed one. The React thread list used to drop this, so a stopped
+    // run showed up as an ordinary finished conversation.
+    ...(typeof conversation.status === 'string' ? { status: conversation.status } : {}),
   }));
   const runningConvIds = conversations.filter(conversation => conversation.running).map(conversation => conversation.id);
   return { type: 'conversations', list, activeId: message.activeId, runningConvIds };
