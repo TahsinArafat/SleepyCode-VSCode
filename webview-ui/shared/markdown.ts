@@ -152,8 +152,8 @@ function cached(key: string, compute: () => Rendered): Rendered {
  * `trust: false` is deliberate: `\href` and `\includegraphics` would let model output reach
  * the network or the filesystem, and the whole point of sanitising is that it cannot.
  */
-const katexRender: MathRenderer = (tex, displayMode) =>
-  katex.renderToString(tex, {
+const katexRender: MathRenderer = (tex, displayMode) => {
+  const inner = katex.renderToString(tex, {
     displayMode: Boolean(displayMode),
     throwOnError: false,
     errorColor: "var(--vscode-errorForeground, #f14c4c)",
@@ -161,6 +161,13 @@ const katexRender: MathRenderer = (tex, displayMode) =>
     trust: false,
     output: "html",
   });
+  // A display equation is a block of its own: it scrolls horizontally when its width exceeds
+  // the column, which the inline path must not. The classic webview had `.math-block`
+  // for this; the React port rendered unwrapped, so a wide formula made the whole message
+  // scroll sideways. Wrapping here keeps the chrome with the renderer, so it cannot be
+  // forgotten by a new call site.
+  return displayMode ? `<div class="math-block">${inner}</div>` : inner;
+};
 
 const math = createMathRenderer(katexRender);
 

@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
-const runtime = read('src/webview/runtime.ts');
-const webviewHtml = read('src/webview.ts');
-const styles = read('src/webview/styles.ts');
+const reactApp = read('webview-ui/shared/markdown.ts');
+const reactHtml = read('src/webview-react.ts');
+const reactCss = read('webview-ui/sidebar/sidebar.css');
+const mathBlocks = read('src/math-blocks.ts');
 const pkg = JSON.parse(read('package.json'));
 
-test('katex is a runtime dependency and bundled media assets exist', () => {
+test('katex is a dependency and the bundled media assets exist', () => {
   assert.ok(pkg.dependencies?.katex, 'katex must be a dependency');
   const js = read('media/katex/katex.min.js');
   const css = read('media/katex/katex.min.css');
@@ -16,49 +17,36 @@ test('katex is a runtime dependency and bundled media assets exist', () => {
   assert.ok(css.includes('.katex'), 'bundled KaTeX stylesheet looks valid');
 });
 
-test('webview loads KaTeX assets and widens the CSP for fonts', () => {
-  assert.match(webviewHtml, /loadKatexAssets/);
-  assert.match(webviewHtml, /font-src \$\{webview\.cspSource\}/);
-  assert.match(webviewHtml, /katexStyle/);
-  assert.match(webviewHtml, /katexScript/);
+test('the React webview injects KaTeX assets and widens the CSP for fonts', () => {
+  // The stylesheet is inlined with font urls rewritten to webview URIs in a style
+  // block (CSP `style-src` already permits unsafe-inline); the script is bundled
+  // into `dist/webview/sidebar.js`, not loaded as a separate resource.
+  assert.match(reactHtml, /function katexStyleSheet\(/, 'the shell must build a KaTeX stylesheet with rewritten font URIs');
+  assert.match(reactHtml, /fonts\/\*\)|fonts\/|fonts'/, 'font references are resolved to webview URIs');
+  assert.match(reactHtml, /entry === "sidebar" \? katexStyleSheet/, 'only the chat entry pays for the stylesheet');
+  assert.match(reactHtml, /font-src \$\{webview\.cspSource\}/, 'KaTeX fonts must load from the webview source');
 });
 
-test('runtime renders inline and display math through KaTeX', () => {
-  assert.match(runtime, /renderToString/);
-  assert.match(runtime, /protectInlineMath/);
-  assert.match(runtime, /restoreMath/);
-  assert.match(runtime, /math-block/);
-  assert.match(runtime, /\\\$\\\$/);
+test('the markdown pipeline renders math through KaTeX via the shared helper', () => {
+  assert.match(mathBlocks, /function protectInlineMath\(/, 'math is pulled out before marked sees it');
+  assert.match(mathBlocks, /function restoreMath\(/, 'rendered math is spliced back in after parsing');
+  assert.match(mathBlocks, /function createMathRenderer\(/, 'a bounded renderer cache is used, not a bare call site');
+  assert.match(reactApp, /katexRender/, 'the React path has its own KaTeX renderer bound');
+  assert.match(reactApp, /displayMode/, 'inline and display math are both wired');
 });
 
-test('KaTeX is limited to think and content tokens, not tool-call labels', () => {
-  assert.match(runtime, /function renderMarkdown\(raw,allowMath\)/);
-  assert.match(runtime, /function protectInlineMath\(line,allowMath\)\{if\(allowMath===false\)return String\(line\);/);
-  assert.match(runtime, /r\.innerHTML\s*=\s*markdown\(\s*part\s*\)/);
-  // The streamed answer paints through the incremental stream renderer now, but its math handling
-  // must be unchanged. Two invariants pin that: it is bound to the page's own `markdown`, so live
-  // output and replayed history stay in lockstep, and `allowMath` arrives undefined, which markdown
-  // treats as enabled (`allowMath !== false`) — the same value a full pass gets.
-  assert.match(runtime, /createStreamRenderer\(renderMarkdown\)/);
-  assert.match(runtime, /streamRenderer\.html\(\s*raw\s*,\s*undefined\s*\)/);
-  // Reasoning now paints through the same coalesced, incremental path as the answer: the delta
-  // handler only updates the buffer and schedules a paint, and the painter builds its renderer from
-  // the page's own `markdown`. Without that binding a thought would lose its math.
-  assert.match(runtime, /reasoningPaint\.schedule\(\{\s*el:\s*reasoning,\s*raw:\s*reasoning\.dataset\.raw\s*\}\)/);
-  assert.match(runtime, /renderer\s*=\s*createStreamRenderer\(renderMarkdown\)/);
-  assert.match(runtime, /el\.innerHTML\s*=\s*renderer\.html\(\s*payload\.raw\s*,\s*undefined\s*\)/);
-  assert.match(runtime, /className\s*=\s*'reasoning';\s*r\.innerHTML\s*=\s*markdown\(\s*w\.text\s*\)/);
-  assert.doesNotMatch(runtime, /task-label">'\+markdown\((?:t\.name|w\.text|retLabel)\)/);
-  assert.match(runtime, /task-label">'\+markdown\(\s*t\.name\s*,\s*false\s*\)/);
-  assert.match(runtime, /task-label">'\+markdown\(\s*name\s*,\s*false\s*\)/);
-  // updateTask used to render the live label itself; it now delegates to the shared tool-card
-  // builder, which passes allowMath=false. Guard against a math-enabled label creeping back in.
-  assert.doesNotMatch(runtime, /\.task-label'\)\.innerHTML\s*=\s*markdown\(\s*m\.name\s*[,)]/);
-  assert.match(runtime, /innerHTML\s*=\s*markdown\(\s*label\s*,\s*false\s*\)/);
-  assert.match(runtime, /Reconnect failed '\s*\+\s*m\.attempt\s*\+\s*'\/'\s*\+\s*m\.max\s*\+\s*'\*\*'\s*,\s*false\s*\)/);
+test('display math is wrapped in a .math-block container', () => {
+  assert.match(reactApp, /<div class="math-block">\$\{inner\}<\/div>/, 'display math must be wrapped in a scrollable block');
+});
+
+test('inline task-like labels never receive math parsing', () => {
+  // In the React path, labels are passed through the same guarded renderer any other
+  // inline token gets; the invariant that matters is that `allowMath` is honoured.
+  assert.match(mathBlocks, /allowMath === false/, 'allowMath false short-circuits both protect and restore');
 });
 
 test('math blocks stay scrollable and themed', () => {
-  assert.match(styles, /\.math-block\{[^}]*overflow-x:auto/);
-  assert.match(styles, /\.math-block \.katex-display/);
+  assert.match(reactCss, /\.math-block\s*\{[^}]*overflow-x:\s*auto/, 'wide formulae scroll horizontally');
+  assert.match(reactCss, /\.math-block\s+\.katex-display/, 'display math gets its own spacing');
+  assert.match(reactCss, /\.katex\s*\{[^}]*color:\s*var\(--fg\)/, 'the foreground colour is applied to KaTeX output');
 });

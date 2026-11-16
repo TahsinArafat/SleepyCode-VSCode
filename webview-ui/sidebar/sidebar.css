@@ -4961,3 +4961,28 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .hi-status-failed { color: var(--error, #f14c4c); }
 .hi-status-paused { color: var(--accent, #d7ba7d); }
 .hi-status-running { color: var(--vscode-terminal-ansiGreen, #89d185); }
+
+/* Display math: scroll horizontally when the formula is wider than the column,
+   like any other block. The classic webview had the same rule; the React port
+   rendered display math unwrapped, which made a wide formula stretch the whole
+   message instead of scrolling inside its own box. */
+.math-block {
+	margin: var(--sp-2) 0;
+	padding: var(--sp-2) var(--sp-1);
+	overflow-x: auto;
+	overflow-y: hidden;
+	max-width: 100%;
+}
+.math-block .katex-display {
+	margin: 0.4em 0;
+}
+.katex {
+	font-size: 1.05em;
+	color: var(--fg);
+}
+.math-block .katex-display > .katex {
+	color: var(--fg);
+}
+.katex .katex-error {
+	color: var(--error, #f14c4c);
+}
