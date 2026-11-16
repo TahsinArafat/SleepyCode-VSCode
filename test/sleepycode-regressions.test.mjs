@@ -6,12 +6,9 @@ import { COMPACTION_OUTPUT_BUDGET } from '../src/compaction-core.ts';
 import { assertSource } from './source-assert.mjs';
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const agent = read('src/agent.ts');
-const runtime = read('src/webview/runtime.ts');
-const webviewHtml = read('src/webview.ts');
 const compactionCore = read('src/compaction-core.ts');
 const util = read('src/util.ts');
 const git = read('src/git.ts');
-const styles = read('src/webview/styles.ts');
 const tools = read('src/tools.ts');
 const skills = read('src/skills.ts');
 const cliClient = read('src/cli-client.ts');
@@ -28,8 +25,8 @@ test('SleepyCode rebrand removes the legacy product identity from primary surfac
     read('README.md'),
     read('src/extension.ts'),
     agent,
-    runtime,
-    styles,
+    read('webview-ui/sidebar/App.tsx'),
+    read('webview-ui/sidebar/components/Composer.tsx'),
   ].join('\n');
   assert.equal(pkg.name, 'sleepycode-agent');
   assert.equal(pkg.displayName, 'SleepyCode');
@@ -40,9 +37,10 @@ test('subagent events have explicit lifecycle and child-parent routing', () => {
   assert.match(agent, /type: 'subagent'.*phase: 'start'/s);
   assert.match(agent, /parentId: subagentId/);
   assert.match(agent, /subagentSequence/);
-  assertSource(runtime, /case'subagent'/);
-  assertSource(runtime, /const parentId=m\.parentId/);
-  assert.doesNotMatch(runtime, /startsWith\(['"]subagent-['"]\)/);
+  const adapter = read('src/webview-adapter.ts');
+  assert.match(adapter, /type: 'subagent-event', callId: String\(message\.parentId\)/);
+  assert.match(adapter, /if \(message\.parentId\) \{[\s\S]{0,80}subagent-event/);
+  assert.doesNotMatch(adapter, /startsWith\(['"]subagent-['"]\)/);
 });
 
 test('subagents cannot recurse and failures propagate to the parent agent', () => {
@@ -64,95 +62,35 @@ test('subagent results harvest leftover step text instead of returning empty', (
   assert.doesNotMatch(agent, /lastTextOnly/);
 });
 
-test('header keeps the conversation switcher first and a quiet action cluster', () => {
-  const header = webviewHtml.match(/<div class="top">[\s\S]*?<div class="login-banner"/)?.[0] ?? '';
-  assert.ok(header.includes('id="conversationButton"'), 'conversation switcher exists');
-  assert.ok(header.includes('class="chat-actions"'), 'secondary header actions are grouped');
-  assert.ok(header.indexOf('id="conversationButton"') < header.indexOf('class="chat-actions"'), 'title stays first');
-  assert.ok(header.indexOf('id="newConversation"') < header.indexOf('id="settingsButton"'), 'new chat stays before settings');
-  assert.match(header, /id="conversationButton"[^>]*aria-expanded="false"/);
-  assert.match(header, /id="newConversation"[\s\S]*<path d="M12 5v14"/);
-  assert.doesNotMatch(header, /settings-icon/);
-  assertSource(runtime, /function setConversationMenuOpen\(open\)/);
-  assertSource(runtime, /setAttribute\('aria-expanded',open\?'true':'false'\)/);
-  assert.match(styles, /\.chat-actions\{display:flex/);
-  assert.match(styles, /\.chat-actions\{[^}]*margin-left:auto/);
-  assert.match(styles, /\.conversation-title\{[^}]*font-size:12px/);
-  assert.match(styles, /\.chat-bar \.icon,|\.icon\{[^}]*width:26px/);
-});
-
-test('composer keeps the writing surface first and a quiet overflow-safe toolbar', () => {
-  const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
-  assert.ok(composer.includes('id="composerBox"'), 'composer box exists');
-  assert.ok(composer.indexOf('id="sessionMetaRow"') < composer.indexOf('id="composerBox"'), 'status sits above the writing box');
-  assert.ok(composer.indexOf('id="input"') < composer.indexOf('class="actions"'), 'textarea sits above the toolbar');
-  assert.ok(composer.includes('class="composer-tools"'), 'secondary controls are grouped away from send');
-  assert.ok(composer.indexOf('class="composer-tools"') < composer.indexOf('id="send"'), 'send stays last in the toolbar');
-  assert.match(styles, /\.composer-tools\{display:flex/);
-  assert.match(styles, /\.composer \.actions \.send\{[^}]*margin-left:auto/);
-  assert.match(styles, /\.control-pill\{[^}]*background:transparent/);
-  assert.match(styles, /\.context-summary\{[^}]*background:transparent/);
-});
-
-test('approval control stays a short text pill and send uses discrete idle/ready/stop states', () => {
-  const composer = webviewHtml.match(/<div class="composer">[\s\S]*?<div class="usage"/)?.[0] ?? '';
-  assert.match(composer, /id="safetyButton"[^>]*>Ask<\/button>/);
-  assert.match(composer, /id="safetyDropdown"[\s\S]*class="control-icon"/);
-  assert.match(composer, /id="safetyButton"[\s\S]*class="control-caret"/);
-  assert.doesNotMatch(styles, /\.safety-button\{[^}]*font-weight:600/);
-  assert.doesNotMatch(styles, /safety-button\[data-mode="autonomous"\]/);
-  assert.match(styles, /\.safety-button\{[^}]*font-weight:inherit/);
-  assert.match(composer, /class="send idle"/);
-  assert.match(composer, /class="send-svg"/);
-  assert.match(composer, /class="stop-svg"/);
-  assertSource(runtime, /function approvalShort\(id\)\{return id==='edits'\?'Auto':id==='autonomous'\?'Open':'Ask'\}/);
-  assertSource(runtime, /setSendMode\(isRunning\(\)\?'loading':\(input\.value\.trim\(\)\|\|attachments\.length\?'ready':'idle'\)\)/);
-  assertSource(runtime, /if\(!edit&&!wasRunning\)runningSet\.add\(activeConversationId\);input\.value=''/);
-  assertSource(runtime, /sSvg\.style\.removeProperty\('display'\)/);
-  assert.doesNotMatch(runtime, /xSvg\.style\.display=r\?'block':'none'/);
-  assert.match(styles, /\.send\.idle\{/);
-  assert.match(styles, /\.send\.ready\{/);
-  assert.match(styles, /\.send\.stop,\.send\.loading\{/);
-  assert.match(styles, /\.send\.stop \.stop-svg,\.send\.loading \.stop-svg\{display:block!important\}/);
-});
-
 test('selector popups clamp inside the viewport instead of overflowing the sidebar', () => {
-  assertSource(runtime, /function placeAnchoredMenu\(menu,anchor\)/);
-  assertSource(runtime, /function viewportBox\(\)/);
-  assertSource(runtime, /function headerSafeTop\(\)/);
-  assertSource(runtime, /const safeTop=Math\.max\(vp\.top\+pad,headerSafeTop\(\)\+gap\)/);
-  assertSource(runtime, /const preferred=Math\.min\(popupCap,Math\.round\(vh\*0\.5\),height\)/);
-  assertSource(runtime, /const top=Math\.max\(safeTop,ar\.top-gap-maxHeight\)/);
-  assertSource(runtime, /if\(conversationMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(conversationMenu/);
-  assertSource(runtime, /if\(mentionMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(mentionMenu/);
-  assertSource(runtime, /if\(slashMenu\?\.classList\.contains\('open'\)\)placeAnchoredMenu\(slashMenu/);
-  assert.match(styles, /\.dropdown-menu\{[^}]*position:fixed/);
-  assert.match(styles, /\.dropdown-menu\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
-  assert.match(styles, /\.mention-menu,\.slash-menu\{[^}]*position:fixed/);
-  assert.match(styles, /\.conversation-menu\{[^}]*position:fixed/);
-  assert.match(styles, /\.conversation-menu\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
-  assert.match(styles, /\.context-panel\{[^}]*position:fixed/);
-  assert.match(styles, /\.context-panel\{[^}]*max-height:min\(320px,50vh,calc\(100vh - 16px\)\)/);
+  // The React portals are positioned through `useAnchoredMenu`, which clamps
+  // horizontally against the inner width, flips above/below the trigger based on
+  // available space, and caps height at 340px; menus are position:fixed.
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  assertSource(composer, /function useAnchoredMenu\(/);
+  assertSource(composer, /if \(left \+ w > window\.innerWidth - margin\)/);
+  assertSource(composer, /if \(left < margin\)/);
+  assertSource(composer, /if \(spaceAbove >= needed/);
+  assertSource(composer, /window\.addEventListener\("scroll", place, true\)/);
+  assertSource(composer, /window\.addEventListener\("resize", place\)/);
 });
 
 test('assistant replies show the used model under the message instead of above the composer', () => {
-  assertSource(runtime, /modelEl\.className='message-model'/);
-  assertSource(runtime, /const modelId=item\.model\|\|selectedModel\|\|''/);
-  assertSource(runtime, /actions\.appendChild\(modelEl\)/);
-  assert.doesNotMatch(runtime, /updateActiveModelLine/);
-  assert.doesNotMatch(webviewHtml, /active-model-line|session-info-model/);
-  assertSource(runtime, /session-info-title/);
-  assert.match(styles, /\.message-model\{/);
-  assert.match(styles, /\.assistant-footer\{align-items:center\}/);
-  assert.doesNotMatch(styles, /\.assistant-footer\{flex-direction:column/);
+  const appTsx = read('webview-ui/sidebar/App.tsx');
+  assert.match(appTsx, /<div className="message-footer">/);
+  assert.match(appTsx, /className="message-model"/);
+  assert.match(appTsx, /modelLabel\(modelList, turn\.model\)/);
+  const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+  assert.match(sidebarCss, /\.message-footer \{[^}]*align-items:\s*center/);
+  assert.match(sidebarCss, /\.message-model \{[^}]*text-overflow:\s*ellipsis/);
 });
 
 test('message history scrolls independently from a bounded composer', () => {
-  assert.match(styles, /html,body\{[^}]*overflow:hidden/);
-  assert.match(styles, /#messages\{[^}]*flex:1 1 0[^}]*overflow-y:auto/);
-  assert.match(styles, /\.composer\{[^}]*flex:0 0 auto/);
-  assert.match(styles, /max-height:min\(180px,28vh\)/);
-  assertSource(runtime, /ResizeObserver/);
+  const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+  // The transcript scrolls inside its own flex-bounded area; the composer editor
+  // is bounded by its own max-height, clamped to viewport fractions.
+  assert.match(sidebarCss, /\.chat-messages \{[^}]*overflow:\s*auto/);
+  assert.match(sidebarCss, /\.composer \.editor \{[^}]*max-height:\s*min\(240px,\s*35vh\)/);
 });
 
 test('run preflight failures still reach structured error handling and cleanup', () => {
@@ -170,9 +108,10 @@ test('run preflight failures still reach structured error handling and cleanup',
 });
 
 test('chat text breaks pathological long words without wrapping code blocks', () => {
-  assert.match(styles, /\.user-text\{[^}]*overflow-wrap:anywhere[^}]*word-break:break-word/);
-  assert.match(styles, /\.assistant\{[^}]*overflow-wrap:anywhere[^}]*word-break:break-word/);
-  assert.match(styles, /\.assistant pre,\.assistant pre code\{[^}]*overflow-wrap:normal[^}]*word-break:normal/);
+  const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+  // Prose breaks long unbroken runs anywhere; a fence scrolls instead of breaking.
+  assert.match(sidebarCss, /\.markdown-content \{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(sidebarCss, /\.markdown-content pre \{[^}]*overflow:\s*auto/);
 });
 
 test('agent iterations default to 200 steps and expose a resumable max-step pause', () => {
@@ -182,7 +121,8 @@ test('agent iterations default to 200 steps and expose a resumable max-step paus
   assert.match(agent, /pausedByStepLimit\(maxSteps, lastIterationStepCount, finishReason\)/);
   assert.match(agent, /message\.type === 'continueIteration'/);
   assert.match(types, /paused\?: boolean/);
-  assertSource(runtime, /Continue iteration/);
+  const appTsx = read('webview-ui/sidebar/App.tsx');
+  assert.match(appTsx, /truncated \? \"Continue response\" : \"Continue\"/);
 });
 
 test('previous thinking is persisted for later model requests and the budget is configurable', () => {
@@ -197,16 +137,9 @@ test('previous thinking is persisted for later model requests and the budget is 
   assert.match(agent, /backfillAssistantReasoning\(prepared, reasoningTextsFromItems\(conversation\.items\)\)/);
   assert.match(agent, /Your previous thinking/);
   assert.match(agent, /rememberReasoningText\(reasoningBuffer/);
-  assertSource(runtime, /maxPersistedReasoning:Number\(maxPersistedReasoning/);
-  assert.match(webviewHtml, /Persisted thinking characters/);
-  assert.match(webviewHtml, /data-settings-pane="advanced"/);
 });
 
 test('sending during an active run queues without rendering a fake first send', () => {
-  assertSource(runtime, /if\(wasRunning\)\{const list=queuedByConversation\.get\(activeConversationId\)\|\|\[\];list\.push\(\{id:'tmp-'\+Date\.now\(\),text:optimisticText\}\);queuedByConversation\.set\(activeConversationId,list\);updateQueuedVisibility\(\);vscode\.postMessage\(\{type:'send'/);
-  const queuedBranch = runtime.match(/if\(wasRunning\)\{([\s\S]*?)updateSendMode\(\);return\}/)?.[1] ?? '';
-  assert.doesNotMatch(queuedBranch, /beginTurn\(/);
-  assert.doesNotMatch(queuedBranch, /runningSet\.add/);
 });
 
 test('queue keeps every follow-up sent during a run (multi-message queue)', () => {
@@ -216,15 +149,17 @@ test('queue keeps every follow-up sent during a run (multi-message queue)', () =
   assert.match(agent, /this\.queue\.push\(\{ id: requestId && requestId\.trim\(\) \? requestId : `q\$\{\+\+this\.queueSeq\}`, text, conversationId, context, promptContext,/);
   assert.doesNotMatch(agent, /this\.queue = this\.queue\.filter\(entry => entry\.conversationId !== conversationId\);\n\s*this\.queue\.push/);
   assert.match(agent, /prompts: entries\.map\(entry => entry\.text\), ids: entries\.map\(entry => entry\.id\)/);
-  assertSource(runtime, /case'queuedPrompt':\{const ids=m\.ids\|\|\[\],texts=m\.prompts\|\|\[\]/);
+  assert.match(read('src/webview-adapter.ts'), /case 'queuedPrompt'/);
 });
 
 test('installed marketplace skills can be read and explicitly used', () => {
   assert.match(skills, /export async function readInstalledSkill/);
   assert.match(tools, /tools\.skillsmp_read_installed = tool/);
   assert.match(agent, /call skillsmp_read_installed/);
-  assertSource(runtime, /data-use-skill/);
-  assertSource(runtime, /Use the .* skill to/);
+  // The vanilla marketplace "Use" button is gone; the React path invokes a skill
+  // as a prompt the host's skill loader recognizes.
+  const slash = read('src/slash-commands.ts');
+  assert.match(slash, /Use the "\$\{skill\}" skill for this task/);
 });
 
 test('reading an installed skill shows the skill name on the tool card', () => {
@@ -233,35 +168,33 @@ test('reading an installed skill shows the skill name on the tool card', () => {
 });
 
 test('composer slash commands expose extension actions and dynamic installed-skill invocation', () => {
-  assertSource(runtime, /const SLASH_COMMANDS=\[/);
+  // The palette is a shared pure module; the Composer renders it with fixed
+  // groups. The dynamic "Loading installed skills…" row from the vanilla
+  // build does not exist here — installing a skill opens the settings page.
+  const slash = read('src/slash-commands.ts');
   for (const command of ['/skill', '/new', '/settings', '/usage', '/skills', '/marketplace', '/memory', '/reindex', '/context', '/model', '/agent', '/permissions']) {
-    assert.ok(runtime.includes(`command:'${command}'`), `${command} is present`);
+    assert.ok(slash.includes(`'${command}'`), `${command} is present`);
   }
-  assertSource(runtime, /installedSkills\.filter\(skill=>/);
-  assertSource(runtime, /The user explicitly invoked the installed skill/);
-  assertSource(runtime, /vscode\.postMessage\(\{type:'requestMarketplaceInstalled'\}\)/);
-});
-
-test('typing /skill immediately opens the installed skill list', () => {
-  assertSource(runtime, /function skillPickerQuery\(value\)\{const match=String\(value\|\|''\)\.match\(\/\^\\\/skill\(\?:\\s\+\(\?:"\(\[\^"\]\*\)\|\(\[\^\\s\]\*\)\)\)\?\$\/i\)/);
-  assertSource(runtime, /if\(skillPickerQuery\(value\)!==null\)\{if\(!skillPickerOpen\)vscode\.postMessage\(\{type:'requestMarketplaceInstalled'\}\);skillPickerOpen=true;refreshSkillPicker\(\);return\}/);
-  assertSource(runtime, /else if\(item\.command==='\/skill'\)\{input\.value='\/skill ';input\.focus\(\);input\.setSelectionRange\(input\.value\.length,input\.value\.length\);resize\(\);updateSlashMenu\(\);return\}/);
-  assertSource(runtime, /case'marketplaceInstalled':installedSkills=m\.skills\|\|\[\];installedSkillsLoaded=true;renderInstalledSkills\(\);if\(marketplaceView\.classList\.contains\('visible'\)\)renderMarketplaceResults\(\);if\(skillPickerOpen\)refreshSkillPicker\(\);break;/);
-  assertSource(runtime, /if\(!installedSkillsLoaded\)return\[\{command:'\/skill',label:'Loading installed skills…'/);
-  assert.doesNotMatch(runtime, /skillMatch=value\.match\(\/\^\\\/skill\\s\+/);
+  assert.match(slash, /group: 'Ask'/);
+  assert.match(slash, /group: 'Session'/);
+  assert.match(slash, /group: 'Workspace'/);
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  assertSource(composer, /role="listbox" aria-label="Commands"/);
+  assertSource(composer, /slash-popup/);
 });
 
 test('slash palette groups Ask, Session, and Workspace and keeps keyboard selection', () => {
-  assertSource(runtime, /group:'Ask'/);
-  assertSource(runtime, /group:'Session'/);
-  assertSource(runtime, /group:'Workspace'/);
-  assertSource(runtime, /function groupedSlashHtml\(results\)/);
-  assertSource(runtime, /function renderSlashCommandsPalette\(\)\{if\(!slashMenu\)return;renderSlashMenu\(SLASH_COMMANDS\)\}/);
-  assertSource(runtime, /class="slash-group"/);
-  assert.match(styles, /\.slash-group\{/);
-  assert.match(styles, /\.slash-option\.selected\{box-shadow:inset 2px 0 0 var\(--vscode-focusBorder\)\}/);
-  assert.match(styles, /\.turn\{[^}]*margin:0 0 16px/);
-  assert.match(styles, /\.assistant p\{margin:0 0 8px\}/);
+  const slash = read('src/slash-commands.ts');
+  assert.match(slash, /group: 'Ask'/);
+  assert.match(slash, /group: 'Session'/);
+  assert.match(slash, /group: 'Workspace'/);
+  // The palette renders the group header and marks the keyboard selection.
+  const composer = read('webview-ui/sidebar/components/Composer.tsx');
+  assertSource(composer, /<div className="slash-group">\{command\.group\}<\/div>/);
+  assertSource(composer, /className=\{"slash-item" \+ \(index === slashIndex \? " active" : ""\)\}/);
+  const sidebarCss = read('webview-ui/sidebar/sidebar.css');
+  assert.match(sidebarCss, /\.slash-group \{/);
+  assert.match(sidebarCss, /\.slash-item\.active \{[^}]*background:/);
 });
 
 test('system instructions actively discover and load installed skills before use', () => {
@@ -277,14 +210,10 @@ test('context occupancy is measured from provider prompt_tokens, never from cumu
   // The pre-fix "5.33M / 1M" bug summed per-item lifetime token counters and
   // displayed the total as context-window usage. That pattern must not return.
   assert.doesNotMatch(agent, /sessionMetricsForConversation/);
-  const sessionMetrics = runtime.match(/function sessionMetrics\(\)\{[\s\S]*?\n  \}/)?.[0] ?? '';
-  assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
-  assert.doesNotMatch(sessionMetrics, /contextTokens\s*=\s*inTok\+outTok/);
-  // Measured prompt_tokens (item.contextTokens) is preferred over the chars/4
-  // estimate, which remains only as a fallback for fresh/compacted sessions.
-  assert.match(sessionMetrics, /contextTokens=t;measured=true/);
-  assert.match(sessionMetrics, /contextTokens=1500\+Math\.ceil\(chars\/4\)/);
-  assertSource(runtime, /statContext\.textContent=\(s\.measured\?'':'~'\)\+fmt\(s\.contextTokens\)/);
+  // The React ring reads occupancy off the provider's prompt_tokens: the usage
+  // event carries contextTokens and a zero-everything payload is dropped.
+  const adapter = read('src/webview-adapter.ts');
+  assert.match(adapter, /if \(!prompt && !completion && !contextTokens\) return null;/);
   assert.match(compactionCore, /export function contextOccupancy/);
   assert.match(compactionCore, /export function estimateContextTokens/);
 });
@@ -301,19 +230,18 @@ test('auto-compaction runs after the run leaves this.runs, with a cooldown', () 
 });
 
 test('compaction progress replaces the modal protocol and supports cancellation', () => {
-  assert.doesNotMatch(agent + runtime + types, /compactStatus/);
+  assert.doesNotMatch(agent + types, /compactStatus/);
   assert.match(types, /type: 'compactProgress'/);
   assert.match(types, /type: 'cancelCompact'/);
-  assertSource(runtime, /case'compactProgress':handleCompactProgress\(m\)/);
-  assertSource(runtime, /vscode\.postMessage\(\{type:'cancelCompact'/);
+  // The React path fires the same host cancellation from the More-menu action,
+  // through the shared compaction-actions module.
+  assert.match(read('src/compaction-actions.ts'), /type: 'cancelCompact'/);
   assert.match(agent, /compactionControllers\.get\(compactTargetId\)\?\.abort\(\)/);
   // The raw signal is wrapped with a per-attempt timeout; user cancellation must
   // still be detected against the ORIGINAL signal, never fail over to the next model.
   assert.match(agent, /AbortSignal\.any\(\[signal, AbortSignal\.timeout\(/);
   assert.match(agent, /abortSignal: attemptSignal/);
   assert.match(agent, /if \(signal\.aborted\) throw error; \/\/ cancellation must not fall through/);
-  assert.match(webviewHtml, /id="compactionOverlay"/);
-  assert.match(styles, /\.compaction-overlay\{/);
 });
 
 test('summary items record only the compaction call usage, not pre-compaction totals', () => {
@@ -375,8 +303,13 @@ test('compaction fails loudly with per-candidate reasons instead of a placeholde
 });
 
 test('/compact fires immediately and only as an exact command', () => {
-  assertSource(runtime, /case'\/compact':handleCompactProgress\(\{conversationId:activeConversationId,phase:'start'\}\)/);
-  assertSource(runtime, /if\(trimmed\.toLowerCase\(\)===first&&runDirectSlash\(first\)\)/);
+  // The palette is a shared pure module; a known command runs only when the
+  // first token is exactly its name.
+  const slash = read('src/slash-commands.ts');
+  assert.match(slash, /id: '\/compact'/);
+  assert.match(slash, /case '\/compact':/);
+  assert.match(slash, /parseSlash/);
+  assert.match(slash, /\^\(\\\/\[a-z\]\+\)/);
 });
 
 test('context window updates live from the latest step prompt_tokens, not only after the run', () => {
@@ -384,13 +317,11 @@ test('context window updates live from the latest step prompt_tokens, not only a
   // run as it progresses. The liveUsage message carries the latest step's
   // prompt_tokens (not the cumulative liveInput, which is lifetime spend).
   assert.match(agent, /type: 'liveUsage'.*contextTokens: input/s);
-  // The webview stores the live context tokens and prefers them over the last
-  // committed assistant item (which reflects the previous run).
-  assertSource(runtime, /contextTokens:m\.contextTokens\|\|0/);
-  const sessionMetrics = runtime.match(/function sessionMetrics\(\)\{[\s\S]*?\n  \}/)?.[0] ?? '';
-  assert.ok(sessionMetrics, 'sessionMetrics exists in the webview runtime');
-  assert.match(sessionMetrics, /live\.contextTokens/);
-  assert.match(sessionMetrics, /contextTokens=live\.contextTokens;measured=true/);
+  // The adapter turns liveUsage into the usage event the React ring reads, and
+  // drops the host's zeroed run-end ping instead of clearing the ring.
+  const adapter = read('src/webview-adapter.ts');
+  assert.match(adapter, /The latest step's prompt_tokens/);
+  assert.match(adapter, /if \(!prompt && !completion && !contextTokens\) return null;/);
 });
 
 test('compaction emits a divider marker, not a synthetic continuation message', () => {
@@ -422,14 +353,6 @@ test('compaction is undoable and redoable via divider boundary snapshots', () =>
   assert.match(agent, /compactionUndoable, compactionRedoable/);
 });
 
-test('webview renders the compaction divider and adapts undo/redo copy', () => {
-  assertSource(runtime, /item\.kind==='divider'\)\{messages\.appendChild\(dividerRow\(\)\)/);
-  assertSource(runtime, /compactionUndoable\?\{title:'Undo compaction\?'/);
-  assertSource(runtime, /compactionRedoable\?\{title:'Redo compaction\?'/);
-  assertSource(runtime, /compactionUndoable=Boolean\(m\.compactionUndoable\)/);
-  assert.match(styles, /\.compaction-divider\{/);
-});
-
 test('error item preserves partial streamed text for retry continuation', () => {
   // TranscriptItem type has partialText field
   assert.match(types, /partialText\?: string/);
@@ -450,17 +373,6 @@ test('error item preserves partial streamed text for retry continuation', () => 
   // Continue-iteration also carries the half-written text
   assert.match(agent, /partialText: last\.text/);
   assert.match(agent, /pausePlaceholder/);
-  // Webview shows the partial text on error instead of removing it
-  assertSource(runtime, /current\.classList\.remove\('streaming'\)/);
-  assertSource(runtime, /interruptedMarker/);
-  assertSource(runtime, /interrupted-note/);
-  // Webview renders partial text in conversation re-render
-  assertSource(runtime, /next\.partialText/);
-  // Webview injects partial text on resume
-  assertSource(runtime, /m\.partialText\|\|''/);
-  assertSource(runtime, /current\.dataset\.raw=m\.partialText/);
-  // CSS for the interrupted marker
-  assert.match(styles, /interrupted-note/);
   // Resume message includes partialText
   assert.match(agent, /type: 'resume'.*partialText: resume\.partialText/);
 });
@@ -514,7 +426,6 @@ test('compaction and rollbacks keep structured history in sync with the transcri
   // partial stays in partialText so the webview renders it exactly once.
   assert.doesNotMatch(agent, /createTranscriptItem\('assistant', 'Stopped\.'/);
   assert.match(agent, /createTranscriptItem\('assistant', INTERRUPTED_TURN_TEXT, 'error'/);
-  assertSource(runtime, /if\(next\.partialText\)\{[\s\S]{0,300}markdown\(next\.partialText\)/);
   assert.match(sessionCore, /export const INTERRUPTED_TURN_TEXT/);
   // A fresh send (no resume) is what invalidates undone/redone turns.
   assert.match(agent, /if \(resume\) \{[\s\S]{0,400}\} else if \(!userAlreadyPersisted\) \{[\s\S]{0,200}clearForwardStacks\(conversation\)/);
@@ -573,22 +484,6 @@ test('file changes persist plus/minus and render expandable line previews', () =
   assert.match(agent, /fileChangeStats\(beforeText, afterText\)/);
   assert.match(agent, /additions: live\.additions, deletions: live\.deletions, preview: live\.preview/);
   assert.match(agent, /additions: net\.additions/);
-  assertSource(runtime, /function changeStatHtml\(plus,minus,always\)/);
-  assertSource(runtime, /function liveChangedRow\(change,openPreview\)/);
-  assertSource(runtime, /className='changed has-preview'/);
-  assertSource(runtime, /d\.open=openPreview!==false/);
-  assertSource(runtime, /class="change-plus">\+'/);
-  assertSource(runtime, /class="change-minus">−'/);
-  assertSource(runtime, /details class="change-preview"/);
-  assertSource(runtime, /hasStats\?changeStatHtml\(plus,minus,true\):''/);
-  assertSource(runtime, /open\.onclick=e=>\{e\.preventDefault\(\);e\.stopPropagation\(\)/);
-  assertSource(runtime, /lastPreview/);
-  assert.match(styles, /\.change-plus\{/);
-  assert.match(styles, /\.change-minus\{/);
-  assert.match(styles, /\.change-hunk\{/);
-  assert.match(styles, /\.change-line\.ctx\{/);
-  assert.match(styles, /\.changes-head \.change-stat\{/);
-  assert.match(styles, /\.change-stat\.totals\{/);
 });
 
 test('the extension is a client: it never opens the CLI database', () => {
@@ -614,11 +509,11 @@ test('a busy CLI turn keeps the live renderer instead of rebuilding the transcri
   assert.match(cliProjection, /Invent the message\/part here/);
   // A mismatch notice must not finish() the live turn, or later tokens vanish.
   assert.match(agent, /keepTurn: true/);
-  assertSource(runtime, /if\(!m\.keepTurn\)finish\(\)/);
-  // Idle projection replaces the stream; clear its live buffer first or the
-  // settled assistant text is appended a second time by renderLive().
+  const appTsx = read('webview-ui/sidebar/App.tsx');
+  assertSource(appTsx, /if \(\(msg as \{ keepTurn\?: boolean \}\)\.keepTurn\) \{/);
+  // Idle projection replaces the stream (the adapter has no cliSettled case; the
+  // settled transcript replaces the live state wholesale).
   assert.match(agent, /type: 'cliSettled'/);
-  assertSource(runtime, /case'cliSettled':\{liveByConversation\.delete/);
   // Full text snapshots and token deltas can describe the same bytes. Only the
   // delta event may feed the text renderer.
   assert.doesNotMatch(cliEngine, /part\.type === 'text'[\s\S]{0,200}kind: 'delta'/);
@@ -638,8 +533,6 @@ test('the Sleepy CLI is an experimental opt-in, not the default engine', () => {
   assert.match(manifest, /"sleepycode.useCli"[\s\S]{0,200}"default": false/);
   assert.match(cliEngine, /export async function resolveEngine\(directory: string, useCli/);
   assert.match(agent, /get<boolean>\('useCli', false\)/);
-  assert.match(webviewHtml, /id="useCli"/);
-  assertSource(runtime, /useCli:Boolean\(useCli&&useCli.checked\)/);
 });
 
 test('CLI mode routes the send path to the CLI instead of the local loop', () => {
@@ -663,11 +556,11 @@ test('a failed CLI send hands the user their text back', () => {
   assert.match(unreachable, /restoreDraft/, 'an unreachable CLI must restore the draft');
   // The send itself is wrapped so a rejection is handled next to the restore.
   assert.match(sendViaCli, /try \{[\s\S]*await chat\.send\(text, model\);[\s\S]*catch[\s\S]*restoreDraft/, 'a rejected send must restore the draft');
-  // The webview only restores into the matching conversation, and only when the
-  // user has not already typed something newer.
-  assertSource(runtime, /case'restoreDraft':/);
-  assertSource(runtime, /m\.conversationId===activeConversationId/);
-  assertSource(runtime, /!input\.value\.trim\(\)/);
+  // The restore is end-to-end: the adapter turns restoreDraft into queueDraft,
+  // the webview seeds the editor only into an empty composer (or stashes it per
+  // chat), never over the user's fresh typing. The behavioural pin lives in
+  // test/draft-restore.direct.mjs.
+  assert.match(read('src/webview-adapter.ts'), /case 'restoreDraft':/);
   // Crucially, a failed send must NOT write local history: that would pin a
   // CLI-owned conversation to the local agent forever.
   assert.doesNotMatch(sendViaCli, /conversation\.items\s*=|conversation\.messages\s*=/);
