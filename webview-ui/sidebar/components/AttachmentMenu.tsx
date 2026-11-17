@@ -13,7 +13,7 @@ import { Icon } from "../../shared/icons";
 import { useReducedMotion } from "../../shared/motionPreference";
 import { usePresence } from "../../shared/usePresence";
 
-export function AttachmentMenu({ onFiles }: { onFiles: (imagesOnly: boolean) => void }) {
+export const AttachmentMenu = React.memo(function AttachmentMenu({ onFiles }: { onFiles: (imagesOnly: boolean) => void }) {
   const id = React.useId();
   const trigger = React.useRef<HTMLButtonElement>(null);
   const surface = React.useRef<HTMLDivElement>(null);
@@ -144,4 +144,4 @@ export function AttachmentMenu({ onFiles }: { onFiles: (imagesOnly: boolean) => 
       </div>
     </div>, document.body)}
   </>;
-}
+});

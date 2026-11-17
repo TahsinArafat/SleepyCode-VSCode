@@ -68,6 +68,10 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
         ...mentions.files,
       ];
       if (attachments.length) out.attachments = attachments;
+      if (typeof message.fromIndex === 'number') {
+        out.fromIndex = message.fromIndex;
+        out.revertFiles = message.revertFiles === true;
+      }
       return out;
     }
 
@@ -161,6 +165,14 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'notifyResponse', id: message.id, choice: message.choice };
 
     case 'resolveApproval':
+      if (String(message.requestId ?? '').startsWith('cliperm:')) {
+        return {
+          type: 'resolveCliPermission',
+          requestId: String(message.requestId),
+          approve: Boolean(message.approve),
+          session: Boolean(message.session),
+        };
+      }
       // The session marker is the host's 'secondary' choice — the only grant
       // this engine honors beyond one-shot. There is no pattern allow/deny
       // list here, and no auto-allow preset; those are not reachable from the
@@ -168,7 +180,12 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'notifyResponse', id: Number(message.requestId), choice: message.approve ? (message.session ? 'secondary' : 'ok') : 'cancel' };
 
     case 'revertToMessage':
-      return { type: 'undoLastTurn', conversationId: message.conversationId ?? message.convId };
+      return {
+        type: 'revertToMessage',
+        conversationId: message.conversationId ?? message.convId,
+        ...(typeof message.index === 'number' ? { index: message.index } : {}),
+        ...(typeof message.revertFiles === 'boolean' ? { revertFiles: message.revertFiles } : {}),
+      };
 
     case 'startReview': {
       // A review is a new read-only conversation about a SCOPE. It used to be
@@ -219,7 +236,9 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
     }
 
     case 'openMention':
-      return { type: 'openFile', path: message.path };
+      return message.kind && message.kind !== 'file'
+        ? { type: 'openMention', kind: message.kind, path: message.path }
+        : { type: 'openFile', path: message.path };
 
     case 'browseAttachments':
       return { type: 'requestFilePicker' };
@@ -251,7 +270,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       return { type: 'requestExtensionLogs' };
 
     case 'searchFiles':
-      return { type: 'fileMentionQuery', query: message.query };
+      return {
+        type: 'fileMentionQuery',
+        query: message.query,
+        ...(typeof message.requestId === 'number' ? { requestId: message.requestId } : {}),
+      };
 
     case 'answerQuestion':
       return { type: 'answerQuestion', callId: message.callId, answers: message.answers ?? {} };
@@ -336,7 +359,11 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       // chats, branch or terminal searches with file hits would insert the wrong
       // mention, so they are dropped instead.
       return message.kind === 'files'
-        ? { type: 'fileMentionQuery', query: message.query ?? '' }
+        ? {
+            type: 'fileMentionQuery',
+            query: message.query ?? '',
+            ...(typeof message.requestId === 'number' ? { requestId: message.requestId } : {}),
+          }
         : null;
 
     case 'updateChatWorkspace':
@@ -458,6 +485,57 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       // so every paste after the first was ignored.
       return { type: 'pasteResolved', requestId: message.requestId, ...(message.mention ? { mention: message.mention } : {}) };
 
+    case 'fileMentionResults':
+      return {
+        type: 'fileSearchResults',
+        requestId: Number(message.requestId ?? 0),
+        items: (Array.isArray(message.results) ? message.results : []).map((entry: any) => {
+          const p = String(entry?.path ?? '');
+          return { kind: entry?.kind || 'file', name: p.split('/').pop() || p, path: p, detail: p };
+        }),
+      };
+
+    case 'sleepyStatus':
+      return {
+        type: 'sleepyStatus',
+        loggedIn: message.loggedIn === true,
+        busy: message.busy === true,
+        text: typeof message.text === 'string' ? message.text : '',
+      };
+
+    case 'shortcut':
+      return typeof message.action === 'string' ? { type: 'shortcut', action: message.action } : null;
+
+    case 'maxSteps':
+      return agentEvent(message.conversationId, {
+        type: 'max-steps',
+        steps: Number(message.steps ?? 0),
+        ...(message.reason === 'max-tokens' || message.reason === 'max-steps' ? { reason: message.reason } : {}),
+      });
+
+    case 'contextAttachments':
+      return {
+        type: 'attachmentsPicked',
+        attachments: (Array.isArray(message.attachments) ? message.attachments : []).map((att: any, index: number) =>
+          att?.kind === 'image'
+            ? {
+                id: att.id || `att-${Date.now()}-${index}`,
+                name: att.name || 'image.png',
+                mime: att.mimeType || 'image/png',
+                data: att.previewDataUrl || att.data || '',
+                kind: 'image',
+              }
+            : {
+                id: att?.id || `att-${Date.now()}-${index}`,
+                name: att?.name || String(att?.path || 'file'),
+                mime: att?.mimeType || 'text/plain',
+                data: typeof att?.text === 'string' ? att.text : '',
+                ...(att?.path ? { path: att.path } : {}),
+                kind: 'text',
+              },
+        ),
+      };
+
     case 'conversation':
       return conversationPayload(message);
 
@@ -465,16 +543,18 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
     case 'configState':
       // SleepyCode's approval mode travels alongside so the composer's picker can
       // reflect it, and personas travel because the composer shows the one in use.
+      // Partial config updates that omit approvalMode/approvalPolicy must not
+      // reset the picker back to 'ask'.
       return {
         type: 'configState',
         personas: Array.isArray(message.personas) ? message.personas : [],
         activePersonaId: typeof message.activePersonaId === 'string' ? message.activePersonaId : '',
         hasProviders: true,
         uiPrefs: message.uiPrefs,
-        // The picker reads the policy shape, so the current approval mode is
-        // projected onto it rather than sending an undefined policy.
-        approvalPolicy: message.approvalPolicy ?? approvalPolicyForMode(message.approvalMode),
-        approvalMode: message.approvalMode,
+        ...(message.approvalPolicy !== undefined || message.approvalMode !== undefined
+          ? { approvalPolicy: message.approvalPolicy ?? approvalPolicyForMode(message.approvalMode) }
+          : {}),
+        ...(message.approvalMode !== undefined ? { approvalMode: message.approvalMode } : {}),
         // The picker needs the level in force, not just the ability to set one.
         // Never undefined: an unset level is `none`, and a picker with nothing
         // selected reads as broken.
@@ -663,9 +743,8 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       };
 
     case 'goal':
-      // The webview reads goals from `workflowState.goals`, not from a message of
-      // their own, so a goal change is delivered as the shape it consumes.
-      return { type: 'workflowState', queues: {}, goals: { [message.conversationId ?? '']: message.goal } };
+      // Only carry `goals` so partial goal updates never overwrite the queued list.
+      return { type: 'workflowState', goals: { [message.conversationId ?? '']: message.goal } };
 
     case 'contextNotice':
       // React has no persistent notice block, but dropping this would hide a
@@ -1019,14 +1098,47 @@ export function contextTokensOf(items: readonly any[] | undefined): number {
  * assistant turns made of typed blocks, so work items are split into
  * thinking/tool blocks and an error item becomes an error block.
  */
-export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
+function toReactAttachment(att: any, index: number, resolveImageUri?: (tempPath: string) => string): Record<string, unknown> | null {
+  if (!att || typeof att !== 'object') return null;
+  if (typeof att.data === 'string' && (att.kind === 'image' || att.kind === 'text')) return att;
+  if (att.kind === 'image') {
+    const data = (typeof att.previewDataUrl === 'string' && att.previewDataUrl)
+      || (typeof att.tempPath === 'string' && att.tempPath && resolveImageUri ? resolveImageUri(att.tempPath) : '')
+      || '';
+    return {
+      id: att.id || `img-${index}-${att.name || 'image'}`,
+      name: att.name || 'image.png',
+      mime: att.mimeType || 'image/png',
+      data,
+      kind: 'image',
+    };
+  }
+  return {
+    id: att.id || `file-${index}-${att.path || att.name || 'file'}`,
+    name: att.name || String(att.path || 'file').split('/').pop() || String(att.path || 'file'),
+    mime: att.mimeType || 'text/plain',
+    data: typeof att.text === 'string' ? att.text : '',
+    ...(att.path ? { path: att.path } : {}),
+    kind: 'text',
+  };
+}
+
+export function itemsToTurns(
+  items: readonly any[] | undefined,
+  options?: { resolveImageUri?: (tempPath: string) => string },
+): Turn[] {
   const turns: Turn[] = [];
   for (const item of items ?? []) {
     if (!item || item.kind === 'divider') continue;
 
     if (item.role === 'user') {
       const turn: Turn = { role: 'user', text: item.text ?? '' };
-      if (item.attachments?.length) turn.attachments = item.attachments;
+      if (item.attachments?.length) {
+        const converted = item.attachments
+          .map((att: any, idx: number) => toReactAttachment(att, idx, options?.resolveImageUri))
+          .filter(Boolean);
+        if (converted.length) turn.attachments = converted;
+      }
       if (item.model) turn.model = item.model;
       turns.push(turn);
       continue;
@@ -1044,9 +1156,10 @@ export function itemsToTurns(items: readonly any[] | undefined): Turn[] {
       }
       blocks.push({
         kind: 'tool',
-        callId: work?.tool ?? `tool-${blocks.length}`,
+        callId: work?.id || (work?.tool ? `${item.id || 'item'}:tool:${blocks.length}` : `tool-${blocks.length}`),
         name: reactToolName(work?.tool) || work?.title || work?.kind || 'tool',
-        input: undefined,
+        input: work?.input,
+        ...(work?.diff ? { diff: work.diff } : {}),
         status: work?.interrupted ? 'error' : work?.done === false ? 'running' : 'completed',
         result: work?.text,
       });
@@ -1315,9 +1428,12 @@ export function latestAssistantItemId(items: readonly any[] | undefined): string
  * text attachments have no on-disk path, so they are not forwarded as file
  * context (a fabricated path would make the agent read the wrong file).
  */
-export function reactAttachmentsOf(attachments: unknown): { images: { name: string; mimeType: string; dataUrl: string }[]; files: { path: string }[] } {
+export function reactAttachmentsOf(attachments: unknown): {
+  images: { name: string; mimeType: string; dataUrl: string }[];
+  files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string; text?: string; mimeType?: string; size?: number }[];
+} {
   const images: { name: string; mimeType: string; dataUrl: string }[] = [];
-  const files: { path: string }[] = [];
+  const files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string; text?: string; mimeType?: string; size?: number }[] = [];
   if (!Array.isArray(attachments)) return { images, files };
   for (const attachment of attachments) {
     if (!attachment || typeof attachment !== 'object') continue;
@@ -1330,7 +1446,33 @@ export function reactAttachmentsOf(attachments: unknown): { images: { name: stri
       });
       continue;
     }
-    if (typeof a.path === 'string' && a.path) files.push({ path: a.path });
+    if (a.kind === 'link' && typeof a.path === 'string' && a.path) {
+      files.push({ kind: 'link', path: a.path, ...(a.name ? { name: a.name } : {}) });
+      continue;
+    }
+    if (a.kind === 'folder' && typeof a.path === 'string' && a.path) {
+      files.push({ kind: 'folder', path: a.path, ...(a.name ? { name: a.name } : {}) });
+      continue;
+    }
+    if (typeof a.path === 'string' && a.path) {
+      files.push({
+        kind: 'file',
+        path: a.path,
+        ...(a.name ? { name: a.name } : {}),
+        ...(typeof a.data === 'string' && a.data ? { text: a.data, size: a.data.length } : {}),
+        ...(a.mime ? { mimeType: a.mime } : {}),
+      });
+    } else if (a.kind === 'text' && typeof a.data === 'string') {
+      const name = a.name || 'attachment.txt';
+      files.push({
+        kind: 'file',
+        path: name,
+        name,
+        text: a.data,
+        mimeType: a.mime || 'text/plain',
+        size: a.data.length,
+      });
+    }
   }
   return { images, files };
 }
@@ -1359,11 +1501,17 @@ export function isMentionCategoryAnswered(kind: string): boolean {
  * source of truth for the model upstream; here they become file
  * attachments, which is how SleepyCode supplies the same context.
  */
-export function splitMentions(text: string): { text: string; files: { kind: 'file'; path: string }[] } {
-  const files: { kind: 'file'; path: string }[] = [];
+export function splitMentions(text: string): { text: string; files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string }[] } {
+  const files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string }[] = [];
   if (!text || !text.includes('<attached')) return { text, files };
   for (const mention of parseMentionTokens(text)) {
-    if (mention.path) files.push({ kind: 'file', path: mention.path });
+    if (!mention.path) continue;
+    const kind: 'file' | 'folder' | 'link' = mention.kind === 'link' || /^https?:\/\//i.test(mention.path)
+      ? 'link'
+      : mention.kind === 'folder'
+        ? 'folder'
+        : 'file';
+    files.push({ kind, path: mention.path, ...(mention.name ? { name: mention.name } : {}) });
   }
   const stripped = text.replace(MENTION_TAG_RE, ' ').replace(/[ \t]{2,}/g, ' ').trim();
   return { text: stripped, files };

@@ -319,7 +319,12 @@ export async function connectServerDefinitions(
           inputSchema: jsonSchema(schema as Record<string, unknown>),
           execute: async (input: unknown, options: { abortSignal?: AbortSignal } = {}) => {
             await approve(`Use ${serverName}: ${tool.name}?`, JSON.stringify(input ?? {}, null, 2));
-            return connection.callTool(tool.name, input ?? {}, options.abortSignal);
+            const out = await connection.callTool(tool.name, input ?? {}, options.abortSignal);
+            const MAX_MCP_CHARS = 40_000;
+            if (typeof out === 'string' && out.length > MAX_MCP_CHARS) {
+              return `${out.slice(0, MAX_MCP_CHARS)}\n\n[truncated MCP output from ${out.length} chars to ${MAX_MCP_CHARS} chars]`;
+            }
+            return out;
           },
         };
       }

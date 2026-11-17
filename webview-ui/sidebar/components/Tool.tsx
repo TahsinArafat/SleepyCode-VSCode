@@ -16,6 +16,7 @@ import { Icon, IconName } from "../../shared/icons";
 import { basename } from "../../shared/markdown";
 import { MarkdownView } from "../../shared/MarkdownView";
 import { vscode } from "../../shared/vscode";
+import { decodeFontChar, getCachedFileIcon, subscribeFileIcon } from "../../shared/fileIcons";
 import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
 import { planPathFromResult } from "../../../src/webview-adapter";
 import { planBlockContent } from "../workPresentation";
@@ -24,45 +25,15 @@ function post(msg: OutMessage) {
   vscode.postMessage(msg);
 }
 
-// ---- IDE file icons (resolved by the host from the active icon theme) ----
-const iconCache = new Map<string, FileIconInfo | null>();
-const iconWaiters = new Map<string, ((i: FileIconInfo | null) => void)[]>();
-const loadedFonts = new Set<string>();
-
-window.addEventListener("message", (e: MessageEvent) => {
-  const m = e.data;
-  if (m?.type !== "fileIcon") return;
-  const icon: FileIconInfo | null = m.icon || null;
-  iconCache.set(m.filename, icon);
-  if (icon?.kind === "font" && !loadedFonts.has(icon.fontFamily)) {
-    loadedFonts.add(icon.fontFamily);
-    const style = document.createElement("style");
-    style.textContent = `@font-face { font-family: "${icon.fontFamily}"; src: url("${icon.src}") format("${icon.format}"); }`;
-    document.head.appendChild(style);
-  }
-  (iconWaiters.get(m.filename) || []).forEach((fn) => fn(icon));
-  iconWaiters.delete(m.filename);
-});
-
-// fontCharacter is either a literal glyph ("") or an escape like "\\E001".
-function decodeFontChar(ch: string): string {
-  const m = ch.match(/^\\+([0-9a-fA-F]{4,6})$/);
-  return m ? String.fromCodePoint(parseInt(m[1], 16)) : ch;
-}
-
+// ---- IDE file icons (resolved via shared subscriber in webview-ui/shared/fileIcons.ts) ----
 function FileIcon({ path, fallback }: { path: string; fallback: IconName }) {
   const filename = basename(path || "").toLowerCase();
-  const [icon, setIcon] = React.useState<FileIconInfo | null>(() => iconCache.get(filename) ?? null);
+  const [icon, setIcon] = React.useState<FileIconInfo | null>(() => getCachedFileIcon(filename) ?? null);
   React.useEffect(() => {
     // filename changes while the tool args stream in ("" → partial → final):
     // always re-sync from the cache, and (re)request when unknown.
     if (!filename) { setIcon(null); return; }
-    if (iconCache.has(filename)) { setIcon(iconCache.get(filename) ?? null); return; }
-    let live = true;
-    const fn = (i: FileIconInfo | null) => live && setIcon(i);
-    iconWaiters.set(filename, [...(iconWaiters.get(filename) || []), fn]);
-    post({ type: "getFileIcon", filename });
-    return () => { live = false; };
+    return subscribeFileIcon(filename, setIcon);
   }, [filename]);
 
   if (icon?.kind === "img") return <img className="file-icon-img" src={icon.src} alt="" />;
@@ -602,14 +573,23 @@ export function ToolTimeoutWatch({ block }: { block: ToolBlock }) {
   return null;
 }
 
+const COLLAPSED_DIFF_LINES = 12;
+const DEFAULT_DIFF_MAX_LINES = 600;
+
 function Diff({ diff }: { diff: string }) {
-  const lines = diff.split("\n");
+  const lines = React.useMemo(() => diff.split("\n"), [diff]);
   const needsExpand = lines.length > 6;
   const [expanded, setExpanded] = React.useState(!needsExpand);
+  const [showAll, setShowAll] = React.useState(false);
+  const visibleLines = React.useMemo(() => {
+    const limit = !expanded ? COLLAPSED_DIFF_LINES : showAll ? lines.length : DEFAULT_DIFF_MAX_LINES;
+    return lines.length > limit ? lines.slice(0, limit) : lines;
+  }, [lines, expanded, showAll]);
+  const hiddenCount = lines.length - visibleLines.length;
   return (
     <>
       <div className={"tool-diff " + (expanded ? "expanded" : "collapsed")}>
-        {lines.map((line, idx) => {
+        {visibleLines.map((line, idx) => {
           const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
           return (
             <div key={idx} className={"dl " + cls}>
@@ -617,6 +597,11 @@ function Diff({ diff }: { diff: string }) {
             </div>
           );
         })}
+        {expanded && hiddenCount > 0 && (
+          <button type="button" className="diff-expand" onClick={(e) => { e.stopPropagation(); setShowAll(true); }}>
+            … {hiddenCount} more lines (Show all)
+          </button>
+        )}
       </div>
       {needsExpand && (
         <button type="button" className="diff-expand" aria-expanded={expanded} aria-label={expanded ? "Collapse diff" : "Expand diff"} title={expanded ? "Collapse diff" : "Expand diff"} onClick={(e) => { e.stopPropagation(); setExpanded((x) => !x); }}>
@@ -999,6 +984,9 @@ export const ToolCard = React.memo(ToolCardInner, (a, b) =>
   a.block === b.block && a.onImplement === b.onImplement && a.onOpenSubagent === b.onOpenSubagent && a.awaitingApproval === b.awaitingApproval,
 );
 
+const SHELL_BODY_MAX_LINES = 400;
+const SHELL_BODY_MAX_CHARS = 24_000;
+
 /** Terminal pane: streams live output and sticks to the bottom while running. */
 function TerminalBody({
   parsed,
@@ -1008,16 +996,37 @@ function TerminalBody({
   running: boolean;
 }) {
   const ref = React.useRef<HTMLPreElement>(null);
+  const [showFull, setShowFull] = React.useState(false);
+  const { displayBody, truncated } = React.useMemo(() => {
+    if (!parsed.body || showFull) return { displayBody: parsed.body, truncated: false };
+    let body = parsed.body;
+    let isTruncated = false;
+    if (body.length > SHELL_BODY_MAX_CHARS) {
+      body = body.slice(-SHELL_BODY_MAX_CHARS);
+      isTruncated = true;
+    }
+    const lines = body.split("\n");
+    if (lines.length > SHELL_BODY_MAX_LINES) {
+      body = lines.slice(-SHELL_BODY_MAX_LINES).join("\n");
+      isTruncated = true;
+    }
+    return { displayBody: body, truncated: isTruncated };
+  }, [parsed.body, showFull]);
   React.useEffect(() => {
     if (!running) return;
     const el = ref.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [parsed.body, running]);
+  }, [displayBody, running]);
   return (
     <div className={"shell-body" + (running ? " live" : "")}>
       {parsed.meta ? <div className="shell-meta">{parsed.meta}</div> : null}
+      {truncated && (
+        <button type="button" className="diff-expand" onClick={() => setShowFull(true)}>
+          Show full output
+        </button>
+      )}
       <pre className={"terminal-output" + (running ? " streaming" : "")} ref={ref}>
-        {parsed.body || (running ? "Running…" : "")}
+        {displayBody || (running ? "Running…" : "")}
         {running ? <span className="term-caret" /> : null}
       </pre>
       {parsed.footer ? (

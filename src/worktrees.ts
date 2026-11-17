@@ -278,11 +278,64 @@ export async function pruneWorktrees(repoPath: string): Promise<void> {
   await git(['worktree', 'prune'], repoPath);
 }
 
+function runShell(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    const isWin = process.platform === 'win32';
+    const file = isWin ? (process.env.ComSpec || 'cmd.exe') : 'bash';
+    const args = isWin ? ['/d', '/s', '/c', command] : ['-lc', command];
+    const child = spawn(file, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const MAX_OUT = 2 * 1024 * 1024;
+    let outBytes = 0;
+    let errBytes = 0;
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          child.kill('SIGTERM');
+          killTimer = setTimeout(() => child.kill('SIGKILL'), 2000);
+          killTimer.unref?.();
+        }, timeoutMs)
+      : undefined;
+    child.stdout.on('data', (chunk) => {
+      if (outBytes >= MAX_OUT) return;
+      const buf = Buffer.from(chunk);
+      outBytes += buf.length;
+      stdout.push(buf);
+    });
+    child.stderr.on('data', (chunk) => {
+      if (errBytes >= MAX_OUT) return;
+      const buf = Buffer.from(chunk);
+      errBytes += buf.length;
+      stderr.push(buf);
+    });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), code: code ?? 0 });
+    });
+  });
+}
+
 export function runInWorktree(repoPath: string, name: string, command: string, timeoutMs = 120_000): Promise<RunResult> {
   return listWorktrees(repoPath).then(async (list) => {
     const tree = list.find((t) => t.name === name);
     if (!tree) throw new WorktreeError(`Unknown worktree ${name}`, 'not_found');
-    if (process.platform === 'win32') return runGit(['cmd', '/d', '/s', '/c', command], tree.path, { timeoutMs });
-    return runGit(['bash', '-lc', command], tree.path, { timeoutMs });
+    return runShell(command, tree.path, timeoutMs);
   });
 }

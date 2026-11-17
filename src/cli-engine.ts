@@ -16,7 +16,7 @@
  * so a mode change only applies to conversations that have not run yet.
  */
 
-import { findCliBinary, startOrAttach } from './cli-server.ts';
+import { findCliBinary, startOrAttach, type CliServer } from './cli-server.ts';
 import { applyCliPartDelta, applyCliPartUpdated, cliErrorText, applyPausedProjection, projectMessage, recoverableAssistant, type CliMessage, type CliPart, type ToolLabel } from './cli-projection.ts';
 import type { CliClient } from './cli-client.ts';
 import type { TranscriptItem } from './types';
@@ -28,6 +28,7 @@ export type EngineStatus = {
   /** Why this mode was chosen, surfaced in the sidebar so the user is never guessing. */
   reason: string;
   url?: string;
+  server?: CliServer;
 };
 
 const SESSION_KEY = 'sleepycode.cliSessionId';
@@ -48,7 +49,7 @@ export async function resolveEngine(directory: string, useCli = false): Promise<
   }
   try {
     const server = await startOrAttach({ directory });
-    return { mode: 'cli', reason: 'Using the Sleepy CLI.', url: server.url };
+    return { mode: 'cli', reason: 'Using the Sleepy CLI.', url: server.url, server };
   } catch (error) {
     return { mode: 'local', reason: `The Sleepy CLI could not start (${errorText(error)}), so this window uses the offline agent.` };
   }
@@ -164,6 +165,8 @@ export class CliChatSession {
   private readonly onLive?: (event: CliLiveEvent) => void;
   /** Last rows the CLI returned, so a busy-state repaint keeps the transcript. */
   private lastMessages: CliMessage[] = [];
+  /** Cached per-message projections so streaming deltas only re-project the touched message. */
+  private projectedByMessage = new Map<CliMessage, TranscriptItem[]>();
   /** Monotonic id of the newest refresh; older replies are dropped. */
   private refreshTicket = 0;
   /** True while a permission prompt is blocking the run. */
@@ -238,15 +241,33 @@ export class CliChatSession {
     }
   }
 
-  private publish(messages: CliMessage[], busy: boolean): void {
+  private publish(messages: CliMessage[], busy: boolean, dirtyMessage?: CliMessage): void {
     // An empty snapshot is ambiguous: it can be a genuinely new session, or a read that
     // raced the CLI before the rows were written. Clearing the sidebar on it wiped real
     // history, because the extension's items are a pure mirror with nothing to fall back
     // on. Keep what is on screen instead; a session that really is empty still shows the
     // empty state the first time it opens.
     if (!messages.length && !busy && this.lastMessages.length) return;
+    if (dirtyMessage) {
+      this.projectedByMessage.delete(dirtyMessage);
+    } else if (messages !== this.lastMessages) {
+      const active = new Set(messages);
+      for (const key of this.projectedByMessage.keys()) {
+        if (!active.has(key)) this.projectedByMessage.delete(key);
+      }
+    } else {
+      this.projectedByMessage.clear();
+    }
     this.lastMessages = messages;
-    const items = messages.flatMap(message => projectMessage(message, this.label));
+    const items: TranscriptItem[] = [];
+    for (const message of messages) {
+      let projected = this.projectedByMessage.get(message);
+      if (!projected) {
+        projected = projectMessage(message, this.label);
+        this.projectedByMessage.set(message, projected);
+      }
+      for (const item of projected) items.push(item);
+    }
     applyPausedProjection(items, busy);
     this.onUpdate(items, busy);
   }
@@ -269,7 +290,8 @@ export class CliChatSession {
         this.busy = true;
         const part = properties.part as CliPart | undefined;
         if (part && applyCliPartUpdated(this.lastMessages, part)) {
-          this.publish(this.lastMessages, true);
+          const touched = part.messageID ? this.lastMessages.find(row => row.info?.id === part.messageID) : undefined;
+          this.publish(this.lastMessages, true, touched);
           // Text is streamed only by message.part.delta. Emitting text again
           // from the full snapshot duplicates providers that publish both
           // events for the same content. Full updates still drive tool state.
@@ -291,7 +313,8 @@ export class CliChatSession {
         // would republish a stale snapshot and the next tokens would miss
         // lastMessages again — the sidebar only paints on idle.
         if (applyCliPartDelta(this.lastMessages, delta)) {
-          this.publish(this.lastMessages, true);
+          const touched = delta.messageID ? this.lastMessages.find(row => row.info?.id === delta.messageID) : undefined;
+          this.publish(this.lastMessages, true, touched);
           this.emitLiveFromDelta(delta);
         }
         break;

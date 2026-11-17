@@ -327,13 +327,30 @@ export async function fetchSleepyModelPrices(token: string): Promise<SleepyModel
   return [];
 }
 
+const LOGIN_TIMEOUT_MS = 5 * 60_000;
 let codeResolver: ((code: string) => void) | null = null;
+let codeRejecter: ((err: Error) => void) | null = null;
 let codePromise: Promise<string> | null = null;
+let activeLoginServer: http.Server | null = null;
 
-function waitForCode(): Promise<string> {
+function waitForCode(timeoutMs = LOGIN_TIMEOUT_MS): Promise<string> {
   if (!codePromise) {
-    codePromise = new Promise<string>(resolve => {
-      codeResolver = resolve;
+    codePromise = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        codeResolver = null;
+        codeRejecter = null;
+        codePromise = null;
+        reject(new Error('Browser login timed out. Please try signing in again.'));
+      }, timeoutMs);
+      timer.unref?.();
+      codeResolver = (code: string) => {
+        clearTimeout(timer);
+        resolve(code);
+      };
+      codeRejecter = (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      };
     });
   }
   return codePromise;
@@ -408,13 +425,31 @@ async function exchangeCodeForToken(code: string, dashboardUrl: string): Promise
 }
 
 export async function loginWithBrowser(onStatus?: (text: string) => void): Promise<SleepyAccount> {
+  if (activeLoginServer) {
+    try { activeLoginServer.closeAllConnections?.(); activeLoginServer.close(); } catch {}
+    activeLoginServer = null;
+    codeRejecter?.(new Error('Superseded by a new login attempt.'));
+    codeResolver = null;
+    codeRejecter = null;
+    codePromise = null;
+  }
   const dashboardUrl = dashboardUrlOf(readGatewayConfig());
   const { server, port } = await startLoginServer();
+  activeLoginServer = server;
   const authorizeUrl = buildAuthorizeUrl(dashboardUrl, port);
   onStatus?.(`Waiting for browser authorization at ${authorizeUrl}`);
-  try { await vscode.env.openExternal(vscode.Uri.parse(authorizeUrl)); } catch { /* user can open manually */ }
-  const code = await waitForCode();
-  server.close();
+  let code: string;
+  try {
+    try { await vscode.env.openExternal(vscode.Uri.parse(authorizeUrl)); } catch { /* user can open manually */ }
+    code = await waitForCode();
+  } finally {
+    if (activeLoginServer === server) activeLoginServer = null;
+    try { server.closeAllConnections?.(); } catch {}
+    server.close();
+    codeResolver = null;
+    codeRejecter = null;
+    codePromise = null;
+  }
   onStatus?.('Exchanging code for token…');
   const config = await exchangeCodeForToken(code, dashboardUrl);
   await writeGatewayConfig(config);

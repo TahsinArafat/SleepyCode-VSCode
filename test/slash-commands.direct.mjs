@@ -196,3 +196,15 @@ test('a known command that cannot run is distinguishable from an unknown one', (
   // An unknown word still produces nothing at all.
   assert.equal(slash.runSlashCommand('/nope', '', {}), null);
 });
+
+test('/clear and /effort dispatch their actions without disturbing /co matches', () => {
+  assert.deepEqual(slash.matchSlashCommands('/co').map(c => c.id), ['/compact', '/context']);
+  assert.deepEqual(
+    slash.runSlashCommand('/clear', '', { conversationId: 'c1' }),
+    { kind: 'messages', messages: [{ type: 'newConversation' }] },
+  );
+  assert.deepEqual(
+    slash.runSlashCommand('/effort', '', { conversationId: 'c1' }),
+    { kind: 'control', control: 'effort' },
+  );
+});

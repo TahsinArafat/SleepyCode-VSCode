@@ -50,7 +50,7 @@ export type AgentEvent =
   | { type: "route-note"; model: string; requested?: string; reason?: string }
   | { type: "retry"; attempt: number; max: number; delayMs: number; error: string }
   | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
-  | { type: "max-steps"; steps: number }
+  | { type: "max-steps"; steps: number; reason?: "max-steps" | "max-tokens" }
   /** `keepTurn`: a notice about a turn that is still running, not its end. */
   | { type: "error"; message: string; keepTurn?: boolean };
 
@@ -648,7 +648,7 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   if (ev.type === "max-steps") {
     const { list, turn } = ensureAssistant(turns);
     closeThinking(turn);
-    turn.blocks.push({ kind: "max-steps", steps: ev.steps });
+    turn.blocks.push({ kind: "max-steps", steps: ev.steps, ...(ev.reason ? { reason: ev.reason } : {}) });
     return list;
   }
 

@@ -167,6 +167,11 @@ export class SettingsPanel {
     this.panel = panel;
   }
 
+  static disposeCurrent(): void {
+    SettingsPanel.current?.panel.dispose();
+    SettingsPanel.current = undefined;
+  }
+
   /** Open the settings window, revealing the existing one if it is already up. */
   static show(context: vscode.ExtensionContext, host: SettingsPanelHost, section?: string, firstRun = false): SettingsPanel {
     if (SettingsPanel.current) {
@@ -180,7 +185,7 @@ export class SettingsPanel {
       'sleepycode.settingsWindow',
       'SleepyCode Settings',
       vscode.ViewColumn.Active,
-      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [context.extensionUri] },
+      { enableScripts: true, retainContextWhenHidden: false, localResourceRoots: [context.extensionUri] },
     );
     const instance = new SettingsPanel(panel, host);
     SettingsPanel.current = instance;
@@ -313,9 +318,8 @@ export class SettingsPanel {
         const routed = featurePrefs.routeFeatureSave(message.features);
         if (routed.connections) {
           await this.host.writeConnections(routed.connections as PanelMcpConfig[]);
-          // Reflect the change immediately; a failed connection shows on the row
-          // instead of only after the user asks to sync.
-          this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
+          // Reflect the change immediately while preserving skills/memory/stored prefs.
+          await this.pushFeatures(await this.safeSync());
         }
         if (Object.keys(routed.prefs).length) await this.host.writeChatPrefs(routed.prefs);
         if (Object.keys(routed.config).length) await this.host.writeSettings(routed.config);
@@ -329,15 +333,15 @@ export class SettingsPanel {
         return;
       }
       case 'syncMcp':
-        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
+        await this.pushFeatures(await this.safeSync());
         return;
       case 'mcpLogin':
         await this.host.mcpLogin(String(message.name ?? '')).catch((error) => this.reportMcpError(error));
-        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
+        await this.pushFeatures(await this.safeSync());
         return;
       case 'mcpLogout':
         await this.host.mcpLogout(String(message.name ?? '')).catch((error) => this.reportMcpError(error));
-        this.post(toPanelFeatures(await this.host.readConnections().catch(() => []), await this.safeSync()));
+        await this.pushFeatures(await this.safeSync());
         return;
       case 'requestMarketplaceInstalled':
         this.post({ type: 'marketplaceInstalled', skills: await this.host.marketplaceInstalled().catch(() => []) });
@@ -404,17 +408,23 @@ export class SettingsPanel {
         await this.host.writeSubagentModels(message.models).catch(() => undefined);
         await this.postSubagents();
         return;
-      case 'getAgents':
-        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
+      case 'getAgents': {
+        const agentsPayload = await this.host.readAgents().catch(() => ({ builtIn: [], custom: [] }));
+        this.post({ type: 'agents', ...(agentsPayload && typeof agentsPayload === 'object' && !Array.isArray(agentsPayload) ? agentsPayload : { agents: agentsPayload }) });
         return;
-      case 'saveAgent':
+      }
+      case 'saveAgent': {
         await this.host.saveAgent(message.agent).catch(() => undefined);
-        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
+        const agentsPayload = await this.host.readAgents().catch(() => ({ builtIn: [], custom: [] }));
+        this.post({ type: 'agents', ...(agentsPayload && typeof agentsPayload === 'object' && !Array.isArray(agentsPayload) ? agentsPayload : { agents: agentsPayload }) });
         return;
-      case 'deleteAgent':
+      }
+      case 'deleteAgent': {
         await this.host.deleteAgent(String(message.id ?? '')).catch(() => undefined);
-        this.post({ type: 'agents', agents: await this.host.readAgents().catch(() => []) });
+        const agentsPayload = await this.host.readAgents().catch(() => ({ builtIn: [], custom: [] }));
+        this.post({ type: 'agents', ...(agentsPayload && typeof agentsPayload === 'object' && !Array.isArray(agentsPayload) ? agentsPayload : { agents: agentsPayload }) });
         return;
+      }
       case 'fetchAllModels':
         await this.postModels();
         return;
@@ -592,10 +602,10 @@ export class SettingsPanel {
     }
   }
 
-  /** Publish the per-role subagent models and the catalog they are chosen from. */
+  /** Publish the per-role subagent models, catalog, subagents, teams, and active teams. */
   private async postSubagents(): Promise<void> {
-    const payload = (await this.host.readSubagents().catch(() => null)) as { models?: unknown; catalog?: string[] } | null;
-    this.post({ type: 'subagents', models: payload?.models ?? {}, catalog: payload?.catalog ?? [] });
+    const payload = (await this.host.readSubagents().catch(() => null)) as Record<string, unknown> | null;
+    this.post({ type: 'subagents', ...(payload && typeof payload === 'object' ? payload : { models: {}, catalog: [] }) });
   }
 
   /**

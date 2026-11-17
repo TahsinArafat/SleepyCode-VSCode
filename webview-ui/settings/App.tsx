@@ -454,6 +454,8 @@ export function App() {
   // Derived, not tracked: two sources for "is it armed" is how they disagree.
   const resetArmed = isResetArmed(resetClicks);
   const [logs, setLogs] = React.useState<unknown[]>([]);
+  const tally = React.useMemo(() => logTally(logs), [logs]);
+  const renderedLogLines = React.useMemo(() => logLines(logs), [logs]);
   // Provider rows from the host. Keys are never included: only whether one is set
   // and its tail.
   const [version, setVersion] = React.useState("");
@@ -849,16 +851,16 @@ export function App() {
 
               <div className="section-label">Extension log</div>
               <p className="panel-hint">
-                {logTally(logs).total === 0
+                {tally.total === 0
                   ? logEmptyText()
-                  : `${logTally(logs).total} entries · ${logTally(logs).error} error${logTally(logs).error === 1 ? "" : "s"}, ${logTally(logs).warn} warning${logTally(logs).warn === 1 ? "" : "s"}.`}
+                  : `${tally.total} entries · ${tally.error} error${tally.error === 1 ? "" : "s"}, ${tally.warn} warning${tally.warn === 1 ? "" : "s"}.`}
               </p>
               <div className="log-actions">
                 <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "getLogs" })}>Refresh</button>
                 <button className="btn-ghost" onClick={() => vscode.postMessage({ type: "clearLogs" })}>Clear</button>
               </div>
-              {logLines(logs).length > 0 && (
-                <pre className="log-view" aria-label="Extension log">{logLines(logs).join("\n")}</pre>
+              {renderedLogLines.length > 0 && (
+                <pre className="log-view" aria-label="Extension log">{renderedLogLines.join("\n")}</pre>
               )}
 
               <div className="section-label">Danger zone</div>

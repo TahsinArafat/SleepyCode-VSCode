@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.8.9",
+  "version": "0.9.0",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -195,6 +195,11 @@
           "minimum": 3000,
           "maximum": 200000,
           "description": "Maximum characters of previous thinking kept for later model requests. Some reasoning models need this history. Default 32000. Configurable from Settings → Advanced."
+        },
+        "sleepycode.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom instructions appended to the system prompt."
         },
         "sleepycode.approvalMode": {
           "type": "string",

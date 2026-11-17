@@ -128,3 +128,76 @@ export function trimPersistedConversations<T extends { id: string; pinned?: bool
   dropped.reverse();
   return { kept, dropped, bytes: Math.max(0, total) };
 }
+
+/**
+ * Estimate UTF-8 / JSON-like byte length without allocating serialized strings
+ * or recursing unsafely across cycles or deeply nested objects.
+ */
+export function estimateSerializedBytes(value: unknown, maxNodes = 250_000): number {
+  let bytes = 0;
+  let nodes = 0;
+  const active = new Set<object>();
+  const stack: Array<{ val: unknown; exit?: object }> = [{ val: value }];
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.exit) {
+      active.delete(frame.exit);
+      continue;
+    }
+    if (++nodes > maxNodes) break;
+
+    const current = frame.val;
+    if (current === null || current === undefined) {
+      bytes += 4;
+      continue;
+    }
+    const kind = typeof current;
+    if (kind === 'string') {
+      bytes += (current as string).length + 2;
+      continue;
+    }
+    if (kind === 'number') {
+      bytes += 10;
+      continue;
+    }
+    if (kind === 'boolean') {
+      bytes += (current as boolean) ? 4 : 5;
+      continue;
+    }
+    if (kind === 'bigint') {
+      bytes += String(current).length;
+      continue;
+    }
+    if (kind !== 'object') {
+      bytes += 8;
+      continue;
+    }
+    const obj = current as object;
+    if (active.has(obj)) {
+      bytes += 8;
+      continue;
+    }
+    active.add(obj);
+    stack.push({ val: undefined, exit: obj });
+    if (Array.isArray(obj)) {
+      bytes += 2 + Math.max(0, obj.length - 1);
+      for (let i = obj.length - 1; i >= 0; i -= 1) {
+        stack.push({ val: obj[i] });
+      }
+    } else {
+      bytes += 2;
+      const keys = Object.keys(obj);
+      bytes += Math.max(0, keys.length - 1);
+      for (let i = keys.length - 1; i >= 0; i -= 1) {
+        const key = keys[i]!;
+        const v = (obj as Record<string, unknown>)[key];
+        if (v !== undefined && typeof v !== 'function' && typeof v !== 'symbol') {
+          bytes += key.length + 3;
+          stack.push({ val: v });
+        }
+      }
+    }
+  }
+  return bytes;
+}

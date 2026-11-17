@@ -118,8 +118,9 @@ export async function connectToMcpConnections(
   context: vscode.ExtensionContext,
   approve: (title: string, detail: string) => Promise<void>,
   workspaceRoot?: string,
+  onlyNames?: ReadonlySet<string>,
 ): Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }> {
-  const enabled = connections.filter((c) => c.enabled);
+  const enabled = connections.filter((c) => c.enabled && (!onlyNames || onlyNames.has(c.name)));
   // Resolve credentials here (they live in SecretStorage) and hand finished
   // definitions to the shared connection routine, so saved connections and the
   // legacy `mcpServers` JSON use exactly one transport path.

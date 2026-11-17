@@ -11,6 +11,7 @@ import * as React from "react";
 import { AnimatedDisclosure } from "../../shared/AnimatedDisclosure";
 import { ReelCounter } from "../../shared/ReelCounter";
 import { Icon } from "../../shared/icons";
+import { usePresence } from "../../shared/usePresence";
 
 export interface WorkingSectionProps {
   running: boolean;
@@ -76,11 +77,16 @@ export function WorkingSection({
   const open = forceOpen || (expansion.running === running ? expansion.open : running);
 
   // Retain the visible activity throughout the closing transition. The parent may
-  // move the final response out of activity as soon as the run settles.
-  const previousContent = React.useRef({ activity, status });
+  // move the final response out of activity as soon as the run settles. Once
+  // closed and hidden by `usePresence`, release the cached subtree without extra timers.
+  const previousContent = React.useRef<{ activity: React.ReactNode; status?: React.ReactNode }>({ activity, status });
+  const { present } = usePresence(open, 220);
   React.useLayoutEffect(() => {
     if (open) previousContent.current = { activity, status };
   }, [activity, status, open]);
+  React.useEffect(() => {
+    if (!present) previousContent.current = { activity: null, status: null };
+  }, [present]);
   const content = open ? { activity, status } : previousContent.current;
   const heading = <>
     <span className="working-title" role="timer" aria-live="off" aria-label={label}>

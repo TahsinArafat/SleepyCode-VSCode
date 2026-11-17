@@ -688,3 +688,15 @@ test('the SearXNG endpoint is the web-search switch, and a bad one is refused', 
   assert.equal(adapter.toPanelSettings({}).searxngUrl, '');
   assert.equal(adapter.toPanelSettings({ searxngUrl: 'https://searx.example.org' }).searxngUrl, 'https://searx.example.org');
 });
+
+test('skillFolderFromPath supports 2-segment and 3-segment SKILL.md paths', () => {
+  const root = '/ws/.sleepycode/skills';
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/code-review/SKILL.md`), 'code-review');
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/vendor/code-review/SKILL.md`), 'vendor/code-review');
+  assert.equal(
+    adapter.skillFolderFromPath('C:\\ws\\.sleepycode\\skills', 'C:\\ws\\.sleepycode\\skills\\vendor\\code-review\\skill.md'),
+    'vendor/code-review',
+  );
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/vendor/nested/too/deep/SKILL.md`), null);
+  assert.equal(adapter.skillFolderFromPath(root, `${root}/vendor/code-review/README.md`), null);
+});

@@ -22,7 +22,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_PROJECT_BYTES, MAX_STORED_ITEMS, MAX_TURN_UNDO } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
-import { enqueuePersist, loadEach, splitProjectIndex, trimPersistedConversations } from './persist-core';
+import { enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, trimPersistedConversations } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
@@ -304,6 +304,47 @@ export function stripStaleGuidance<M extends { role?: string; content?: unknown 
   });
 }
 
+function compactWorkInput(input: unknown): Record<string, unknown> | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof val === 'string') {
+      out[key] = val.length > 2_000 ? `${val.slice(0, 2_000)}…` : val;
+    } else if (typeof val === 'number' || typeof val === 'boolean' || val === null) {
+      out[key] = val;
+    } else if (Array.isArray(val) || (val && typeof val === 'object')) {
+      try {
+        if (JSON.stringify(val).length <= 8_000) out[key] = val;
+      } catch { }
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function raceTimeout<T>(
+  promise: Promise<T>,
+  fallback: T,
+  ms: number,
+  onLate?: (value: T) => void | Promise<void>,
+): Promise<T> {
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.then(value => {
+      if (timedOut && onLate) void Promise.resolve(onLate(value)).catch(() => { });
+      return value;
+    }),
+    new Promise<T>(resolve => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve(fallback);
+      }, ms);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 /**
  * A unified-style diff for an edit tool's call, so its card shows WHAT changed
  * instead of only the file name.
@@ -416,6 +457,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private readonly subagentControllers = new Map<string, AbortController>();
   private projects: Project[] = [];
+  private otherProjectMetas: Array<{ id: string; name: string; path: string; createdAt: number; updatedAt: number }> = [];
+  private readonly pendingProjectPersist = new WeakSet<Project>();
+  private readonly imageTempDirList: string[] = [];
+  private sentIconFonts: string[] = [];
+  private readonly pendingCliPermissions = new Map<number, { conversationId: string; sessionId: string; permissionId: string }>();
+  private readonly sendingConversations = new Set<string>();
+  private readonly pendingDeltas = new Map<string, { text: string; reasoning: string }>();
+  private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private activeProjectId = '';
   private loaded = false;
   private runs = new Map<string, ActiveRun>();
@@ -575,6 +624,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return this.engineStatus;
     }
     if (this.engineReady) await this.engineReady.catch(() => undefined);
+    if (this.cliServer || this.cliSessions) await this.shutdownCli();
     this.engineUseCli = useCli;
     this.engineReady = (async () => {
       const directory = this.workspaceRoot()?.fsPath;
@@ -583,6 +633,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       this.engineStatus = await resolveEngine(directory, useCli);
+      this.cliServer = this.engineStatus.server;
       if (this.engineStatus.mode === 'cli' && this.engineStatus.url) {
         this.cliClient = new CliClient(this.engineStatus.url, directory);
         this.cliRegistry = new CliSessionRegistry({
@@ -593,12 +644,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           label: (tool, input) => toolTask(tool, input),
           update: (items, busy) => this.applyCliProjection(conversationId, items, busy),
           error: detail => this.post({ type: 'error', conversationId, text: detail }),
-          permission: permission => this.post({
-            type: 'permission',
-            conversationId,
-            permissionId: permission.id,
-            title: permission.title ?? 'The CLI is asking for permission.',
-          }),
+          permission: permission => {
+            const sessionId = this.cliRegistry?.sessionFor(conversationId) ?? '';
+            const seq = ++this.notifySeq;
+            this.pendingCliPermissions.set(seq, { conversationId, sessionId, permissionId: permission.id });
+            this.post({
+              type: 'permission',
+              conversationId,
+              permissionId: `cliperm:${seq}`,
+              title: permission.title ?? 'The CLI is asking for permission.',
+            });
+          },
           live: event => this.applyCliLiveEvent(conversationId, event),
         }));
         // A lost CLI session starts a fresh one, which orphans the old conversation in
@@ -927,6 +983,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const now = Date.now();
     const updated = tasks.map(task => {
       if (!due.some(item => item.id === task.id)) return task;
+      if (task.schedule.kind === 'once') {
+        return { ...task, enabled: false, lastRunAt: now, nextRunAt: undefined };
+      }
       return { ...task, lastRunAt: now, nextRunAt: nextRunAt(task.schedule, now) };
     });
     await this.context.globalState.update('sleepycode.scheduledTasks', updated);
@@ -957,13 +1016,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private scheduleProjectReindex(uri: vscode.Uri): void {
     const root = this.workspaceRoot();
-    if (!root || !pathInside(root.fsPath, uri.fsPath)) return;
+    if (!root) return;
     const relative = path.relative(root.fsPath, uri.fsPath).replace(/\\/g, '/');
-    if (/(^|\/)(node_modules|\.git|dist|out|build|coverage|\.next|target|vendor)(\/|$)/.test(relative)) return;
-    this.projectIndex.invalidate(root.fsPath);
+    if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return;
+    if (/(^|\/)(node_modules|\.git|dist|out|build|coverage|\.next|\.venv|venv|target|\.cache|\.nuxt|\.svelte-kit|\.gradle|\.pytest_cache|\.mypy_cache|Pods|\.codegraph|\.witdiff|\.ui-shots|vendor)(\/|$)/.test(relative)) return;
+    if (!pathInside(root.fsPath, uri.fsPath)) return;
     this.refreshRepoIndexEntry(root, relative, uri);
-    if (this.projectIndexTimer) clearTimeout(this.projectIndexTimer);
-    this.projectIndexTimer = setTimeout(() => { void this.ensureProjectIntelligence(true); }, 1_800);
+    void this.projectIndex.updateFile(root, relative, uri);
   }
 
   /**
@@ -994,6 +1053,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const root = this.workspaceRoot()?.fsPath;
     if (root) {
       let project = this.projects.find(item => item.path === root);
+      if (!project) {
+        const metaIndex = this.otherProjectMetas.findIndex(item => item.path === root);
+        if (metaIndex >= 0) {
+          const [meta] = this.otherProjectMetas.splice(metaIndex, 1);
+          project = this.loadProjectByMeta(meta!);
+          this.projects.unshift(project);
+        }
+      }
       if (!project) {
         project = this.createProject(root);
         this.projects.unshift(project);
@@ -1050,9 +1117,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         'SleepyCode: the classic chat view was removed. The React chat is now the only UI.',
       );
     }
-    view.webview.options = { enableScripts: true };
+    this.sentIconFonts = [];
+    view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri, vscode.Uri.file(tmpdir())] };
     view.webview.html = renderReactWebviewHtml(view.webview, this.context.extensionUri, 'sidebar', 'SleepyCode');
-    view.webview.onDidReceiveMessage((message: any) => {
+    view.webview.onDidReceiveMessage(async (message: any) => {
       if (this.reactMode && this.handleReactChangeAction(message)) return;
       if (this.reactMode && message?.type === 'updateChatWorkspace') {
         void this.persistChatWorkspace(message.state);
@@ -1071,8 +1139,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (this.reactMode && message?.type === 'continueRun') {
+        if (message.always === true) {
+          await vscode.workspace.getConfiguration('sleepycode').update('maxSteps', 0, vscode.ConfigurationTarget.Global);
+          this.postConfig();
+        }
         const conversationId = this.activeProject()?.activeConversationId;
-        const target = adapter.continueTarget(conversationId, conversationId ? this.reactItems.get(conversationId) : undefined);
+        const latestItems = this.activeConversation()?.items ?? (conversationId ? this.reactItems.get(conversationId) : undefined);
+        const target = adapter.continueTarget(conversationId, latestItems);
         if (target) void this.onMessage({ type: 'continueIteration', ...target } as WebMessage);
         return;
       }
@@ -1158,6 +1231,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (active) this.postSessionStats(active.id);
   }
 
+  private withResolvedImageUris(items: readonly TranscriptItem[] | undefined): TranscriptItem[] {
+    if (!items?.length) return [];
+    const webview = this.view?.webview;
+    if (!webview) return items as TranscriptItem[];
+    return items.map(item => {
+      if (!item.attachments?.length) return item;
+      let changed = false;
+      const attachments = item.attachments.map(att => {
+        if (att.kind === 'image' && att.tempPath && !att.previewDataUrl) {
+          changed = true;
+          return { ...att, previewDataUrl: webview.asWebviewUri(vscode.Uri.file(att.tempPath)).toString() };
+        }
+        return att;
+      });
+      return changed ? { ...item, attachments } : item;
+    });
+  }
+
   private sendReactBootstrap(): void {
     const active = this.activeConversation();
     const selection = active ? this.selectionFor(active) : undefined;
@@ -1171,14 +1262,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // window sat unusable until both came back — and stayed that way offline.
     this.postCachedModelGroups();
     this.postCachedAccount();
+    const visibleItems = this.withResolvedImageUris(webviewTranscriptItems(active?.items));
     this.post(adapter.buildInitialState({
       activeId: active?.id,
       workspaceRoot: this.workspaceRoot()?.fsPath,
       selectedModel: selection?.model ?? '',
-      turns: adapter.itemsToTurns(webviewTranscriptItems(active?.items)),
+      turns: adapter.itemsToTurns(visibleItems),
       // Without this the context ring started at zero on every reload, even
       // though the conversation already had a measured window in use.
-      usedTokens: adapter.contextTokensOf(webviewTranscriptItems(active?.items)),
+      usedTokens: adapter.contextTokensOf(visibleItems),
       approvalMode: this.config().approvalMode,
       mode: active?.mode ?? 'agent',
       // Drafts and open tabs live per workspace; without this they are lost on
@@ -1263,7 +1355,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // both be installed; the name the agent uses stays the plain skill name.
       const skillName = sanitizeSkillName(reference.hintedName ?? folderPath.split('/').pop() ?? requested ?? 'skill');
       const installName = skillIdentity.skillInstallPath({ owner: reference.owner, repo: reference.repo, name: skillName });
-      await this.approve('edit', 'Install skill "' + installName + '"?', 'Source: ' + reference.owner + '/' + reference.repo + (folderPath ? ' (' + folderPath + ')' : '') + '\n\nThe skill will be installed into your global skills folder as \'' + installName + '\' and is available in every workspace. Its SKILL.md will be added to the agent\'s instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.');
+      const confirm = await vscode.window.showWarningMessage(
+        `Install skill "${installName}" from ${reference.owner}/${reference.repo}?`,
+        {
+          modal: true,
+          detail: `Source: ${reference.owner}/${reference.repo}${folderPath ? ` (${folderPath})` : ''}\n\nThe skill will be installed into your global skills folder as '${installName}' and is available in every workspace. Its SKILL.md will be added to the agent's instructions on every future request and can direct file edits and commands. Only install skills from trusted authors.`,
+        },
+        'Install',
+      );
+      if (confirm !== 'Install') return { ok: false, text: 'Install cancelled.' };
       await installSkillFromRepository(this.skillsRoot(), { owner: reference.owner, repo: reference.repo, branch: reference.branch, folderPath, installName }, undefined, onProgress);
       const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
       sources[installName] = reference.owner + '/' + reference.repo;
@@ -1283,8 +1383,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (found.kind === 'ambiguous') return { ok: false, text: skillIdentity.ambiguousSkillMessage(folder, found.candidates) };
       if (found.kind !== 'found') return { ok: false, text: `Skill '${folder || ''}' not found.` };
       const skill = found.skill;
-      const choice = await this.prompt('Uninstall skill \'' + skill.name + '\'?', 'This removes \'' + skill.name + '\' from your global skills folder. It will no longer be offered to the agent in any workspace.', { ok: 'Uninstall', cancel: 'Cancel', danger: true });
-      if (choice !== 'ok') return { ok: false, text: 'Uninstall cancelled.' };
+      const choice = await vscode.window.showWarningMessage(
+        `Uninstall skill '${skill.name}'?`,
+        {
+          modal: true,
+          detail: `This removes '${skill.name}' from your global skills folder. It will no longer be offered to the agent in any workspace.`,
+        },
+        'Uninstall',
+      );
+      if (choice !== 'Uninstall') return { ok: false, text: 'Uninstall cancelled.' };
       await uninstallSkill(this.skillsRoot(), skill.folder);
       const sources = this.context.globalState.get<Record<string, string>>('sleepycode.skillSources', {}) ?? {};
       delete sources[skill.folder];
@@ -1382,7 +1489,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.log('warn', 'chatWorkspace.draft.trimmed', 'attachments too large to persist');
     }
     const { trimmed: _trimmed, ...state } = storable;
-    this.chatWorkspaceWrite = this.chatWorkspaceWrite.then(() => this.context.globalState.update(key, state));
+    this.chatWorkspaceWrite = enqueuePersist(
+      this.chatWorkspaceWrite,
+      () => Promise.resolve(this.context.globalState.update(key, state)),
+      error => this.log('warn', 'chatWorkspace.draft.persistFailed', errorMessage(error)),
+    );
     return this.chatWorkspaceWrite;
   }
 
@@ -1510,28 +1621,37 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const root = this.workspaceRoot();
     if (!root) return undefined;
     try {
-      const files = await vscode.workspace.findFiles('**/*', '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**}', 2_000);
+      const lineOfOffset = (content: string, offset: number): number => {
+        let lines = 1;
+        for (let i = 0; i < offset; i += 1) {
+          if (content.charCodeAt(i) === 10) lines += 1;
+        }
+        return lines;
+      };
       let found: { path: string; line: number } | undefined;
-      for (const uri of files) {
-        let content: string;
-        try {
-          const stat = await vscode.workspace.fs.stat(uri);
-          if (stat.size > MAX_FILE_BYTES) continue;
-          content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-        } catch {
-          continue;
-        }
+      const seen = new Set<string>();
+      const checkContent = (relative: string, content: string): 'ambiguous' | 'ok' => {
+        if (!relative || seen.has(relative)) return 'ok';
+        seen.add(relative);
         const index = content.indexOf(needle);
-        if (index < 0) continue;
+        if (index < 0) return 'ok';
         if (found) {
-          // Ambiguous: two files contain the paste, so neither is "the" source.
           this.log('info', 'paste.ambiguous', needle.slice(0, 60));
-          return undefined;
+          return 'ambiguous';
         }
-        found = {
-          path: path.relative(root.fsPath, uri.fsPath).replace(/\\/g, '/'),
-          line: content.slice(0, index).split('\n').length,
-        };
+        found = { path: relative, line: lineOfOffset(content, index) };
+        return 'ok';
+      };
+      for (const doc of vscode.workspace.textDocuments) {
+        if (doc.uri.scheme !== 'file' || !pathInside(root.fsPath, doc.uri.fsPath)) continue;
+        const relative = path.relative(root.fsPath, doc.uri.fsPath).replace(/\\/g, '/');
+        if (checkContent(relative, doc.getText()) === 'ambiguous') return undefined;
+      }
+      const cached = this.repoIndex.indexFor(root);
+      if (cached) {
+        for (const entry of cached.files) {
+          if (checkContent(entry.path.replace(/\\/g, '/'), entry.content) === 'ambiguous') return undefined;
+        }
       }
       if (found) this.log('info', 'paste.located', `${found.path}:${found.line}`);
       return paste.toCodeMention(found);
@@ -1544,6 +1664,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Publish one conversation's goal in the shape the webview reads. */
   private postGoal(conversation: Conversation): void {
     if (!conversation.goal) return;
+    if (this.reactMode) {
+      this.postWorkflow(conversation.id);
+      return;
+    }
     this.post({ type: 'goal', conversationId: conversation.id, goal: conversation.goal });
   }
 
@@ -1912,13 +2036,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           systemNotifications: vscode.workspace.getConfiguration('sleepycode').get<boolean>('systemNotifications', true),
           maxSteps: this.config().maxSteps,
           repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+          approvalPolicy: adapter.approvalPolicyForMode(this.config().approvalMode),
         },
       }),
       setApprovalMode: async (mode) => {
-        // The window's policy is already projected onto SleepyCode's single mode
-        // by `approvalModeFromPolicy`; normalising here keeps a bad value from
-        // being stored as-is.
-        await this.context.globalState.update('sleepycode.approvalMode', normalizeApprovalMode(mode));
+        const normalized = normalizeApprovalMode(mode);
+        await this.context.globalState.update('sleepycode.approvalMode', normalized);
+        await vscode.workspace.getConfiguration('sleepycode').update('approvalMode', normalized, vscode.ConfigurationTarget.Global);
         this.postConfig();
       },
       readSettings: () => ({
@@ -1928,7 +2052,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
         // The web-search tool exists only when this is set, so the window shows
         // it as the web-search switch.
-        searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
+        searxngUrl: this.config().searxngUrl,
       }),
       writeSettings: async (patch) => {
         const config = vscode.workspace.getConfiguration('sleepycode');
@@ -1942,10 +2066,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           const bounded = requested === 0 ? 0 : Math.max(1, Math.min(200, Math.round(requested) || 200));
           await config.update('maxSteps', bounded, vscode.ConfigurationTarget.Global);
         }
-        if (patch.systemPrompt !== undefined) await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
+        if (patch.systemPrompt !== undefined) {
+          await config.update('systemPrompt', patch.systemPrompt, vscode.ConfigurationTarget.Global);
+          await this.context.globalState.update('sleepycode.systemPrompt', patch.systemPrompt || undefined);
+        }
         if (patch.repoIndex !== undefined) await config.update('repoIndex', patch.repoIndex, vscode.ConfigurationTarget.Global);
         if (patch.systemNotifications !== undefined) await config.update('systemNotifications', patch.systemNotifications, vscode.ConfigurationTarget.Global);
         if (patch.searxngUrl !== undefined) await this.context.globalState.update('sleepycode.searxngUrl', patch.searxngUrl || undefined);
+        if (patch.searxngUrl !== undefined) await config.update('searxngUrl', patch.searxngUrl || '', vscode.ConfigurationTarget.Global);
         this.log('info', 'settings.write', JSON.stringify(patch));
         this.postConfig();
       },
@@ -1970,8 +2098,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (persisted.length !== connections.length) {
           this.log('error', 'mcp.connections.lost', `wrote ${connections.length}, read back ${persisted.length}`);
         }
-        // The stored set changed, so any cached connection is stale.
-        this.mcpCache = undefined;
+        // The stored set changed, so close and forget any stale cached connection.
+        this.closeMcpCache();
       },
       syncConnections: async () => {
         // Reconnect is the user asking for a fresh answer, so the cache is
@@ -2000,7 +2128,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           mcpHost(this.context),
         );
         this.log('info', 'mcp.oauth.login.done', name);
-        this.mcpCache = undefined;
+        this.closeMcpCache();
       },
       mcpLogout: async (name) => {
         const connection = (await loadMcpConnections(this.context)).find((item) => item.name === name);
@@ -2012,7 +2140,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         await this.context.secrets.delete(`sleepycode.mcpOAuth.tokens.${name}`);
         this.log('info', 'mcp.oauth.logout', name);
-        this.mcpCache = undefined;
+        this.closeMcpCache();
       },
       log: (level, event, detail) => this.log(level, `panel.${event}`, detail),
       skills: async () => {
@@ -2049,7 +2177,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const images = await Promise.all(split.images.map(image => this.materializeImage(image)));
     const attachments: Attachment[] = [
       ...images.filter((image): image is Extract<Attachment, { kind: 'image' }> => Boolean(image)),
-      ...split.files.map(file => ({ kind: 'file' as const, path: file.path })),
+      ...split.files.map(file => ({
+        kind: file.kind,
+        path: file.path,
+        ...(file.name ? { name: file.name } : {}),
+        ...(file.text !== undefined ? { text: file.text.slice(0, 100_000) } : {}),
+        ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+        ...(file.size !== undefined ? { size: file.size } : {}),
+      })),
     ];
     return { ...(message.context ?? {}), attachments };
   }
@@ -2065,6 +2200,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     try {
       const folder = await mkdtemp(path.join(tmpdir(), 'sleepycode-image-'));
+      this.imageTempDirList.push(folder);
       const extension = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
       const filePath = path.join(folder, `pasted.${extension}`);
       await writeFile(filePath, bytes);
@@ -2341,6 +2477,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (failures.length) throw new Error(`Could not restore ${failures.length} file${failures.length === 1 ? '' : 's'}:\n${failures.join('\n')}`);
   }
 
+  private itemIndexForTurnIndex(items: readonly TranscriptItem[], turnIndex: number): number {
+    if (!Number.isInteger(turnIndex) || turnIndex < 0) return -1;
+    let seenTurns = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item || item.kind === 'divider') continue;
+      if (seenTurns === turnIndex) return i;
+      seenTurns += 1;
+    }
+    return -1;
+  }
+
+  private async restoreTailWorkspaceState(
+    rootPath: string,
+    gitTracked: boolean,
+    items: readonly TranscriptItem[],
+    startIndex: number,
+  ): Promise<void> {
+    let assistantCheckpoint: TranscriptItem | undefined;
+    let snapshotItem: TranscriptItem | undefined;
+    for (let index = startIndex; index < items.length; index++) {
+      const item = items[index]!;
+      if (item.role === 'assistant' && item.fileSnapshot?.length && !snapshotItem) snapshotItem = item;
+      if (item.role === 'assistant' && item.gitTree && !assistantCheckpoint) assistantCheckpoint = item;
+    }
+    if (gitTracked && assistantCheckpoint?.gitTree) {
+      try { await restoreGitTree(rootPath, assistantCheckpoint.gitTree); } catch { }
+    } else if (snapshotItem?.fileSnapshot?.length) {
+      await this.restoreFileSnapshots(rootPath, snapshotItem.fileSnapshot);
+    }
+  }
+
   openUsage(): void {
     // The React window owns the Usage page; posting `showUsage` at it was a
     // message nothing read, so the command revealed the chat and did nothing.
@@ -2451,6 +2619,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.cliModelNotices.delete(id);
     this.mcpNoticeSignatures.delete(id);
     this.lastAutoCompactAt.delete(id);
+    this.sendingConversations.delete(id);
+    this.pendingDeltas.delete(id);
+    for (const [reqId, entry] of this.pendingCliPermissions) {
+      if (entry.conversationId === id) this.pendingCliPermissions.delete(reqId);
+    }
   }
 
   /**
@@ -2654,6 +2827,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.browserPreview.dispose();
     this.stopBrowserPreviewPolling();
     this.disposePendingNotifies();
+    void this.browser.close().catch(() => { /* shutdown must not throw */ });
+    SettingsPanel.disposeCurrent();
+    this.closeMcpCache();
+    void this.shutdownCli();
     // Every timer this class owns, so a deactivate cannot leave one running against a
     // disposed provider. `editorContextTimer` and `mcpWarmTimer` were the gaps: neither was
     // cleared anywhere, so a reload left them firing into a dead object.
@@ -2665,6 +2842,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.editorContextTimer) clearTimeout(this.editorContextTimer);
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    if (this.deltaFlushTimer) clearTimeout(this.deltaFlushTimer);
+    this.deltaFlushTimer = undefined;
+    this.pendingDeltas.clear();
+    this.pendingCliPermissions.clear();
+    this.sendingConversations.clear();
     // Flush the log ring before the debounce would have fired. Without this, the last
     // second of log lines (the ones near a failure, when they matter) died with dispose.
     // `flushLogs` also clears the timer, so no callback survives into a dead provider.
@@ -2687,6 +2869,44 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.releaseRepoIndex();
     for (const folder of this.reviewTempDirs) void rm(folder, { recursive: true, force: true });
     this.reviewTempDirs.clear();
+    for (const folder of this.imageTempDirList) void rm(folder, { recursive: true, force: true });
+    this.imageTempDirList.length = 0;
+  }
+
+  private loadProjectByMeta(entry: ProjectMetaEntry & { id: string; name: string; path: string }): Project {
+    const data = this.context.globalState.get<{ conversations?: unknown; activeConversationId?: unknown } | undefined>(`sleepycode.project.${entry.id}`, undefined);
+    const conversations = Array.isArray(data?.conversations) ? data.conversations as Conversation[] : [];
+    const loadedConversations = conversations.map(conversation => {
+      const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
+      const restored = restoreLoadedConversation(conversation as Conversation, {
+        // The limit is per model, and the catalog may not be resolved this early; the
+        // floor it falls back to is still far above a conversation that has been
+        // compacting on its token budget.
+        maxStoredMessages: this.storedMessageLimitFor(conversation),
+        maxTurnUndo: MAX_TURN_UNDO,
+        normalizeItem: (item, index) => normalizeTranscriptItem(item as Partial<TranscriptItem>, baseTimestamp + index),
+        fallbackItem: () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
+        interruptedItem: extras => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree as string | undefined),
+        onCorruptItem: error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
+      }) as Conversation;
+      if (restored.archived) {
+        restored.turnUndo = [];
+        restored.turnRedo = [];
+      } else {
+        // Rehydrate durable compaction snapshots so undo survives an extension reload.
+        this.loadCompactionSnapshots(conversation.id);
+      }
+      return restored;
+    });
+    return {
+      id: entry.id,
+      name: entry.name,
+      path: entry.path,
+      createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
+      updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+      activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
+      conversations: loadedConversations,
+    };
   }
 
   private loadProjects(): void {
@@ -2696,39 +2916,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // writing the index back, and a filtered rewrite would delete their history for good.
     const split = splitProjectIndex(indexEntries, isProjectMeta);
     this.unreadableProjectEntries = split.unreadable;
-    this.projects = split.usable.map(entry => {
-      const data = this.context.globalState.get<{ conversations?: unknown; activeConversationId?: unknown } | undefined>(`sleepycode.project.${entry.id}`, undefined);
-      const conversations = Array.isArray(data?.conversations) ? data.conversations as Conversation[] : [];
-      return {
+    const seenIds = new Set<string>();
+    const uniqueMetas = split.usable.filter(entry => seenIds.has(entry.id) ? false : (seenIds.add(entry.id), true));
+    const root = this.workspaceRoot()?.fsPath;
+    const activeEntry = root
+      ? uniqueMetas.find(entry => entry.path === root)
+      : uniqueMetas[0];
+    this.projects = activeEntry ? [this.loadProjectByMeta(activeEntry)] : [];
+    this.otherProjectMetas = uniqueMetas
+      .filter(entry => entry !== activeEntry)
+      .map(entry => ({
         id: entry.id,
         name: entry.name,
         path: entry.path,
         createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
         updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
-        activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
-        conversations: conversations.map(conversation => {
-          const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-          return restoreLoadedConversation(conversation as Conversation, {
-            // The limit is per model, and the catalog may not be resolved this early; the
-            // floor it falls back to is still far above a conversation that has been
-            // compacting on its token budget.
-            maxStoredMessages: this.storedMessageLimitFor(conversation),
-            maxTurnUndo: MAX_TURN_UNDO,
-            normalizeItem: (item, index) => normalizeTranscriptItem(item as Partial<TranscriptItem>, baseTimestamp + index),
-            fallbackItem: () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
-            interruptedItem: extras => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree as string | undefined),
-            onCorruptItem: error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
-          }) as Conversation;
-        }),
-      };
-    });
-    const seenIds = new Set<string>();
-    this.projects = this.projects.filter(project => seenIds.has(project.id) ? false : (seenIds.add(project.id), true));
-    // Rehydrate durable compaction snapshots so undo survives an extension reload.
-    for (const project of this.projects) {
-      for (const conversation of project.conversations) this.loadCompactionSnapshots(conversation.id);
-    }
-    const root = this.workspaceRoot()?.fsPath;
+      }));
     if (root) {
       let project = this.projects.find(item => item.path === root);
       if (!project) {
@@ -2799,6 +3002,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!root) return undefined;
     let project = this.projects.find(item => item.path === root);
     if (!project) {
+      const metaIndex = this.otherProjectMetas.findIndex(item => item.path === root);
+      if (metaIndex >= 0) {
+        const [meta] = this.otherProjectMetas.splice(metaIndex, 1);
+        project = this.loadProjectByMeta(meta!);
+        this.projects.unshift(project);
+      }
+    }
+    if (!project) {
       project = this.createProject(root);
       this.projects.unshift(project);
     }
@@ -2840,7 +3051,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     project.conversations.unshift(conversation);
     project.activeConversationId = conversation.id;
     project.updatedAt = Date.now();
-    void this.persistProjects();
+    void this.persistProject(project);
     this.syncConversations();
     // A new CLI conversation starts on a model the CLI actually has, so
     // the composer shows the model that will really run.
@@ -2962,15 +3173,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private persistProjects(): Promise<void> {
-    const projects = this.projects.slice(0, MAX_PERSISTED_PROJECTS);
+    const loadedProjects = this.projects.slice(0, MAX_PERSISTED_PROJECTS);
+    const loadedIds = new Set(loadedProjects.map(project => project.id));
+    const combinedMetas = [
+      ...loadedProjects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })),
+      ...this.otherProjectMetas.filter(meta => !loadedIds.has(meta.id)),
+    ].slice(0, MAX_PERSISTED_PROJECTS);
     this.persistChain = enqueuePersist(this.persistChain, async () => {
       // Entries that failed validation on load are re-written verbatim rather than
       // dropped: a filtered index rewrite permanently deletes that project's history.
       await this.context.globalState.update('sleepycode.projectIndex', [
-        ...projects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })),
+        ...combinedMetas,
         ...this.unreadableProjectEntries,
       ]);
-      for (const project of projects) {
+      for (const project of loadedProjects) {
         await this.context.globalState.update(`sleepycode.project.${project.id}`, {
           conversations: this.persistedConversationsFor(project),
           activeConversationId: project.activeConversationId,
@@ -2987,7 +3203,28 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * half of a project should be told which limit took it, not discover it after a reload.
    */
   private persistedConversationsFor(project: Project): Conversation[] {
-    const byCount = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS);
+    const byCount = project.conversations.slice(0, MAX_PERSISTED_CONVERSATIONS).map(conversation => {
+      let itemsChanged = false;
+      const items = conversation.items.map(item => {
+        if (!item.attachments?.length) return item;
+        let attChanged = false;
+        const attachments = item.attachments.map(att => {
+          if (att.kind !== 'image') return att;
+          const preview = (att as { previewDataUrl?: string }).previewDataUrl;
+          if (att.tempPath && typeof preview === 'string' && preview.length > 8192) {
+            attChanged = true;
+            const copy = { ...att } as { previewDataUrl?: string };
+            delete copy.previewDataUrl;
+            return copy as Attachment;
+          }
+          return att;
+        });
+        if (!attChanged) return item;
+        itemsChanged = true;
+        return { ...item, attachments };
+      });
+      return itemsChanged ? { ...conversation, items } : conversation;
+    });
     if (byCount.length < project.conversations.length) {
       const dropped = project.conversations.length - byCount.length;
       this.post({ type: 'contextNotice', conversationId: project.activeConversationId, kind: 'trimmed', text: `${dropped} older conversation${dropped === 1 ? '' : 's'} in this project were not saved (limit ${MAX_PERSISTED_CONVERSATIONS}).` });
@@ -2997,7 +3234,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const trimmed = trimPersistedConversations(
       byCount,
       MAX_PERSISTED_PROJECT_BYTES,
-      conversation => JSON.stringify(conversation).length,
+      conversation => estimateSerializedBytes(conversation),
       { keepId: project.activeConversationId },
     );
     if (!trimmed.dropped.length) return trimmed.kept;
@@ -3032,12 +3269,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * conversation that is currently running.
    */
   private persistProject(project: Project): Promise<void> {
+    if (this.pendingProjectPersist.has(project)) return this.persistChain;
+    this.pendingProjectPersist.add(project);
     this.persistChain = enqueuePersist(this.persistChain, async () => {
+      this.pendingProjectPersist.delete(project);
       await this.context.globalState.update(`sleepycode.project.${project.id}`, {
         conversations: this.persistedConversationsFor(project),
         activeConversationId: project.activeConversationId,
       });
-    }, error => this.reportPersistFailure(error));
+    }, error => {
+      this.pendingProjectPersist.delete(project);
+      this.reportPersistFailure(error);
+    });
     return this.persistChain;
   }
 
@@ -3133,9 +3376,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             type: 'approvalResolved',
             conversationId: pending.approval.conversationId,
             requestId: String(message.id),
-            // "Allow once" is `ok`; everything else — reject, or a dismissal —
-            // is a refusal, which is what the card should say happened.
-            approved: message.choice === 'ok',
+            // "Allow once" is `ok`, "Allow for session" is `secondary`; everything
+            // else — reject, or a dismissal — is a refusal.
+            approved: message.choice === 'ok' || message.choice === 'secondary',
+          });
+        }
+      }
+      return;
+    }
+    if ((message as { type?: string }).type === 'resolveCliPermission') {
+      const reqMsg = message as unknown as { requestId?: string; approve?: boolean; session?: boolean };
+      const match = /^cliperm:(\d+)$/.exec(String(reqMsg.requestId ?? ''));
+      if (match) {
+        const seq = Number(match[1]);
+        const entry = this.pendingCliPermissions.get(seq);
+        if (entry) {
+          this.pendingCliPermissions.delete(seq);
+          const approved = reqMsg.approve === true;
+          const reply: 'once' | 'always' | 'reject' = approved ? (reqMsg.session ? 'always' : 'once') : 'reject';
+          void this.cliClient?.respondToPermission(entry.sessionId, entry.permissionId, reply).catch(() => { });
+          this.post({
+            type: 'approvalResolved',
+            conversationId: entry.conversationId,
+            requestId: `cliperm:${seq}`,
+            approved,
           });
         }
       }
@@ -3145,7 +3409,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Settle the engine before anything reads it: the model picker and
       // routing depend on whether the CLI is available.
       await this.ensureEngine();
-      this.syncConversations();
+      this.syncConversations(!this.reactMode);
       await this.loadApiKeys();
       if (getSleepyAccount().loggedIn) {
         await this.ensureSleepyProvider();
@@ -3196,8 +3460,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'setPersona') {
+      const project = this.activeProject();
       const conversation = message.conversationId
-        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        ? project?.conversations.find(item => item.id === message.conversationId)
         : this.activeConversation();
       if (!conversation) return;
       // An unknown id falls back to the default rather than storing a persona the
@@ -3205,7 +3470,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const personaId = personas.personaById(this.allPersonas(), message.personaId).id;
       conversation.personaId = personaId;
       this.log('info', 'conversation.persona', `${conversation.id} -> ${personaId}`);
-      await this.persistProjects();
+      const owner = project ?? this.projectForConversation(conversation.id);
+      if (owner) await this.persistProject(owner);
       // The composer shows the persona in force; republish so the chip agrees.
       this.post({ type: 'config', personas: this.allPersonas(), activePersonaId: personaId });
       this.syncConversations();
@@ -3220,7 +3486,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // instead of silently reverting to `agent`, which can write.
       await this.context.globalState.update('sleepycode.lastMode', mode);
       this.log('info', 'conversation.mode', `${conversation.id} -> ${mode}`);
-      await this.persistProjects();
+      const project = this.projectForConversation(conversation.id) ?? this.activeProject();
+      if (project) await this.persistProject(project);
       // The composer reflects the mode, and a read-only mode changes which tools
       // the next turn is offered, so both are republished.
       this.post({ type: 'config', mode });
@@ -3270,14 +3537,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // replacing it with the webview's lossy projection would lose tool results
       // and model history. Its real value is recovering a chat that would
       // otherwise open blank.
+      const project = this.activeProject();
       const conversation = message.conversationId
-        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        ? project?.conversations.find(item => item.id === message.conversationId)
         : undefined;
       const turns = Array.isArray(message.turns) ? message.turns : [];
-      if (conversation && !conversation.items.length && turns.length) {
+      if (project && conversation && !conversation.items.length && turns.length) {
         conversation.items = adapter.turnsToItems(turns);
         this.log('info', 'conversation.recovered', `${conversation.id}: ${conversation.items.length} turn(s) from the webview`);
-        await this.persistProjects();
+        await this.persistProject(project);
         this.syncConversations();
       } else if (conversation && conversation.items.length) {
         this.log('info', 'persistTurns.ignored', `${conversation.id}: host already has ${conversation.items.length} item(s)`);
@@ -3285,27 +3553,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'setGoal') {
+      const project = this.activeProject();
       const conversation = message.conversationId
-        ? this.activeProject()?.conversations.find(item => item.id === message.conversationId)
+        ? project?.conversations.find(item => item.id === message.conversationId)
         : this.activeConversation();
       const created = goalCore.createGoal(message.objective, message.tokenBudget);
       if (conversation && created) {
         conversation.goal = created;
-        await this.persistProjects();
+        const owner = project ?? this.projectForConversation(conversation.id);
+        if (owner) await this.persistProject(owner);
         this.log('info', 'conversation.goal', `${conversation.id}: ${created.objective}${created.tokenBudget ? ` (budget ${created.tokenBudget})` : ''}`);
         this.postWorkflow(conversation.id);
       }
       return;
     }
     if (message.type === 'setGoalStatus') {
-      const conversation = this.activeProject()?.conversations.find(item => item.id === message.conversationId);
-      if (conversation?.goal) {
+      const project = this.activeProject();
+      const conversation = project?.conversations.find(item => item.id === message.conversationId);
+      if (project && conversation?.goal) {
         const current = conversation.goal;
         const before = current.status;
         const next = goalCore.withStatus(current, message.status);
         conversation.goal = next;
         if (next.status !== before) {
-          await this.persistProjects();
+          await this.persistProject(project);
           this.log('info', 'conversation.goal.status', `${conversation.id}: ${before} -> ${next.status}`);
           this.postWorkflow(conversation.id);
         }
@@ -3318,7 +3589,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'getFileIcon') {
-      this.post({ type: 'fileIcon', filename: String(message.filename ?? '').toLowerCase(), icon: fileIcons.resolveFileIcon(message.filename ?? '') });
+      let icon = fileIcons.resolveFileIcon(message.filename ?? '');
+      if (icon?.kind === 'font' && icon.src) {
+        if (this.sentIconFonts.includes(icon.src)) {
+          icon = { ...icon, src: '' };
+        } else {
+          if (this.sentIconFonts.length >= 16) this.sentIconFonts.shift();
+          this.sentIconFonts.push(icon.src);
+        }
+      }
+      this.post({ type: 'fileIcon', filename: String(message.filename ?? '').toLowerCase(), icon });
       return;
     }
     if (message.type === 'logError') {
@@ -3436,7 +3716,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (project && opened) {
         project.activeConversationId = message.id;
         project.updatedAt = Date.now();
-        void this.persistProjects();
+        void this.persistProject(project);
         this.syncConversations();
         this.refreshSessionStats();
         // The bar restored from this conversation's history needs its turn id,
@@ -3479,7 +3759,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.title = title;
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -3491,7 +3771,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       this.sortConversations(project);
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -3535,7 +3815,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           project.activeConversationId = fresh.id;
         }
       }
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       return;
     }
@@ -3572,7 +3852,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (!project.conversations.includes(next)) project.conversations.unshift(next);
         project.activeConversationId = next.id;
       }
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       systemNotify(this.context, { subtitle: 'Conversation deleted', message: 'Conversation \'' + conversation.title + '\' was deleted.' });
       return;
@@ -3587,11 +3867,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
       const root = this.workspaceRoot();
       const project = this.activeProject();
-      if (!root || !project || project.path !== root.fsPath || !isGitTrackedWorkspace(root.fsPath)) {
-        void vscode.window.showInformationMessage('Restore is available only for the Git-tracked project that matches the current folder.');
-        return;
-      }
-      const conversation = project.conversations.find(item => item.id === message.conversationId);
+      const gitTracked = Boolean(root && isGitTrackedWorkspace(root.fsPath));
+      const conversation = project?.conversations.find(item => item.id === message.conversationId);
       const targetIndex = conversation?.items.findIndex(item => item.id === message.itemId && item.role === 'assistant') ?? -1;
       if (!conversation || targetIndex < 0) {
         void vscode.window.showInformationMessage('That restore point is no longer in this conversation.');
@@ -3602,14 +3879,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // keep in step, so there is nothing here it can honestly rewind.
       if (this.refuseIfCliOwned(conversation, 'Restoring a checkpoint')) return;
       const target = conversation.items[targetIndex];
-      if (!target?.gitTree) {
-        void vscode.window.showInformationMessage('This message does not have a Git restore point. Restore points are created for newer SleepyCode responses.');
+      const hasGitCheckpoint = Boolean(gitTracked && root && project?.path === root.fsPath && target?.gitTree);
+      const hasFileSnapshot = Boolean(root && project?.path === root.fsPath && target?.fileSnapshot?.length);
+      if (!hasGitCheckpoint && !hasFileSnapshot) {
+        void vscode.window.showInformationMessage(gitTracked
+          ? 'This message does not have a Git restore point. Restore points are created for newer SleepyCode responses.'
+          : 'This message does not have a restorable snapshot for the current folder.');
         return;
       }
       try {
-        await restoreGitTree(root.fsPath, target.gitTree);
+        if (hasGitCheckpoint) await restoreGitTree(root!.fsPath, target!.gitTree!);
+        else await this.restoreFileSnapshots(root!.fsPath, target!.fileSnapshot!);
       } catch (error) {
-        void vscode.window.showErrorMessage(`Git restore failed: ${errorMessage(error)}`);
+        void vscode.window.showErrorMessage(`Workspace restore failed: ${errorMessage(error)}`);
         return;
       }
       conversation.items = conversation.items.slice(0, targetIndex + 1);
@@ -3617,18 +3899,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.pending = undefined;
       clearForwardStacks(conversation);
       conversation.updatedAt = Date.now();
-      project.activeConversationId = conversation.id;
-      project.updatedAt = Date.now();
-      await this.persistProjects();
+      project!.activeConversationId = conversation.id;
+      project!.updatedAt = Date.now();
+      await this.persistProject(project!);
       this.syncConversations();
-      void vscode.window.showInformationMessage('Git workspace and conversation restored.');
+      void vscode.window.showInformationMessage(hasGitCheckpoint ? 'Git workspace and conversation restored.' : 'Workspace files and conversation restored.');
       return;
     }
     if (message.type === 'branchConversation') {
       const project = this.activeProject();
       const conversation = project?.conversations.find(item => item.id === message.conversationId);
       if (!project || !conversation) return;
-      const targetIndex = conversation.items.findIndex(item => item.id === message.itemId);
+      const targetIndex = message.itemId
+        ? conversation.items.findIndex(item => item.id === message.itemId)
+        : conversation.items.length - 1;
       if (targetIndex < 0) return;
       // Branching copies a prefix of items into a brand-new local conversation.
       // From a CLI conversation that copy is a display mirror with no
@@ -3646,6 +3930,32 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       branched.title = branchedTitle;
       project.conversations.unshift(branched);
       project.activeConversationId = branched.id;
+      project.updatedAt = Date.now();
+      await this.persistProject(project);
+      this.syncConversations();
+      return;
+    }
+    if ((message as { type?: string }).type === 'revertToMessage') {
+      const revertMsg = message as unknown as { conversationId?: string; index?: number; revertFiles?: boolean };
+      const project = this.activeProject();
+      const convId = revertMsg.conversationId || project?.activeConversationId || '';
+      const conversation = project?.conversations.find(item => item.id === convId);
+      if (!project || !conversation || this.runs.has(convId)) return;
+      if (this.refuseIfCliOwned(conversation, 'Reverting to an earlier message')) return;
+      const targetIndex = typeof revertMsg.index === 'number'
+        ? this.itemIndexForTurnIndex(conversation.items, revertMsg.index)
+        : -1;
+      if (targetIndex < 0) return;
+      const root = this.workspaceRoot();
+      if (revertMsg.revertFiles === true && root && project.path === root.fsPath) {
+        const gitTracked = isGitTrackedWorkspace(root.fsPath);
+        await this.restoreTailWorkspaceState(root.fsPath, gitTracked, conversation.items, targetIndex);
+      }
+      conversation.items = conversation.items.slice(0, targetIndex);
+      conversation.messages = sliceMessagesToItems(conversation.messages, conversation.items);
+      conversation.pending = undefined;
+      clearForwardStacks(conversation);
+      conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
       await this.persistProject(project);
       this.syncConversations();
@@ -3685,15 +3995,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // Ask before reverting workspace files: editing a past message can either
       // rewind the code to the checkpoint or keep the current workspace as-is.
       const hasRestorableState = Boolean(root) && (gitTracked || hasSnapshot);
+      const explicitRevert = (message as { revertFiles?: boolean }).revertFiles;
       let restoreState = false;
       if (hasRestorableState) {
-        const choice = await this.prompt(
-          'Restore workspace state?',
-          'Editing this message resends from that point. Restore workspace files to the state before it, or keep your current files?',
-          { ok: 'Restore state', secondary: 'Keep current files', cancel: 'Cancel' },
-        );
-        if (choice === 'cancel') return;
-        restoreState = choice === 'ok';
+        if (typeof explicitRevert === 'boolean') {
+          restoreState = explicitRevert;
+        } else {
+          const choice = await this.prompt(
+            'Restore workspace state?',
+            'Editing this message resends from that point. Restore workspace files to the state before it, or keep your current files?',
+            { ok: 'Restore state', secondary: 'Keep current files', cancel: 'Cancel' },
+          );
+          if (choice === 'cancel') return;
+          restoreState = choice === 'ok';
+        }
         if (restoreState && gitTracked) {
           if (assistantCheckpoint?.gitTree) {
             try {
@@ -4233,8 +4548,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (message.provider) conversation.provider = message.provider;
         conversation.updatedAt = Date.now();
         const project = this.activeProject();
-        if (project) project.updatedAt = Date.now();
-        await this.persistProjects();
+        if (project) {
+          project.updatedAt = Date.now();
+          await this.persistProject(project);
+        }
       }
       this.postConfig();
       void this.refreshModels();
@@ -4255,8 +4572,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         conversation.reasoningEffort = effort;
         conversation.updatedAt = Date.now();
         const project = this.activeProject();
-        if (project) project.updatedAt = Date.now();
-        await this.persistProjects();
+        if (project) {
+          project.updatedAt = Date.now();
+          await this.persistProject(project);
+        }
       }
       this.postConfig();
       return;
@@ -4269,8 +4588,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         conversation.agentId = message.agentId;
         conversation.updatedAt = Date.now();
         const project = this.activeProject();
-        if (project) project.updatedAt = Date.now();
-        await this.persistProjects();
+        if (project) {
+          project.updatedAt = Date.now();
+          await this.persistProject(project);
+        }
       }
       this.postConfig();
       return;
@@ -4350,7 +4671,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       project.conversations.unshift(conversation);
       project.activeConversationId = conversation.id;
       project.updatedAt = Date.now();
-      void this.persistProjects();
+      void this.persistProject(project);
       this.syncConversations();
       await this.ensureCliSelection(conversation);
       await this.onMessage({ type: 'send', text: message.prompt, conversationId: conversation.id, mode: 'ask' } as WebMessage);
@@ -4399,16 +4720,65 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       await this.ensureProjectIntelligence(true);
       return;
     }
+    if ((message as { type?: string }).type === 'openMention') {
+      const mentionMsg = message as unknown as { kind?: string; path?: string };
+      const rawPath = String(mentionMsg.path ?? '').trim();
+      if (!rawPath) return;
+      if (mentionMsg.kind === 'link') {
+        if (/^https?:\/\//i.test(rawPath)) {
+          await vscode.env.openExternal(vscode.Uri.parse(rawPath));
+        }
+        return;
+      }
+      if (mentionMsg.kind === 'folder') {
+        try {
+          let folderPath = rawPath;
+          if (folderPath.startsWith('file://')) folderPath = vscode.Uri.parse(folderPath).fsPath;
+          const root = this.workspaceRoot();
+          let uri: vscode.Uri;
+          if (root && path.isAbsolute(folderPath)) {
+            if (folderPath === root.fsPath) uri = root;
+            else if (pathInside(root.fsPath, folderPath)) uri = this.resolveWorkspacePath(path.relative(root.fsPath, folderPath));
+            else uri = vscode.Uri.file(folderPath);
+          } else {
+            uri = this.resolveWorkspacePath(folderPath);
+          }
+          try { await vscode.commands.executeCommand('revealInExplorer', uri); }
+          catch { await vscode.commands.executeCommand('revealFileInOS', uri); }
+        } catch (error) {
+          vscode.window.showErrorMessage(errorMessage(error));
+        }
+        return;
+      }
+    }
     if (message.type === 'openFile') {
       try {
-        const uri = this.resolveWorkspacePath(message.path);
+        let rawPath = message.path;
+        let line = message.line;
+        let column = message.column;
+        if (typeof rawPath === 'string' && rawPath.startsWith('file://')) {
+          rawPath = vscode.Uri.parse(rawPath).fsPath;
+        }
+        if (!line && typeof rawPath === 'string') {
+          const lineMatch = /^(.*?):(\d+)(?::(\d+))?$/.exec(rawPath);
+          if (lineMatch) {
+            rawPath = lineMatch[1]!;
+            line = Number(lineMatch[2]);
+            if (lineMatch[3]) column = Number(lineMatch[3]);
+          }
+        }
+        const root = this.workspaceRoot();
+        if (root && typeof rawPath === 'string' && path.isAbsolute(rawPath) && pathInside(root.fsPath, rawPath)) {
+          rawPath = path.relative(root.fsPath, rawPath);
+        }
+        const uri = this.resolveWorkspacePath(rawPath);
         // A reference written as src/a.ts:42:7 should land the caret there, not at the top of the
         // file. Editor positions are zero-based and a written reference is one-based, so both are
         // decremented together; a reference with no line keeps the previous behaviour exactly.
         const options: vscode.TextDocumentShowOptions = {};
-        if (message.line) {
-          const row = Math.max(0, message.line - 1);
-          const col = Math.max(0, (message.column ?? 1) - 1);
+        if (line) {
+          const row = Math.max(0, line - 1);
+          const col = Math.max(0, (column ?? 1) - 1);
           options.selection = new vscode.Range(row, col, row, col);
         }
         await vscode.window.showTextDocument(uri, options);
@@ -4469,6 +4839,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const match = message.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
       if (!match) return;
       const folder = await mkdtemp(path.join(tmpdir(), 'sleepycode-image-'));
+      this.imageTempDirList.push(folder);
       const extension = message.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
       const filePath = path.join(folder, `pasted.${extension}`);
       await writeFile(filePath, Buffer.from(match[1]!, 'base64'));
@@ -4500,13 +4871,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (message.type === 'fileMentionQuery') {
       const root = this.workspaceRoot();
       if (!root) return;
+      const requestId = (message as { requestId?: number }).requestId;
       const query = message.query.trim().toLowerCase();
       const index = this.projectIndex.snapshot?.root === root.fsPath ? this.projectIndex.snapshot : await this.ensureProjectIntelligence(false);
       if (index) {
         const ranked = query
           ? retrieveProjectContext(index, query, 20).map(hit => hit.path)
           : index.files.slice(0, 20).map(file => file.path);
-        this.post({ type: 'fileMentionResults', results: ranked.map(filePath => ({ path: filePath, kind: 'file' as const })) });
+        this.post({ type: 'fileMentionResults', ...(requestId !== undefined ? { requestId } : {}), results: ranked.map(filePath => ({ path: filePath, kind: 'file' as const })) });
         return;
       }
       const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,dist,out}/**', 40);
@@ -4514,7 +4886,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         .map(uri => ({ path: path.relative(root.fsPath, uri.fsPath).replace(/\\/g, '/'), kind: 'file' as const }))
         .filter(item => !query || item.path.toLowerCase().includes(query))
         .slice(0, 20);
-      this.post({ type: 'fileMentionResults', results });
+      this.post({ type: 'fileMentionResults', ...(requestId !== undefined ? { requestId } : {}), results });
       return;
     }
     if (message.type === 'openMemory') {
@@ -4608,16 +4980,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (target && target.mode !== message.mode) {
           target.mode = message.mode;
           await this.context.globalState.update('sleepycode.lastMode', message.mode);
-          await this.persistProjects();
+          await this.persistProject(project);
         }
       }
       const root = this.workspaceRoot();
       const mention = this.parseAgentMention(message.text);
       const sendText = mention.text.trim() || message.text.trim();
+      const steering = (message as { steering?: boolean }).steering === true;
+      const fromIndex = (message as { fromIndex?: number }).fromIndex;
 
       const targetConversation = project.conversations.find(conversation => conversation.id === conversationId);
       const isContinuation = /^(?:continue|keep going|go on|please continue|continue from where you stopped|proceed|finish)\.?$/i.test(sendText.trim());
-      if (isContinuation && targetConversation && !this.runs.has(conversationId)) {
+      if (typeof fromIndex !== 'number' && isContinuation && targetConversation && !this.runs.has(conversationId)) {
         const resumeFrom = resumeFromLastAssistant(targetConversation.items);
         if (resumeFrom && (resumeFrom.resume.partialText || resumeFrom.resume.work?.length)) {
           const engine = await this.ensureEngine();
@@ -4629,7 +5003,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           targetConversation.items.pop();
           project.activeConversationId = targetConversation.id;
           project.updatedAt = Date.now();
-          await this.persistProjects();
+          await this.persistProject(project);
           this.syncConversations();
           await this.run(resumeFrom.userText, targetConversation.id, {
             work: resumeFrom.resume.work as WorkItem[] | undefined,
@@ -4651,103 +5025,126 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           target.agentId = mention.agentId;
           target.updatedAt = Date.now();
           project.updatedAt = Date.now();
-          await this.persistProjects();
+          await this.persistProject(project);
         }
         this.postConfig();
       }
+      if (!steering && this.sendingConversations.has(conversationId)) return;
+      if (!steering) this.sendingConversations.add(conversationId);
       // The React composer sends its own attachment shape. Images arrive as data
       // URLs, so they are written to temp files here before the run reads them.
       // Named stages plus a watchdog: a preflight that never finishes used to
       // look like "nothing happens" with no evidence of where it stopped.
       const stage = this.beginSendStage(conversationId);
-      stage('attachments');
-      const composerContext = await this.withReactAttachments(message);
-      stage('editor-context');
-      const editorContext = root ? await this.composerContextBlock(root, composerContext) : '';
-      stage('project-context');
-      const projectContext = root && composerContext?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
-      stage('engine');
-      const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
-
-      // The CLI owns the loop, tools, permissions, and history for a conversation
-      // that has none of its own yet, so the local ToolLoopAgent must not also
-      // run this send. A chat with leftover local history stays local instead.
-      const engine = await this.ensureEngine();
-      stage('dispatch');
-      const sending = project.conversations.find(conversation => conversation.id === conversationId);
-      const steering = (message as { steering?: boolean }).steering === true;
-      // A CLI conversation is owned by a process whose step loop this build has
-      // no mid-step hook into: the update would be delivered as a brand-new prompt
-      // (interrupting the turn) while the composer already drew it as inline
-      // guidance. Refuse it and say so, rather than doing something that looks
-      // like steering and is not.
-      if (steering && sending && this.cliOwns(sending, engine)) {
-        this.log('warn', 'message.steer.cli-unsupported', `conversation=${conversationId}`);
-        this.post({
-          type: 'error',
-          conversationId,
-          keepTurn: true,
-          text: 'This chat is running on the Sleepy CLI, which does not accept mid-run updates. Your message was not sent — wait for the turn to finish, or stop it and send it as the next request.',
-        });
-        this.post({
-          type: 'steered',
-          conversationId,
-          requestId: (message as { requestId?: string }).requestId,
-          text: '',
-          rejected: true,
-        });
-        return;
-      }
-      if (sending && this.cliOwns(sending, engine)) {
-        void this.sendViaCli(conversationId, sendText, root).catch(error => {
-          const detail = errorMessage(error);
-          this.log('error', 'cli.send.unhandled', detail);
-          this.post({ type: 'error', conversationId, text: detail });
-        });
-        return;
-      }
-
-      stage('done');
-      // Guidance for the run in progress is queued even when a slot is free: it
-      // belongs to the current task, so starting a run would make it a new one.
-      if (steering && this.runs.has(conversationId)) {
-        this.log('info', 'message.steer.queued', `conversation=${conversationId}`);
-        // The client's request id becomes the queue id, so the `steered` echo
-        // names the exact row the webview drew optimistically.
-        this.enqueue(sendText, conversationId, composerContext, promptContext, true, (message as { requestId?: string }).requestId);
-        return;
-      }
-      if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
-        this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
-        this.enqueue(sendText, conversationId, composerContext, promptContext);
-      } else {
-        this.log('info', 'message.send.starting', `conversation=${conversationId}; contextChars=${promptContext.length}`);
-        void this.run(sendText, conversationId, undefined, undefined, composerContext, promptContext).catch(error => {
-          const detail = errorMessage(error);
-          this.log('error', 'run.unhandled', detail);
-          // Abort the run's controller before dropping its entry. Deleting the
-          // entry alone marked the conversation idle while the stream was still
-          // writing into it: `run()`'s own `finally` then cleared `runs` a second
-          // time and drained the queue, so the turn's text kept arriving on a chat
-          // the UI had finished. The abort is what actually ends the work.
-          this.runs.get(conversationId)?.controller.abort();
-          // The user turn is persisted before the run starts, so a failure escaping the
-          // run left a turn that nothing ever answered. Both the streamed partial text
-          // and this error lived only in the DOM, so a reload erased the evidence. Persist
-          // a structured error instead, which renders with a retry action and survives.
-          const conversation = this.findConversation(conversationId);
-          if (conversation) {
-            const errorItem = createTranscriptItem('assistant', detail, 'error');
-            errorItem.errorInfo = classifyAgentError(error);
-            errorItem.errorInfo.retryable = true;
-            conversation.items.push(errorItem);
-            this.boundConversationItems(conversation);
-            conversation.updatedAt = Date.now();
-            void this.persistProjects();
+      try {
+        if (typeof fromIndex === 'number' && !steering && !this.runs.has(conversationId)) {
+          const targetConv = project.conversations.find(conversation => conversation.id === conversationId);
+          const itemIndex = targetConv ? this.itemIndexForTurnIndex(targetConv.items, fromIndex) : -1;
+          const targetItem = itemIndex >= 0 ? targetConv?.items[itemIndex] : undefined;
+          if (targetConv && targetItem && targetItem.role === 'user') {
+            stage('attachments');
+            const editContext = await this.withReactAttachments(message);
+            await this.onMessage({
+              type: 'editUserMessage',
+              conversationId,
+              itemId: targetItem.id,
+              text: sendText,
+              context: editContext,
+              revertFiles: (message as { revertFiles?: boolean }).revertFiles,
+            } as unknown as WebMessage);
+            return;
           }
-          this.post({ type: 'error', conversationId, text: detail, keepTurn: true });
-          this.post({ type: 'state', conversationId, running: false, label: '' });
-        });
+        }
+        stage('attachments');
+        const composerContext = await this.withReactAttachments(message);
+        stage('editor-context');
+        const editorContext = root ? await this.composerContextBlock(root, composerContext) : '';
+        stage('project-context');
+        const projectContext = root && composerContext?.includeProjectIndex !== false ? await this.projectContextBlock(root, sendText) : '';
+        stage('engine');
+        const promptContext = [editorContext, projectContext].filter(Boolean).join('\n\n');
+
+        // The CLI owns the loop, tools, permissions, and history for a conversation
+        // that has none of its own yet, so the local ToolLoopAgent must not also
+        // run this send. A chat with leftover local history stays local instead.
+        const engine = await this.ensureEngine();
+        stage('dispatch');
+        const sending = project.conversations.find(conversation => conversation.id === conversationId);
+        // A CLI conversation is owned by a process whose step loop this build has
+        // no mid-step hook into: the update would be delivered as a brand-new prompt
+        // (interrupting the turn) while the composer already drew it as inline
+        // guidance. Refuse it and say so, rather than doing something that looks
+        // like steering and is not.
+        if (steering && sending && this.cliOwns(sending, engine)) {
+          this.log('warn', 'message.steer.cli-unsupported', `conversation=${conversationId}`);
+          this.post({
+            type: 'error',
+            conversationId,
+            keepTurn: true,
+            text: 'This chat is running on the Sleepy CLI, which does not accept mid-run updates. Your message was not sent — wait for the turn to finish, or stop it and send it as the next request.',
+          });
+          this.post({
+            type: 'steered',
+            conversationId,
+            requestId: (message as { requestId?: string }).requestId,
+            text: '',
+            rejected: true,
+          });
+          return;
+        }
+        if (sending && this.cliOwns(sending, engine)) {
+          void this.sendViaCli(conversationId, sendText, root).catch(error => {
+            const detail = errorMessage(error);
+            this.log('error', 'cli.send.unhandled', detail);
+            this.post({ type: 'error', conversationId, text: detail });
+          });
+          return;
+        }
+
+        // Guidance for the run in progress is queued even when a slot is free: it
+        // belongs to the current task, so starting a run would make it a new one.
+        if (steering && this.runs.has(conversationId)) {
+          this.log('info', 'message.steer.queued', `conversation=${conversationId}`);
+          // The client's request id becomes the queue id, so the `steered` echo
+          // names the exact row the webview drew optimistically.
+          this.enqueue(sendText, conversationId, composerContext, promptContext, true, (message as { requestId?: string }).requestId);
+          return;
+        }
+        if (this.runs.has(conversationId) || this.runs.size >= MAX_CONCURRENT_RUNS) {
+          this.log('info', 'message.send.queued', `conversation=${conversationId}; activeRuns=${this.runs.size}`);
+          this.enqueue(sendText, conversationId, composerContext, promptContext);
+        } else {
+          this.log('info', 'message.send.starting', `conversation=${conversationId}; contextChars=${promptContext.length}`);
+          void this.run(sendText, conversationId, undefined, undefined, composerContext, promptContext).catch(error => {
+            const detail = errorMessage(error);
+            this.log('error', 'run.unhandled', detail);
+            // Abort the run's controller before dropping its entry. Deleting the
+            // entry alone marked the conversation idle while the stream was still
+            // writing into it: `run()`'s own `finally` then cleared `runs` a second
+            // time and drained the queue, so the turn's text kept arriving on a chat
+            // the UI had finished. The abort is what actually ends the work.
+            this.runs.get(conversationId)?.controller.abort();
+            // The user turn is persisted before the run starts, so a failure escaping the
+            // run left a turn that nothing ever answered. Both the streamed partial text
+            // and this error lived only in the DOM, so a reload erased the evidence. Persist
+            // a structured error instead, which renders with a retry action and survives.
+            const conversation = this.findConversation(conversationId);
+            if (conversation) {
+              const errorItem = createTranscriptItem('assistant', detail, 'error');
+              errorItem.errorInfo = classifyAgentError(error);
+              errorItem.errorInfo.retryable = true;
+              conversation.items.push(errorItem);
+              this.boundConversationItems(conversation);
+              conversation.updatedAt = Date.now();
+              void this.persistProjects();
+            }
+            this.post({ type: 'error', conversationId, text: detail, keepTurn: true });
+            this.post({ type: 'state', conversationId, running: false, label: '' });
+          });
+        }
+      } finally {
+        if (!steering) this.sendingConversations.delete(conversationId);
+        stage('done');
       }
       return;
     }
@@ -4767,7 +5164,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.items.pop();
       project.activeConversationId = conversation.id;
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       await this.run(resumeFrom.userText, conversation.id, {
         work: resumeFrom.resume.work as WorkItem[] | undefined,
@@ -4805,7 +5202,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       conversation.items.pop();
       project.activeConversationId = conversation.id;
       project.updatedAt = Date.now();
-      await this.persistProjects();
+      await this.persistProject(project);
       this.syncConversations();
       await this.run(resumeFrom.userText, conversation.id, {
         work: last.work,
@@ -4941,7 +5338,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // Fire-and-forget: the user message is already in-memory and visible in the webview.
     // Awaiting the persist chain here blocked every send on the previous turn's write
     // (often several seconds of globalState I/O for a large conversation).
-    void this.persistProjects();
+    void this.persistProject(project);
     this.syncConversations(false);
     this.post({ type: 'state', conversationId, running: true, label: 'Thinking' });
 
@@ -5014,7 +5411,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
       this.post(next);
-      if (record.type === 'changed') updatePending(true);
+      if (record.type === 'changed') updatePending(false);
     };
     const activeTasks = new Map<string, WorkItem>();
     // Tool start timestamps, so the card can show a real duration instead of nothing. Scoped to the
@@ -5037,6 +5434,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // are merged by onStepFinish below, so tool calls/results survive a later
     // server interruption as model-visible history too.
     const updatePending = (force = false): void => {
+      const now = Date.now();
+      const last = this.checkpointAtByConversation.get(conversation.id) ?? 0;
+      if (!force && conversation.pending && now - last < AgentViewProvider.CHECKPOINT_INTERVAL_MS) return;
       conversation.pending = {
         userText: historyUserText,
         messages: runMessages.slice(),
@@ -5114,7 +5514,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (await this.ensureSelectedAgent()) {
       // Fire-and-forget: agent fallback is already applied in-memory.
-      void this.persistProjects();
+      void this.persistProject(project);
     }
     const conversationAgent = this.agentConfig(conversation.agentId ?? this.config().agentId);
     const selection = this.selectionFor(conversation);
@@ -5229,19 +5629,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       } else {
         this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
         const baseConnection = rawMcpServers.trim() && rawMcpServers.trim() !== '{}'
-          ? await Promise.race([
+          ? await raceTimeout(
             connectMcpServers(rawMcpServers, root.fsPath, (title, detail) => this.approve('command', title, detail), mcpHost(this.context)).catch(error => emptyMcpConnection([`MCP configuration: ${errorMessage(error)}`])),
-            new Promise<McpConnection>(resolve => setTimeout(() => resolve(emptyMcpConnection(['MCP servers did not finish connecting within 10s.'])), 10_000)),
-          ])
+            emptyMcpConnection(['MCP servers did not finish connecting within 10s.']),
+            10_000,
+            conn => conn.close(),
+          )
           : emptyMcpConnection();
         this.log('info', 'run.mcp.legacy.done');
         this.log('info', 'run.mcp.connections', `legacy=${this.config().mcpServers !== '{}'}; saved=${savedConnections.length}; enabled=${savedConnections.filter(connection => connection.enabled).length}`);
         if (savedConnections.some((c) => c.enabled)) {
           this.log('info', 'run.mcp.saved.start');
-          const extra = await Promise.race([
+          const extra = await raceTimeout(
             connectToMcpConnections(savedConnections, this.context, (title, detail) => this.approve('command', title, detail)),
-            new Promise<{ connection: McpConnection; statuses: McpConnectionStatus[] }>(resolve => setTimeout(() => resolve({ connection: emptyMcpConnection(['Saved MCP timed out']), statuses: [] }), 10_000)),
-          ]);
+            { connection: emptyMcpConnection(['Saved MCP timed out']), statuses: [] as McpConnectionStatus[] },
+            10_000,
+            res => res.connection.close(),
+          );
           this.log('info', 'run.mcp.saved.done');
           mcpConnection = {
             tools: { ...baseConnection.tools, ...extra.connection.tools },
@@ -5355,7 +5759,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           resolvePath: filePath => this.resolveWorkspacePath(filePath),
           observationsDir: () => this.observationsRoot(),
           describePlan: () => 'Subagents do not publish a parent plan. Work directly on the assigned task.',
-          abortSignal: run.controller.signal,
+          abortSignal: subagentAbort.signal,
           terminals: this.terminals,
           memory: memoryAccess,
         });
@@ -5444,7 +5848,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               messages: subagentMessages,
               tools: subagentToolSet,
               maxRetries: 3,
-              abortSignal: run.controller.signal,
+              abortSignal: subagentAbort.signal,
               onToolExecutionStart: ({ toolCall }) => {
                 this.notifyHooks('beforeTool', { tool: toolCall.toolName });
                 this.post({ type: 'tool', conversationId, parentId: subagentId, subagentRole: role, phase: 'start', id: `${subagentId}:tool:${toolCall.toolCallId}`, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input) });
@@ -5522,7 +5926,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (totalInput || totalOutput) {
             if (this.shouldRecordUsage()) recordUsage(this.context, { conversationId, model: subagentModelId, provider: subagentProviderId, inputTokens: totalInput, outputTokens: totalOutput, cacheReadTokens: totalCacheRead, cacheWriteTokens: totalCacheWrite });
           }
-          const text = subagentText;
+          const rawText = subagentText;
+          const text = rawText.length > 40_000 ? `${rawText.slice(0, 40_000)}\n…[subagent output truncated]` : rawText;
           releaseSubagent();
           this.post({ type: 'subagent', conversationId, id: subagentId, role, task: cleanTask, name: label, phase: 'end', ok: true, result: text.slice(0, 500) });
           return text;
@@ -5790,14 +6195,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                   }
                   return;
                 }
-                const taskEntry: WorkItem = { kind: 'task', text: toolTask(toolCall.toolName, toolCall.input), done: false, tool: toolCall.toolName };
+                const compactInput = compactWorkInput(toolCall.input);
+                const taskEntry: WorkItem = { kind: 'task', id: toolCall.toolCallId, text: toolTask(toolCall.toolName, toolCall.input), done: false, tool: toolCall.toolName, ...(compactInput ? { input: compactInput } : {}) };
                 activeTasks.set(toolCall.toolCallId, taskEntry);
                 work.push(taskEntry);
                 workStartedAt ||= Date.now();
                 toolStartedAt.set(toolCall.toolCallId, Date.now());
-                this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text, args: toolArgsText(toolCall.input) });
+                if (toolCall.toolName !== 'delegate_task') {
+                  this.post({ type: 'tool', conversationId, phase: 'start', id: toolCall.toolCallId, tool: toolCall.toolName, name: taskEntry.text, args: toolArgsText(toolCall.input) });
+                }
                 this.post({ type: 'state', conversationId, running: true, label: humanToolName(toolCall.toolName) });
-                updatePending(true);
+                updatePending(false);
               },
               onToolExecutionEnd: ({ toolCall, toolOutput }) => {
                 this.notifyHooks('afterTool', { tool: toolCall.toolName });
@@ -5810,8 +6218,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
                 // call's own before/after, so the card never claims a change the
                 // tool did not make.
                 const editDiff = toolOutput?.type === 'tool-error' ? undefined : editDiffFor(toolCall.toolName, toolCall.input);
-                this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input), args: toolArgsText(toolCall.input), result: toolResultText(toolOutput), durationMs: elapsed, failed: toolOutput?.type === 'tool-error', ...(editDiff ? { diff: editDiff } : {}) });
-                updatePending(true);
+                if (taskEntry && editDiff) taskEntry.diff = editDiff;
+                if (toolCall.toolName !== 'delegate_task') {
+                  this.post({ type: 'tool', conversationId, phase: 'end', id: toolCall.toolCallId, tool: toolCall.toolName, name: toolTask(toolCall.toolName, toolCall.input), args: toolArgsText(toolCall.input), result: toolResultText(toolOutput), durationMs: elapsed, failed: toolOutput?.type === 'tool-error', ...(editDiff ? { diff: editDiff } : {}) });
+                }
+                updatePending(false);
               },
               onStepFinish: step => {
                 const completed = (step.response.messages ?? []) as ModelMessage[];
@@ -5981,12 +6392,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           conversation.turnRedo = [];
           conversation.items.push(assistantItem);
           this.boundConversationItems(conversation);
+          this.reactItems.set(conversationId, webviewTranscriptItems(conversation.items) as unknown[]);
           conversation.updatedAt = Date.now();
           project.updatedAt = Date.now();
           await this.checkpointConversation(conversation, true);
           if (runRetries) this.post({ type: 'retryEnd', conversationId, ok: true, attempt: runRetries, max: retryBudget.max });
           this.reportMemory();
           this.post({ type: 'done', conversationId, item: assistantItem });
+          if (assistantItem.paused) {
+            this.post({
+              type: 'maxSteps',
+              conversationId,
+              steps: assistantItem.pauseLimit ?? maxSteps,
+              reason: assistantItem.pauseReason === 'max_tokens' ? 'max-tokens' : 'max-steps',
+            });
+          }
           // The review bar reads a message of its own, and nothing published one at
           // the end of a turn: the transcript snapshot is withheld while streaming
           // and the run-end sync skips the active conversation, so the bar only
@@ -6098,6 +6518,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           if (snapshotByPath.size) stoppedItem.fileSnapshot = fields.fileSnapshot as FileSnapshot[];
           conversation.items.push(stoppedItem);
           this.boundConversationItems(conversation);
+          this.reactItems.set(conversationId, webviewTranscriptItems(conversation.items) as unknown[]);
           this.post({ type: 'generationError', conversationId, item: stoppedItem });
         }
         conversation.updatedAt = Date.now();
@@ -6161,6 +6582,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         conversation.pending = undefined;
         conversation.items.push(errorItem);
         this.boundConversationItems(conversation);
+        this.reactItems.set(conversationId, webviewTranscriptItems(conversation.items) as unknown[]);
         conversation.updatedAt = Date.now();
         project.updatedAt = Date.now();
         await this.checkpointConversation(conversation, true);
@@ -6299,8 +6721,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void this.persistCompactionSnapshots(conversation.id);
     conversation.updatedAt = Date.now();
     const project = this.activeProject();
-    if (project) project.updatedAt = Date.now();
-    await this.persistProjects();
+    if (project) {
+      project.updatedAt = Date.now();
+      await this.persistProject(project);
+    }
     this.syncConversations();
     return {
       summaryText: summarized.summaryText,
@@ -6697,7 +7121,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     change.staged = false;
     target.conversation.updatedAt = Date.now();
     target.project.updatedAt = Date.now();
-    await this.persistProjects();
+    await this.persistProject(target.project);
     this.post({ type: 'gitActionResult', conversationId, itemId, ok: true, action: 'revert', path: relativePath, item: target.item });
     this.syncConversations();
   }
@@ -6785,7 +7209,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     target.conversation.updatedAt = Date.now();
     target.project.updatedAt = Date.now();
-    await this.persistProjects();
+    await this.persistProject(target.project);
     this.post({ type: 'gitActionResult', conversationId, itemId, ok: true, action: 'stage', paths, item: target.item });
     this.syncConversations();
   }
@@ -6837,7 +7261,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     target.item.commitMessage = message.trim();
     target.conversation.updatedAt = Date.now();
     target.project.updatedAt = Date.now();
-    await this.persistProjects();
+    await this.persistProject(target.project);
     this.post({ type: 'gitActionResult', conversationId, itemId, ok: true, action: 'commit', hash, message: message.trim(), item: target.item });
     this.syncConversations();
     void vscode.window.showInformationMessage(`Committed SleepyCode task${hash ? ` (${hash})` : ''}.`);
@@ -6849,7 +7273,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * Shared by the settings window's sync button and the startup warm-up: two
    * copies is how the panel and the run disagree about whether a server is up.
    */
-  private async probeMcpConnections(): Promise<settingsAdapter.PanelMcpStatus[]> {
+  private async probeMcpConnections(
+    onlyNames?: ReadonlySet<string>,
+    previousStatuses?: settingsAdapter.PanelMcpStatus[],
+  ): Promise<settingsAdapter.PanelMcpStatus[]> {
     const connections = await loadMcpConnections(this.context);
     this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
     // Spawned servers inherit this PATH. Recording it makes "command not found"
@@ -6858,7 +7285,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.log('info', 'mcp.sync.path', (resolvedPath.PATH ?? '').split(':').slice(0, 8).join(':'));
     let statuses: McpConnectionStatus[] = [];
     try {
-      const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath);
+      const result = await connectToMcpConnections(connections, this.context, (title, detail) => this.approve('command', title, detail), this.workspaceRoot()?.fsPath, onlyNames);
       await result.connection.close();
       statuses = result.statuses;
       if (result.connection.errors.length) this.log('warn', 'mcp.sync.errors', result.connection.errors.join(' | '));
@@ -6870,7 +7297,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       statuses = [];
     }
     // One row per saved server, always: never leave the panel guessing.
-    return settingsAdapter.completeMcpStatuses(connections, statuses);
+    const completed = settingsAdapter.completeMcpStatuses(connections, statuses);
+    if (onlyNames && previousStatuses?.length) {
+      const prevByName = new Map(previousStatuses.map(status => [status.name, status]));
+      return completed.map(row => (onlyNames.has(row.name) ? row : (prevByName.get(row.name) ?? row)));
+    }
+    return completed;
   }
 
   /**
@@ -6899,11 +7331,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!this.reactMode) return;
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
     let attempt = 0;
+    let lastStatuses: settingsAdapter.PanelMcpStatus[] | undefined;
+    let retryNames: ReadonlySet<string> | undefined;
     const run = async (): Promise<void> => {
       attempt += 1;
       let statuses: settingsAdapter.PanelMcpStatus[];
       try {
-        statuses = await this.probeMcpConnections();
+        statuses = await this.probeMcpConnections(retryNames, lastStatuses);
       } catch (error) {
         this.log('warn', 'mcp.warm.failed', errorMessage(error));
         // A probe that threw is not evidence the servers are fine: keep trying.
@@ -6911,11 +7345,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         schedule();
         return;
       }
+      lastStatuses = statuses;
       if (!statuses.length) {
         this.mcpWarmActive = false;
         return;
       }
       const verdict = warmVerdict(statuses);
+      retryNames = verdict.down.length ? new Set(verdict.down) : undefined;
       this.log('info', 'mcp.warm.done',
         `${verdict.connected}/${verdict.total} connected, ${verdict.down.length}/${verdict.enabled.length} enabled still down (attempt ${attempt})${verdict.down.length ? `: ${verdict.down.join(', ')}` : ''}`);
       // The settings window is the only MCP-row surface, and it has its own
@@ -7040,8 +7476,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     };
     conversation.items.push(item);
     conversation.updatedAt = Date.now();
-    if (project) project.updatedAt = Date.now();
-    await this.persistProjects();
+    if (project) {
+      project.updatedAt = Date.now();
+      await this.persistProject(project);
+    }
   }
 
   private async reviewEdit(filePath: string, before: string, after: string, reason: string, destructive = false, conversationId?: string): Promise<void> {
@@ -7195,10 +7633,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       baseUrl: provider?.isSleepy ? sleepyApiBase() : (provider?.baseURL ?? ''),
       maxSteps: config.get<number>('maxSteps', 200),
       maxPersistedReasoning: normalizePersistedReasoningLimit(config.get<number>('maxPersistedReasoning', DEFAULT_PERSISTED_REASONING), DEFAULT_PERSISTED_REASONING),
-      approvalMode: normalizeApprovalMode(this.context.globalState.get<string>('sleepycode.approvalMode', 'ask')),
-      searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', ''),
-      systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt', ''),
-      mcpServers: this.context.globalState.get<string>('sleepycode.mcpServers', '{}'),
+      approvalMode: normalizeApprovalMode(
+        this.context.globalState.get<string>('sleepycode.approvalMode') ?? config.get<string>('approvalMode', 'ask'),
+      ),
+      searxngUrl: this.context.globalState.get<string>('sleepycode.searxngUrl', '') || config.get<string>('searxngUrl', ''),
+      systemPrompt: this.context.globalState.get<string>('sleepycode.systemPrompt') ?? config.get<string>('systemPrompt', ''),
+      mcpServers: this.context.globalState.get<string>('sleepycode.mcpServers') ?? config.get<string>('mcpServers', '{}'),
       extraFreeModels: (config.get<string>('extraFreeModels', '') ?? '').split(',').map(item => item.trim()).filter(Boolean),
       onlyDefaultModels: this.context.globalState.get<boolean>('sleepycode.onlyDefaultModels', true),
       agentId: this.context.globalState.get<string>('sleepycode.agentId', 'default'),
@@ -7229,7 +7669,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     conversation.model = choice.modelID;
     conversation.provider = choice.providerID;
     conversation.updatedAt = Date.now();
-    void this.persistProjects();
+    const owner = this.projectForConversation(conversation.id) ?? this.activeProject();
+    if (owner) void this.persistProject(owner);
     this.postConfig();
   }
 
@@ -7696,11 +8137,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (context?.includeActiveFile !== false && (requestedFile || editorRelative)) {
       const relative = requestedFile || editorRelative;
       if (!isSecret(relative)) {
-        const content = editor && editorMatchesRequest
-          ? editor.document.getText()
-          : new TextDecoder().decode(await vscode.workspace.fs.readFile(this.resolveWorkspacePath(relative)));
-        sections.push(`Active file ${relative} (included via the active-file context control):\n\`\`\`\n${content.slice(0, 30_000)}\n\`\`\``);
-        seen.add(relative);
+        try {
+          const content = editor && editorMatchesRequest
+            ? editor.document.getText()
+            : new TextDecoder().decode(await vscode.workspace.fs.readFile(this.resolveWorkspacePath(relative)));
+          sections.push(`Active file ${relative} (included via the active-file context control):\n\`\`\`\n${content.slice(0, 30_000)}\n\`\`\``);
+          seen.add(relative);
+        } catch { }
       }
     }
     for (const attachment of (context?.attachments ?? []).slice(0, 16)) {
@@ -7708,19 +8151,36 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         sections.push(`Attached image ${attachment.name} (${attachment.mimeType}, ${attachment.size} bytes).`);
         continue;
       }
-      const relative = attachment.path.replace(/\\/g, '/').replace(/^\.\//, '');
-      if (!relative || seen.has(relative) || isSecret(relative)) continue;
-      const uri = this.resolveWorkspacePath(relative);
-      const stat = await vscode.workspace.fs.stat(uri);
-      if (attachment.kind === 'folder' || (stat.type & vscode.FileType.Directory) !== 0) {
-        sections.push(`Attached folder: ${relative}. Inspect only the relevant files inside it.`);
-      } else if (stat.size <= MAX_FILE_BYTES) {
-        const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).slice(0, 30_000);
-        sections.push(`Attached file ${relative}:\n\`\`\`\n${content}\n\`\`\``);
-      } else {
-        sections.push(`Attached file: ${relative} (${stat.size} bytes; use read/search tools selectively).`);
+      if ((attachment as { kind: string }).kind === 'link') {
+        sections.push(`Referenced link: ${attachment.path}`);
+        continue;
       }
-      seen.add(relative);
+      const inlineText = (attachment as { text?: string; name?: string }).text;
+      if (typeof inlineText === 'string' && inlineText.length > 0 && !attachment.path) {
+        const label = (attachment as { name?: string }).name || 'snippet';
+        sections.push(`Attached text ${label}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\``);
+        continue;
+      }
+      const relative = (attachment.path || '').replace(/\\/g, '/').replace(/^\.\//, '');
+      if (!relative || seen.has(relative) || isSecret(relative)) continue;
+      try {
+        const uri = this.resolveWorkspacePath(relative);
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (attachment.kind === 'folder' || (stat.type & vscode.FileType.Directory) !== 0) {
+          sections.push(`Attached folder: ${relative}. Inspect only the relevant files inside it.`);
+        } else if (stat.size <= MAX_FILE_BYTES) {
+          const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).slice(0, 30_000);
+          sections.push(`Attached file ${relative}:\n\`\`\`\n${content}\n\`\`\``);
+        } else {
+          sections.push(`Attached file: ${relative} (${stat.size} bytes; use read/search tools selectively).`);
+        }
+        seen.add(relative);
+      } catch {
+        if (typeof inlineText === 'string' && inlineText.length > 0) {
+          sections.push(`Attached text ${relative}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\``);
+          seen.add(relative);
+        }
+      }
     }
     return sections.length ? `\n\nEditor context explicitly included by the user:\n\n${sections.join('\n\n')}` : '';
   }
@@ -7792,24 +8252,63 @@ Rules:
     // prompt and under the agent's own instructions (which say what the task is).
     const personaText = personas.personaPromptFor(this.allPersonas(), personaId);
     const layered = personaText ? `${ideContext}\n\n---\n\nHow to work here:\n\n${personaText}` : ideContext;
+    const customPrompt = this.config().systemPrompt.trim();
+    const withCustom = (base: string): string =>
+      customPrompt ? `${base}\n\n---\n\nCustom user instructions:\n\n${customPrompt}` : base;
     const agentDef = this.allAgents().find(a => a.id === agentId);
-    if (!agentDef) return layered;
+    if (!agentDef) return withCustom(layered);
     // User agents are always injected live so edits in the settings editor take effect immediately;
     // built-in prompts stay cached because they are static.
     const cacheable = AGENT_DEFINITIONS.some(a => a.id === agentId);
     const cached = cacheable ? this.agentPromptCache.get(agentId) ?? agentDef.prompt : agentDef.prompt;
-    if (!cached) return layered;
+    if (!cached) return withCustom(layered);
     if (cacheable) this.agentPromptCache.set(agentId, cached);
-    return `${layered}
+    return withCustom(`${layered}
 
 ---
 
 Agent personality and style:
 
-${cached}`;
+${cached}`);
+  }
+
+  private flushPendingDeltas(): void {
+    if (this.deltaFlushTimer) {
+      clearTimeout(this.deltaFlushTimer);
+      this.deltaFlushTimer = undefined;
+    }
+    if (!this.pendingDeltas.size) return;
+    const batch = [...this.pendingDeltas.entries()];
+    this.pendingDeltas.clear();
+    for (const [conversationId, entry] of batch) {
+      if (entry.reasoning) this.postImmediate({ type: 'reasoningDelta', conversationId, text: entry.reasoning });
+      if (entry.text) this.postImmediate({ type: 'delta', conversationId, text: entry.text });
+    }
   }
 
   private post(message: unknown): void {
+    if (this.reactMode && message && typeof message === 'object') {
+      const msg = message as { type?: unknown; conversationId?: unknown; text?: unknown };
+      if ((msg.type === 'delta' || msg.type === 'reasoningDelta') && typeof msg.conversationId === 'string' && typeof msg.text === 'string') {
+        const entry = this.pendingDeltas.get(msg.conversationId) ?? { text: '', reasoning: '' };
+        if (msg.type === 'delta') entry.text += msg.text;
+        else entry.reasoning += msg.text;
+        this.pendingDeltas.set(msg.conversationId, entry);
+        if (!this.deltaFlushTimer) {
+          this.deltaFlushTimer = setTimeout(() => {
+            this.deltaFlushTimer = undefined;
+            this.flushPendingDeltas();
+          }, 16);
+          this.deltaFlushTimer.unref?.();
+        }
+        return;
+      }
+    }
+    if (this.pendingDeltas.size) this.flushPendingDeltas();
+    this.postImmediate(message);
+  }
+
+  private postImmediate(message: unknown): void {
     if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'browserPreview') {
       const preview = message as { dataUrl?: unknown; cursor?: { x: number; y: number } };
       if (typeof preview.dataUrl === 'string' && preview.dataUrl) {
@@ -7832,7 +8331,7 @@ ${cached}`;
     // In React mode, translate SleepyCode messages into the React webview protocol.
     let outgoing: unknown = message;
     if (this.reactMode && message && typeof message === 'object') {
-      const typed = message as { type?: string; selected?: string; conversationId?: string; id?: string; running?: boolean };
+      const typed = message as { type?: string; selected?: string; conversationId?: string; id?: string; running?: boolean; approval?: { conversationId?: string } };
       // Streaming state is tracked per conversation. `state`/`done` carry
       // `conversationId`; a transcript snapshot carries `id`.
       const streamId = typed.conversationId ?? (typed.type === 'conversation' ? typed.id : undefined);
@@ -7853,11 +8352,15 @@ ${cached}`;
         const callId = (typed as { id?: string }).id;
         if (callId) this.reactLastToolCall.set(streamId, callId);
       }
-      if ((typed.type === 'notify' || typed.type === 'permission') && typed.conversationId) {
-        const callId = this.reactLastToolCall.get(typed.conversationId);
+      const approvalConvId = typed.approval?.conversationId ?? typed.conversationId;
+      if ((typed.type === 'notify' || typed.type === 'permission') && approvalConvId) {
+        const callId = this.reactLastToolCall.get(approvalConvId);
         if (callId) (typed as { toolCallId?: string }).toolCallId = callId;
       }
-      const t = adapter.toReactMessageWhileStreaming(typed as any, streaming);
+      const prepared = typed.type === 'conversation' && Array.isArray((typed as { items?: unknown }).items)
+        ? { ...typed, items: this.withResolvedImageUris((typed as { items: readonly TranscriptItem[] }).items) }
+        : typed;
+      const t = adapter.toReactMessageWhileStreaming(prepared as any, streaming);
       if (!t) return; // drop untranslatable internal messages in React mode
       outgoing = t;
       // The model catalog and the active selection travel together in SleepyCode

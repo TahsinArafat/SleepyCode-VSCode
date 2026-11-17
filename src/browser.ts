@@ -310,12 +310,10 @@ export class BrowserController {
   }
 
   async launch(options: BrowserSessionOptions): Promise<void> {
+    await this.close();
     const pw = await this.loadPlaywright();
     const viewport = pickViewport(options.viewport);
     this.resolvedViewport = viewport;
-    this.pages = [];
-    this.logs.clear();
-    this.page = undefined;
     // Deterministic bundled Chromium first, then progressively fall back to
     // system browsers so the tools work without any Playwright browser install.
     const candidates = browserLaunchCandidates();

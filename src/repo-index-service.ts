@@ -1,8 +1,8 @@
 import type * as vscode from 'vscode';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 // Explicit extension: the direct suite loads this module with
 // `node --experimental-strip-types`, which does not resolve extensionless imports.
-import { RepoIndex, scanWorkspace } from './repo-index.ts';
+import { isBinaryPath, isIgnoredRelativePath, RepoIndex, scanWorkspace } from './repo-index.ts';
 import { MAX_FILE_BYTES } from './types.ts';
 
 /**
@@ -58,9 +58,13 @@ export class RepoIndexService {
   refreshEntry(root: vscode.Uri, relative: string, uri: vscode.Uri): void {
     const cached = this.cache;
     if (!cached || cached.root !== root.fsPath) return;
+    if (isBinaryPath(relative) || isIgnoredRelativePath(relative)) {
+      cached.index.remove(relative);
+      return;
+    }
     try {
-      const stat = statSync(uri.fsPath);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) cached.index.remove(relative);
+      const stat = lstatSync(uri.fsPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) cached.index.remove(relative);
       else cached.index.upsert({ path: relative, content: readFileSync(uri.fsPath, 'utf8') });
     } catch {
       // Gone, or unreadable: the index must not keep it either way.

@@ -71,6 +71,8 @@ export class ProjectIndexService {
     return undefined;
   }
 
+  private persistTimer?: ReturnType<typeof setTimeout>;
+
   async ensure(root: vscode.Uri, force = false): Promise<ProjectIntelligence> {
     if (!force) {
       if (this.current?.root === root.fsPath) return this.current;
@@ -84,6 +86,53 @@ export class ProjectIndexService {
     this.currentRoot = root.fsPath;
     this.building = this.build(root).finally(() => { this.building = undefined; });
     return this.building;
+  }
+
+  /** Incrementally update one changed file in memory without triggering a full workspace rebuild. */
+  async updateFile(root: vscode.Uri, relative: string, uri: vscode.Uri): Promise<void> {
+    if (!this.current || this.current.root !== root.fsPath) return;
+    const files = this.current.files;
+    const existingIndex = files.findIndex(item => item.path === relative);
+    const shouldDrop = !isIndexableProjectFile(relative);
+    let updated: IndexedProjectFile | undefined;
+    if (!shouldDrop) {
+      try {
+        const fileStat = await vscode.workspace.fs.stat(uri);
+        if ((fileStat.type & vscode.FileType.File) !== 0 && (fileStat.type & vscode.FileType.SymbolicLink) === 0 && fileStat.size <= MAX_INDEXED_BYTES) {
+          const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+          if (!content.includes('\u0000')) {
+            const language = languageForPath(relative);
+            updated = {
+              path: relative,
+              language,
+              size: fileStat.size,
+              symbols: extractSymbols(content, language),
+              imports: extractImports(content, language),
+              testLike: testLike(relative),
+            };
+          }
+        }
+      } catch {
+        updated = undefined;
+      }
+    }
+    if (!updated) {
+      if (existingIndex < 0) return;
+      files.splice(existingIndex, 1);
+    } else if (existingIndex >= 0) {
+      files[existingIndex] = updated;
+    } else {
+      files.push(updated);
+    }
+    this.current.indexedFileCount = files.length;
+    this.current.languages = languageStats(files);
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    const snapshot = this.current;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      if (this.current?.root === snapshot.root) void this.persist(snapshot);
+    }, 15_000);
+    this.persistTimer.unref?.();
   }
 
   async contextFor(root: vscode.Uri, query: string, limit = 10): Promise<{ index: ProjectIntelligence; hits: ProjectContextHit[] }> {
@@ -147,6 +196,7 @@ export class ProjectIndexService {
         importantFiles: importantFiles.slice(0, 60),
         files,
       };
+      if (this.currentRoot && this.currentRoot !== root.fsPath) return intelligence;
       this.current = intelligence;
       await this.persist(intelligence);
       this.post({ type: 'projectIndex', status: 'ready', indexed: files.length, total: uris.length, text: summarizeProjectIndex(intelligence), index: { ...intelligence, files: [] } });

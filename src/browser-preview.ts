@@ -14,15 +14,18 @@ export class BrowserPreviewPanel {
     this.lastDataUrl = dataUrl;
     this.lastCursor = cursor;
     if (!this.panel) {
+      if (!dataUrl) return;
       this.panel = vscode.window.createWebviewPanel(
         'sleepycode.browserPreview',
         'Browser Preview',
         vscode.ViewColumn.Beside,
-        { enableScripts: true, retainContextWhenHidden: true },
+        { enableScripts: true, retainContextWhenHidden: false },
       );
       this.panel.webview.html = this.html();
       this.panel.onDidDispose(() => {
         this.panel = undefined;
+        this.lastDataUrl = null;
+        this.lastCursor = undefined;
       });
       // The webview script signals readiness once loaded; a message posted before
       // that (the very first capture) would otherwise be silently dropped.
@@ -42,6 +45,8 @@ export class BrowserPreviewPanel {
   dispose(): void {
     this.panel?.dispose();
     this.panel = undefined;
+    this.lastDataUrl = null;
+    this.lastCursor = undefined;
   }
 
   private html(): string {
@@ -78,6 +83,7 @@ export class BrowserPreviewPanel {
       dot.classList.toggle('idle', !has);
       title.textContent = has ? 'Live browser preview' : 'Browser session closed';
       if (has) shot.src = m.dataUrl;
+      else shot.removeAttribute('src');
       if (m.cursor) {
         cursor.style.left = (m.cursor.x * 100) + '%';
         cursor.style.top = (m.cursor.y * 100) + '%';

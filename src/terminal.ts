@@ -40,6 +40,7 @@ export class TerminalManager {
       cwd,
       env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
       stdio: 'pipe',
+      detached: process.platform !== 'win32',
       windowsHide: true,
     });
     const session: TerminalSession = { name: sessionName, cwd, process: child, output: '', baseOffset: 0 };

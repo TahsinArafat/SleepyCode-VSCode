@@ -44,23 +44,44 @@ function runGit(args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}, i
     const child = spawn('git', args, { cwd, env: { ...process.env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const MAX_GIT_BYTES = 32 * 1024 * 1024;
+    let outBytes = 0;
+    let errBytes = 0;
     let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       options.signal?.removeEventListener('abort', abort);
       callback();
     };
     const terminate = (): void => {
       try { child.kill('SIGTERM'); } catch { }
+      killTimer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { }
+      }, 2000);
+      killTimer.unref?.();
     };
     const abort = (): void => finish(() => { terminate(); reject(new Error('Git checkpoint cancelled.')); });
     const timer = options.timeoutMs ? setTimeout(() => finish(() => { terminate(); reject(new Error(`git ${args[0]} timed out after ${Math.ceil(options.timeoutMs! / 1000)}s`)); }), options.timeoutMs) : undefined;
     if (options.signal?.aborted) { abort(); return; }
     options.signal?.addEventListener('abort', abort, { once: true });
-    child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
-    child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
+    child.stdout.on('data', chunk => {
+      const buf = Buffer.from(chunk);
+      if (outBytes + buf.length <= MAX_GIT_BYTES) {
+        outBytes += buf.length;
+        stdout.push(buf);
+      }
+    });
+    child.stderr.on('data', chunk => {
+      const buf = Buffer.from(chunk);
+      if (errBytes + buf.length <= MAX_GIT_BYTES) {
+        errBytes += buf.length;
+        stderr.push(buf);
+      }
+    });
     child.on('error', error => finish(() => reject(error)));
     child.on('close', code => {
       finish(() => {
@@ -144,31 +165,50 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, sign
       }
     };
     child.stdout.on('data', append); child.stderr.on('data', append);
-    const timer = setTimeout(() => {
-      if (process.platform === 'win32') {
-        child.kill('SIGTERM');
-        try { require('child_process').execSync(`taskkill /pid ${child.pid} /t /f`, { stdio: 'ignore' }); } catch { child.kill('SIGKILL'); }
-      } else if (child.pid) {
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-      } else {
-        child.kill('SIGTERM');
-      }
-      reject(new Error(`Command timed out after ${timeoutMs / 1000}s.\n${output}`));
-    }, timeoutMs);
-    const abort = () => {
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', abort);
+      callback();
+    };
+    const terminateTree = (): void => {
       if (process.platform === 'win32') {
-        child.kill('SIGTERM');
+        try { child.kill('SIGTERM'); } catch { }
+        try { require('child_process').execSync(`taskkill /pid ${child.pid} /t /f`, { stdio: 'ignore' }); } catch { try { child.kill('SIGKILL'); } catch { } }
       } else if (child.pid) {
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+        try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { } }
+        killTimer = setTimeout(() => {
+          if (!child.pid) return;
+          try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { } }
+        }, 2000);
+        killTimer.unref?.();
       } else {
-        child.kill('SIGTERM');
+        try { child.kill('SIGTERM'); } catch { }
       }
     };
+    const timer = setTimeout(() => {
+      finish(() => {
+        terminateTree();
+        reject(new Error(`Command timed out after ${timeoutMs / 1000}s.\n${output}`));
+      });
+    }, timeoutMs);
+    const abort = () => {
+      finish(() => {
+        terminateTree();
+        reject(new Error('Command aborted.'));
+      });
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
     signal?.addEventListener('abort', abort, { once: true });
-    child.on('error', error => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(error); });
-    child.on('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', abort); code === 0 ? resolve(output || '(command completed with no output)') : reject(new Error(`Command exited with code ${code}.\n${output}`)); });
+    child.on('error', error => finish(() => reject(error)));
+    child.on('close', code => finish(() => { code === 0 ? resolve(output || '(command completed with no output)') : reject(new Error(`Command exited with code ${code}.\n${output}`)); }));
   });
 }
 

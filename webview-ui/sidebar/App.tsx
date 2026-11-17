@@ -681,7 +681,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, running, p
   const renderItems = (items: RenderItem[], live: boolean) => {
     return items.map((block, index) => {
       if (block.kind === "explore-group") return <ExploringSection key={index} tools={block.tools}
-        live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} />;
+        live={live && index === items.length - 1} onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} onDecide={onDecide} />;
       if (block.kind === "text") return <div className="block-group" key={index}><Markdown text={block.text} /></div>;
       if (block.kind === "thinking") return <ThinkingCard key={index} block={block} />;
       if (block.kind === "error") return <div className="block-group" key={index}><ErrorCard block={block} /></div>;
@@ -752,7 +752,7 @@ function SubagentChat({
           ) : (
             groupBlocks(sub).map((b, bi) =>
               b.kind === "explore-group" ? (
-                <ExploringSection key={bi} tools={b.tools} />
+                <ExploringSection key={bi} tools={b.tools} approvals={approvals} onDecide={onDecide} />
               ) : b.kind === "text" ? (
                 <div className="block-group" key={bi}><Markdown text={b.text} /></div>
               ) : b.kind === "thinking" ? (
@@ -780,7 +780,7 @@ function SubagentChat({
           {pinnedApprovals.length > 0 && (
             <div className="subagent-approvals">
               {pinnedApprovals.map((r) => (
-                <ApprovalCard key={r.requestId} request={r} />
+                <ApprovalCard key={r.requestId} request={r} onDecide={onDecide} />
               ))}
             </div>
           )}
@@ -1112,7 +1112,14 @@ export function App() {
   }, []);
   const queueComposerWrite = React.useCallback(() => {
     if (!workspaceReady.current) return;
-    composerPending.current = Object.fromEntries(draftsRef.current);
+    composerPending.current = Object.fromEntries(
+      Array.from(draftsRef.current.entries()).map(([key, entry]) => [
+        key,
+        entry.attachments.some((att) => att.data && att.data.length > 65_536)
+          ? { ...entry, attachments: entry.attachments.map((att) => (att.data && att.data.length > 65_536 ? { ...att, data: "" } : att)) }
+          : entry,
+      ]),
+    );
     if (composerWriteTimer.current) clearTimeout(composerWriteTimer.current);
     composerWriteTimer.current = setTimeout(flushComposerState, 250);
   }, [flushComposerState]);
@@ -1130,12 +1137,14 @@ export function App() {
     };
   }, [flushComposerState]);
   const setTabDraft = React.useCallback((id: string, d: ComposerDraft) => {
+    const had = draftsRef.current.has(id);
     const empty = !d.text.trim() && d.attachments.length === 0;
     if (empty) draftsRef.current.delete(id);
     else draftsRef.current.set(id, d);
     queueComposerWrite();
-    // Keep a New Chat tab pinned while its composer has content.
-    if (id === "") {
+    // Keep a New Chat tab pinned while its composer has content, without forcing
+    // a full-App re-render once its tab presence already matches.
+    if (id === "" && had !== !empty) {
       setOpenTabs((t) => {
         if (!empty && !t.includes("")) return [...t, ""];
         if (empty && t.includes("") && activeIdRef.current) return t.filter((x) => x !== "");
@@ -1451,17 +1460,28 @@ export function App() {
       // A long transcript keeps growing after this pass (markdown, code blocks,
       // tool cards laying out), so re-snap for a few frames until it settles.
       // ponytail: frame-count heuristic; swap for a ResizeObserver if it drifts.
-      let n = 12;
+      let n = 4;
+      let lastHeight = el.scrollHeight;
+      let stableFrames = 0;
+      let rafId = 0;
+      let cancelled = false;
       const snap = () => {
+        if (cancelled) return;
         const c = scrollRef.current;
         if (!c || !stickRef.current) return;
+        const h = c.scrollHeight;
         selfScrollRef.current = true;
-        c.scrollTop = c.scrollHeight;
+        c.scrollTop = h;
         selfScrollRef.current = false;
-        if (n-- > 0) requestAnimationFrame(snap);
+        if (h === lastHeight) stableFrames += 1;
+        else { lastHeight = h; stableFrames = 0; }
+        if (--n > 0 && stableFrames < 2) rafId = requestAnimationFrame(snap);
       };
-      requestAnimationFrame(snap);
-      return;
+      rafId = requestAnimationFrame(snap);
+      return () => {
+        cancelled = true;
+        cancelAnimationFrame(rafId);
+      };
     }
     if (pinTopRef.current) {
       pinTopRef.current = false;
@@ -1590,37 +1610,40 @@ export function App() {
           force();
           break;
         case "workflowState": {
-          const next = new Map<string, (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[]>();
-          const ids = new Set([...Object.keys(msg.queues), ...Object.keys(msg.steeringQueues ?? {}), ...pendingSteeringRef.current.keys()]);
-          for (const id of ids) {
-            const rows = [...msg.queues[id] ?? []] as (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[];
-            const previous = queueRef.current.get(id) ?? [];
-            const mailbox = msg.steeringQueues?.[id] ?? [];
-            const waiting = new Map((pendingSteeringRef.current.get(id) ?? new Map()).entries());
-            for (const item of mailbox) waiting.set(item.id, item);
-            // The host's list is authoritative. A pending marker for an entry the
-            // host no longer lists has been answered or dropped — leaving it would
-            // keep a "Steering…" row on screen for the rest of the session, waiting
-            // for an event that is never coming.
-            const pending = pendingSteeringRef.current.get(id);
-            if (pending) {
-              for (const pendingId of [...pending.keys()]) {
-                if (!rows.some(row => row.id === pendingId) && !mailbox.some(entry => entry.id === pendingId)) pending.delete(pendingId);
+          if (msg.queues !== undefined) {
+            const queues = msg.queues;
+            const next = new Map<string, (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[]>();
+            const ids = new Set([...Object.keys(queues), ...Object.keys(msg.steeringQueues ?? {}), ...pendingSteeringRef.current.keys()]);
+            for (const id of ids) {
+              const rows = [...queues[id] ?? []] as (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[];
+              const previous = queueRef.current.get(id) ?? [];
+              const mailbox = msg.steeringQueues?.[id] ?? [];
+              const waiting = new Map((pendingSteeringRef.current.get(id) ?? new Map()).entries());
+              for (const item of mailbox) waiting.set(item.id, item);
+              // The host's list is authoritative. A pending marker for an entry the
+              // host no longer lists has been answered or dropped — leaving it would
+              // keep a "Steering…" row on screen for the rest of the session, waiting
+              // for an event that is never coming.
+              const pending = pendingSteeringRef.current.get(id);
+              if (pending) {
+                for (const pendingId of [...pending.keys()]) {
+                  if (!rows.some(row => row.id === pendingId) && !mailbox.some(entry => entry.id === pendingId)) pending.delete(pendingId);
+                }
+                if (!pending.size) pendingSteeringRef.current.delete(id);
               }
-              if (!pending.size) pendingSteeringRef.current.delete(id);
+              for (const item of waiting.values()) {
+                if (!pendingSteeringRef.current.get(id)?.has(item.id) && !mailbox.some(entry => entry.id === item.id)) continue;
+                if (rows.some(row => row.id === item.id)) continue;
+                const index = previous.findIndex(row => row.id === item.id);
+                rows.splice(index < 0 ? rows.length : Math.min(index, rows.length), 0, {
+                  ...item, steering: mailbox.some(entry => entry.id === item.id),
+                  optimisticSteering: !mailbox.some(entry => entry.id === item.id),
+                });
+              }
+              next.set(id, rows);
             }
-            for (const item of waiting.values()) {
-              if (!pendingSteeringRef.current.get(id)?.has(item.id) && !mailbox.some(entry => entry.id === item.id)) continue;
-              if (rows.some(row => row.id === item.id)) continue;
-              const index = previous.findIndex(row => row.id === item.id);
-              rows.splice(index < 0 ? rows.length : Math.min(index, rows.length), 0, {
-                ...item, steering: mailbox.some(entry => entry.id === item.id),
-                optimisticSteering: !mailbox.some(entry => entry.id === item.id),
-              });
-            }
-            next.set(id, rows);
+            queueRef.current = next;
           }
-          queueRef.current = next;
           setGoals(msg.goals);
           force();
           break;
@@ -1939,6 +1962,33 @@ export function App() {
             force();
           } else {
             scheduleForce();
+          }
+          break;
+        }
+        case "shortcut": {
+          if (msg.action === "clearComposer") {
+            const k = uiPrefsRef.current.perTabDrafts ? (activeIdRef.current ?? "") : SHARED_DRAFT;
+            draftsRef.current.delete(k);
+            setDraft({ text: "", attachments: [] });
+            queueComposerWrite();
+          } else if (msg.action === "copyLast") {
+            const list = sessionsRef.current.get(activeIdRef.current ?? "")?.turns ?? [];
+            for (let i = list.length - 1; i >= 0; i--) {
+              const t = list[i];
+              if (t.role === "assistant") {
+                const txt = responseText(t.blocks);
+                if (txt) void copyText(txt);
+                break;
+              }
+            }
+          } else if (msg.action === "newLine") {
+            const editor = document.querySelector<HTMLElement>(".composer .editor");
+            if (editor) {
+              editor.focus();
+              editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
+            }
+          } else if (msg.action === "shortcuts") {
+            post({ type: "openSettings", section: "general" });
           }
           break;
         }
@@ -2433,7 +2483,7 @@ export function App() {
         </div>
       ); })()}
       {activeId && goals[activeId] && <GoalBanner goal={goals[activeId]} onStatus={(status) => post({ type: "setGoalStatus", convId: activeId, status })} />}
-      {workspaceRoot && <div className="worktree-banner" title={workspaceRoot}><Icon name="gitBranch" size={12} /><span>Isolated worktree · {workspaceRoot.split(/[\\/]/).pop()}</span><button className="btn-ghost" onClick={() => post({ type: "openMention", kind: "folder", path: workspaceRoot })}>Show folder</button></div>}
+      {workspaceRoot && /[\\/]\.sleepycode[\\/]worktrees[\\/]/.test(workspaceRoot) && <div className="worktree-banner" title={workspaceRoot}><Icon name="gitBranch" size={12} /><span>Isolated worktree · {workspaceRoot.split(/[\\/]/).pop()}</span><button className="btn-ghost" onClick={() => post({ type: "openMention", kind: "folder", path: workspaceRoot })}>Show folder</button></div>}
       {workflowDialog && <WorkflowDialog kind={workflowDialog} onClose={() => setWorkflowDialog(null)}
         onGoal={(objective, tokenBudget) => post({ type: "setGoal", convId: activeId, objective, tokenBudget })}
         onReview={(target) => post({ type: "startReview", target })}

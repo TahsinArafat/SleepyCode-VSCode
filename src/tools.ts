@@ -137,11 +137,11 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
         // Only the requested window is returned, but nothing is lost: the full
         // text is archived and reachable through obs_recall when it was truncated.
         const lastLine = startLine + slice.length;
+        const capped = await capObservation(ctx.observationsDir(), 'read_file', body);
         if (lastLine < allLines.length) {
-          const capped = await capObservation(ctx.observationsDir(), 'read_file', body);
           return `${capped.text}\n\n[showing lines ${startLine + 1}-${lastLine} of ${allLines.length}. Call read_file again with offset=${lastLine} for the next page.]`;
         }
-        return body;
+        return capped.text;
       },
     }),
     obs_recall: tool({

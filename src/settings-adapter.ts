@@ -760,14 +760,12 @@ export function skillFolderFromPath(skillsRoot: string, skillFilePath: unknown):
   const file = normalizePath(skillFilePath);
   const root = normalizePath(skillsRoot);
   if (!isInside(root, file)) return null;
-  const rest = file.slice(root.length + 1).split('/');
-  // Exactly `<folder>/<SKILL.md>`: a file directly in the root is not a skill.
-  if (rest.length !== 2 || !rest[0]) return null;
-  // `skills.ts` owns the canonical list, but it imports `vscode` and this module
-  // is part of the browser bundle — so the comparison is case-insensitive here
-  // and `test/settings-adapter.direct.mjs` asserts it still matches the real list.
-  if (rest[1]!.toLowerCase() !== 'skill.md') return null;
-  return rest[0]!;
+  const trimmed = file.slice(root.length + 1);
+  const rest = trimmed ? trimmed.split('/') : [];
+  // Accepts `<folder>/<SKILL.md>` or vendor-namespaced `<vendor>/<folder>/<SKILL.md>`.
+  if ((rest.length !== 2 && rest.length !== 3) || !rest.slice(0, -1).every(Boolean)) return null;
+  if (rest[rest.length - 1]!.toLowerCase() !== 'skill.md') return null;
+  return rest.slice(0, -1).join('/');
 }
 
 /**

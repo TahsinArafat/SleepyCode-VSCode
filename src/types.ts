@@ -90,7 +90,7 @@ export type WebMessage =
   | { type: 'pasteImage'; dataUrl: string; mimeType: string; name: string; size: number }
   | { type: 'dropFiles'; paths: string[] }
   | { type: 'removeAttachment'; index: number }
-  | { type: 'fileMentionQuery'; query: string }
+  | { type: 'fileMentionQuery'; query: string; requestId?: number }
   | { type: 'openMemory' }
   | { type: 'revealInOS' }
   | { type: 'revealSkill'; folder: string }
@@ -128,6 +128,12 @@ export type WebMessage =
 export type WorkItem = {
   kind: 'reasoning' | 'task' | 'plan';
   text: string;
+  /** Tool call identifier so restored conversations preserve distinct callIds and question targets. */
+  id?: string;
+  /** Compact bounded tool input (omitting huge file bodies). */
+  input?: Record<string, unknown>;
+  /** Unified diff for file edit calls, so edit diffs survive reload. */
+  diff?: string;
   /** Raw tool name (e.g. "read_file") used to pick the row icon in the chat. */
   tool?: string;
   done?: boolean;
@@ -409,8 +415,12 @@ export type McpConnectionStatus = {
 };
 
 export type ContextAttachment = {
-  kind: 'file' | 'folder';
+  kind: 'file' | 'folder' | 'link';
   path: string;
+  name?: string;
+  text?: string;
+  mimeType?: string;
+  size?: number;
 };
 
 export type ImageAttachment = {

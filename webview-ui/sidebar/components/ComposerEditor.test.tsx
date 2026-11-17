@@ -14,7 +14,7 @@ import { ComposerEditor, type ComposerCodeBlock } from "./ComposerEditor";
 let element: HTMLDivElement;
 let editor: ComposerEditor;
 let blocks: ComposerCodeBlock[];
-let changes: ReturnType<typeof vi.fn>;
+let changes: ReturnType<typeof vi.fn<() => void>>;
 let ctrlEnter = false;
 
 function placeCaret(node: Node, offset = node.textContent?.length || 0) {
@@ -32,7 +32,7 @@ function key(name: string, options: KeyboardEventInit = {}) {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers(); ctrlEnter = false; blocks = []; changes = vi.fn();
+  vi.useFakeTimers(); ctrlEnter = false; blocks = []; changes = vi.fn<() => void>();
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Range.prototype.getBoundingClientRect = () => new DOMRect();
   element = document.createElement("div"); document.body.append(element);

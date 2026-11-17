@@ -372,7 +372,10 @@ export class ComposerEditor {
       handleDOMEvents: {
         keydown: (view, event) => {
           if (event.isComposing || event.keyCode === 229 || view.composing || this.options.shouldHandleKeys?.() === false) return true;
-          this.importSelection();
+          const plainPrintable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+          if (!plainPrintable || !view.dom.contains(document.activeElement)) {
+            this.importSelection();
+          }
           return false;
         },
         beforeinput: (view, event) => {
@@ -441,6 +444,7 @@ export class ComposerEditor {
   }
 
   private emitCodeBlocks(): boolean {
+    if (this.codeViews.size === 0 && this.emittedCodeBlocks.length === 0) return false;
     const blocks = Array.from(this.codeViews, ([id, entry]) => ({
       id, element: entry.element, language: entry.node.attrs.language || "auto", code: entry.node.textContent,
     }));
@@ -515,6 +519,15 @@ export class ComposerEditor {
       this.serializedDoc = doc;
     }
     return this.serializedText;
+  }
+
+  getSlashCandidate(): string {
+    this.flush();
+    const doc = this.view.state.doc;
+    if (doc.childCount === 1 && doc.firstChild?.type === schema.nodes.paragraph && doc.firstChild.textContent.startsWith("/")) {
+      return doc.firstChild.textContent;
+    }
+    return "";
   }
 
   isEmpty(): boolean {

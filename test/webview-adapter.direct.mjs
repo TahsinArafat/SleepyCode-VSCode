@@ -565,8 +565,8 @@ test('openLog requests extension logs', () => {
   assert.deepEqual(adapter.toSleepyMessage({ type: 'openLog' }), { type: 'requestExtensionLogs' });
 });
 
-test('searchFiles maps to a mention query', () => {
-  assert.deepEqual(adapter.toSleepyMessage({ type: 'searchFiles', query: 'app', requestId: 1 }), { type: 'fileMentionQuery', query: 'app' });
+test('searchFiles maps to a mention query and keeps requestId', () => {
+  assert.deepEqual(adapter.toSleepyMessage({ type: 'searchFiles', query: 'app', requestId: 1 }), { type: 'fileMentionQuery', query: 'app', requestId: 1 });
 });
 
 test('selectConversation maps to openConversation', () => {
@@ -675,7 +675,7 @@ test('sendMessage carries attachments through to the host', () => {
   assert.equal(out.attachments[0].name, 'shot.png');
 });
 
-test('image attachments are split out for materialising', () => {
+test('image and text attachments are split cleanly', () => {
   const split = adapter.reactAttachmentsOf([
     { id: '1', name: 'shot.png', mime: 'image/png', data: 'data:image/png;base64,AAA', kind: 'image' },
     { id: '2', name: 'notes.txt', mime: 'text/plain', data: 'hello', kind: 'text' },
@@ -683,7 +683,8 @@ test('image attachments are split out for materialising', () => {
   assert.equal(split.images.length, 1);
   assert.equal(split.images[0].dataUrl, 'data:image/png;base64,AAA');
   assert.equal(split.images[0].mimeType, 'image/png');
-  assert.equal(split.files.length, 0);
+  assert.equal(split.files.length, 1);
+  assert.equal(split.files[0].name, 'notes.txt');
 });
 
 test('non-image and malformed attachments are not treated as images', () => {
@@ -2325,4 +2326,62 @@ test('a model listed twice is offered once', () => {
   const out = adapter.modelOptionsPayload([{ models: [{ id: 'm' }, { id: 'm' }] }], undefined);
   assert.deepEqual(out.models, ['m']);
   assert.equal(out.modelList.length, 1);
+});
+
+test('sendMessage forwards fromIndex and revertFiles for turn edits', () => {
+  const out = adapter.toSleepyMessage({
+    type: 'sendMessage',
+    convId: 'c1',
+    text: 'edited prompt',
+    fromIndex: 2,
+    revertFiles: true,
+  });
+  assert.equal(out.type, 'send');
+  assert.equal(out.fromIndex, 2);
+  assert.equal(out.revertFiles, true);
+});
+
+test('resolveApproval translates cliperm ids into resolveCliPermission', () => {
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'resolveApproval', requestId: 'cliperm:7', approve: true, session: true }),
+    { type: 'resolveCliPermission', requestId: 'cliperm:7', approve: true, session: true },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'resolveApproval', requestId: 'cliperm:8', approve: false, session: false }),
+    { type: 'resolveCliPermission', requestId: 'cliperm:8', approve: false, session: false },
+  );
+});
+
+test('openMention distinguishes links/folders from file paths', () => {
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'openMention', kind: 'link', path: 'https://example.com' }),
+    { type: 'openMention', kind: 'link', path: 'https://example.com' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'openMention', kind: 'folder', path: 'src/shared' }),
+    { type: 'openMention', kind: 'folder', path: 'src/shared' },
+  );
+  assert.deepEqual(
+    adapter.toSleepyMessage({ type: 'openMention', kind: 'file', path: 'src/a.ts' }),
+    { type: 'openFile', path: 'src/a.ts' },
+  );
+});
+
+test('maxSteps preserves max-tokens and max-steps reasons', () => {
+  const maxTokens = adapter.toReactMessage({ type: 'maxSteps', conversationId: 'c1', steps: 0, reason: 'max-tokens' });
+  assert.equal(maxTokens.event.type, 'max-steps');
+  assert.equal(maxTokens.event.reason, 'max-tokens');
+
+  const maxSteps = adapter.toReactMessage({ type: 'maxSteps', conversationId: 'c1', steps: 50, reason: 'max-steps' });
+  assert.equal(maxSteps.event.type, 'max-steps');
+  assert.equal(maxSteps.event.steps, 50);
+  assert.equal(maxSteps.event.reason, 'max-steps');
+});
+
+test('shortcut passes through to React webview', () => {
+  assert.deepEqual(
+    adapter.toReactMessage({ type: 'shortcut', action: 'clearComposer' }),
+    { type: 'shortcut', action: 'clearComposer' },
+  );
+  assert.equal(adapter.toReactMessage({ type: 'shortcut' }), null);
 });

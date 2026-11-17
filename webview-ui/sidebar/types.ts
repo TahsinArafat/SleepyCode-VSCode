@@ -121,7 +121,8 @@ export type EffortOption = { id: string; label: string; hint: string };
 export type AgentOption = { id: string; name: string; role: string; description: string; builtIn: boolean };
 export type InMessage =
   | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; reasoningEffort?: string; reasoningEfforts?: EffortOption[]; agentId?: string; agentOptions?: AgentOption[] }
-  | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
+  | { type: "workflowState"; queues?: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
+  | { type: "shortcut"; action: string }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
   | { type: "steeringAccepted"; convId: string }

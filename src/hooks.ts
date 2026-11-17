@@ -107,16 +107,30 @@ function nextCronAt(cron: string, fromMs: number): number {
   const candidate = new Date(fromMs);
   candidate.setUTCSeconds(0, 0);
   candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
-  for (let checked = 0; checked < 527_040; checked++) {
+  const limitMs = candidate.getTime() + 527_040 * 60_000;
+  for (let steps = 0; steps < 2_000 && candidate.getTime() < limitMs; steps++) {
+    if (!cronFieldMatches(month, candidate.getUTCMonth() + 1, 1, 12)) {
+      candidate.setUTCMonth(candidate.getUTCMonth() + 1, 1);
+      candidate.setUTCHours(0, 0, 0, 0);
+      continue;
+    }
     if (
-      cronFieldMatches(minute, candidate.getUTCMinutes(), 0, 59) &&
-      cronFieldMatches(hour, candidate.getUTCHours(), 0, 23) &&
-      cronFieldMatches(day, candidate.getUTCDate(), 1, 31) &&
-      cronFieldMatches(month, candidate.getUTCMonth() + 1, 1, 12) &&
-      cronFieldMatches(weekday, candidate.getUTCDay(), 0, 6)
-    )
-      return candidate.getTime();
-    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+      !cronFieldMatches(day, candidate.getUTCDate(), 1, 31) ||
+      !cronFieldMatches(weekday, candidate.getUTCDay(), 0, 6)
+    ) {
+      candidate.setUTCDate(candidate.getUTCDate() + 1);
+      candidate.setUTCHours(0, 0, 0, 0);
+      continue;
+    }
+    if (!cronFieldMatches(hour, candidate.getUTCHours(), 0, 23)) {
+      candidate.setUTCHours(candidate.getUTCHours() + 1, 0, 0, 0);
+      continue;
+    }
+    if (!cronFieldMatches(minute, candidate.getUTCMinutes(), 0, 59)) {
+      candidate.setUTCMinutes(candidate.getUTCMinutes() + 1, 0, 0);
+      continue;
+    }
+    return candidate.getTime();
   }
   return fromMs + 3_600_000;
 }

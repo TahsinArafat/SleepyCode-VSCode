@@ -35,7 +35,7 @@ export interface SlashOutcome {
   kind: 'messages' | 'prompt' | 'control';
   messages?: Record<string, unknown>[];
   text?: string;
-  control?: 'context' | 'model' | 'agent' | 'approval';
+  control?: 'context' | 'model' | 'agent' | 'approval' | 'effort';
 }
 
 /**
@@ -55,9 +55,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 
   // Session — what happens to this conversation.
   { id: '/new', label: 'New conversation', description: 'Start a fresh conversation in this workspace.', group: 'Session' },
+  { id: '/clear', label: 'Clear conversation', description: 'Start a fresh conversation in this workspace.', group: 'Session' },
   { id: '/compact', label: 'Compact conversation', description: 'Summarize earlier messages to free context.', group: 'Session' },
   { id: '/context', label: 'Request context', description: 'Choose what the next message includes.', group: 'Session' },
   { id: '/model', label: 'Choose model', description: 'Pick the model for this conversation.', group: 'Session' },
+  { id: '/effort', label: 'Reasoning effort', description: 'Choose how much reasoning effort the model uses.', group: 'Session' },
   { id: '/agent', label: 'Choose agent', description: 'Pick which agent handles the next message.', group: 'Session' },
   { id: '/permissions', label: 'Approval mode', description: 'Choose when the agent may act without asking.', group: 'Session' },
 
@@ -149,6 +151,7 @@ export function runSlashCommand(name: string, args: string, context: SlashContex
 
   switch (name) {
     case '/new':
+    case '/clear':
       return { kind: 'messages', messages: [{ type: 'newConversation' }] };
     case '/compact':
       if (!conversationId || context.running) return null;
@@ -170,6 +173,8 @@ export function runSlashCommand(name: string, args: string, context: SlashContex
       return { kind: 'control', control: 'context' };
     case '/model':
       return { kind: 'control', control: 'model' };
+    case '/effort':
+      return { kind: 'control', control: 'effort' };
     case '/agent':
       return { kind: 'control', control: 'agent' };
     case '/permissions':

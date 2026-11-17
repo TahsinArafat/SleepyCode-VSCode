@@ -43,8 +43,44 @@ export const DEFAULT_IGNORE = new Set([
   '.turbo',
   'vendor',
   '.venv',
+  'venv',
+  'target',
+  '.cache',
+  '.nuxt',
+  '.svelte-kit',
+  '.gradle',
+  '.pytest_cache',
+  '.mypy_cache',
+  'Pods',
+  '.codegraph',
+  '.witdiff',
+  '.ui-shots',
   '__pycache__',
 ]);
+
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz', '.bmp', '.tiff', '.avif',
+  '.pdf', '.zip', '.gz', '.bz2', '.xz', '.tar', '.7z', '.rar',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.mp4', '.mp3', '.wav', '.ogg', '.flac', '.mov', '.avi', '.webm',
+  '.sqlite', '.sqlite3', '.db', '.wal', '.shm',
+  '.wasm', '.node', '.so', '.dylib', '.dll', '.exe', '.bin', '.vsix', '.lockb', '.parquet',
+  '.pyc', '.pyo', '.class', '.jar', '.o', '.a', '.map',
+]);
+
+export function isBinaryPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+  const ext = path.posix.extname(normalized);
+  return ext ? BINARY_EXTENSIONS.has(ext) : false;
+}
+
+export function isIgnoredRelativePath(relativePath: string, ignore: Set<string> = DEFAULT_IGNORE): boolean {
+  const parts = relativePath.replace(/\\/g, '/').split('/');
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (parts[i] && ignore.has(parts[i]!)) return true;
+  }
+  return false;
+}
 
 export function hashContent(content: string): string {
   let hash = 0x811c9dc5;
@@ -124,14 +160,30 @@ const SYMBOL_PATTERNS: { kind: string; re: RegExp }[] = [
 
 export function extractSymbols(content: string, filePath: string): SymbolEntry[] {
   const symbols: SymbolEntry[] = [];
+  let lineStarts: number[] | undefined;
+  const lineOf = (offset: number): number => {
+    if (!lineStarts) {
+      lineStarts = [0];
+      for (let i = 0; i < content.length; i += 1) {
+        if (content.charCodeAt(i) === 10) lineStarts.push(i + 1);
+      }
+    }
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (lineStarts[mid]! <= offset) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
   for (const pattern of SYMBOL_PATTERNS) {
     const re = new RegExp(pattern.re.source, 'g');
     let m: RegExpExecArray | null;
     while ((m = re.exec(content))) {
       const name = m[1];
       if (!name) continue;
-      const line = content.slice(0, m.index).split('\n').length;
-      symbols.push({ name, kind: pattern.kind, line, path: filePath });
+      symbols.push({ name, kind: pattern.kind, line: lineOf(m.index), path: filePath });
     }
   }
   const seen = new Set<string>();
@@ -172,7 +224,7 @@ function resolveImport(importer: string, spec: string, files: Map<string, boolea
 
 export class RepoIndex {
   private entries: FileEntry[] = [];
-  private byPath = new Map<string, string>();
+  private indexByPath = new Map<string, number>();
   private termIndex = new Map<string, Map<string, number>>();
   private symbols: SymbolEntry[] = [];
   private docFrequency = new Map<string, number>();
@@ -194,31 +246,42 @@ export class RepoIndex {
 
   ingest(entries: FileEntry[]): void {
     for (const entry of entries) {
-      this.entries.push(entry);
-      this.byPath.set(entry.path, entry.content);
+      if (entry.content.includes('\u0000')) continue;
+      const existingIdx = this.indexByPath.get(entry.path);
+      if (existingIdx !== undefined) {
+        this.entries[existingIdx] = entry;
+      } else {
+        this.indexByPath.set(entry.path, this.entries.length);
+        this.entries.push(entry);
+      }
     }
     this.symbolsStale = true;
   }
 
   upsert(entry: FileEntry): void {
-    const existing = this.byPath.has(entry.path);
-    if (existing) {
-      // Replace in place instead of filtering the whole array: `filter` copied every entry
-      // on a single-file save, which is O(files) per keystroke-save on a large workspace.
-      const at = this.entries.findIndex((item) => item.path === entry.path);
-      if (at >= 0) this.entries[at] = entry;
-      else this.entries.push(entry);
+    if (entry.content.includes('\u0000')) {
+      this.remove(entry.path);
+      return;
+    }
+    const existingIdx = this.indexByPath.get(entry.path);
+    if (existingIdx !== undefined) {
+      this.entries[existingIdx] = entry;
     } else {
+      this.indexByPath.set(entry.path, this.entries.length);
       this.entries.push(entry);
     }
-    this.byPath.set(entry.path, entry.content);
     this.invalidateDerived();
   }
 
   remove(filePath: string): void {
-    const at = this.entries.findIndex((item) => item.path === filePath);
-    if (at >= 0) this.entries.splice(at, 1);
-    this.byPath.delete(filePath);
+    const at = this.indexByPath.get(filePath);
+    if (at !== undefined) {
+      this.entries.splice(at, 1);
+      this.indexByPath.delete(filePath);
+      for (let i = at; i < this.entries.length; i += 1) {
+        this.indexByPath.set(this.entries[i]!.path, i);
+      }
+    }
     this.invalidateDerived();
   }
 
@@ -257,6 +320,7 @@ export class RepoIndex {
   symbolSearch(query: string, topK = 25): SymbolEntry[] {
     const q = query.trim().toLowerCase();
     if (!q) return [];
+    if (this.symbolsStale) this.indexSymbols();
     return this.symbols
       .map((s) => ({ s, score: this.symbolScore(s, q) }))
       .filter((x) => x.score > 0)
@@ -312,7 +376,8 @@ export class RepoIndex {
   }
 
   private snippetFor(filePath: string, terms: string[]): string {
-    const content = this.byPath.get(filePath) ?? '';
+    const idx = this.indexByPath.get(filePath);
+    const content = idx === undefined ? '' : (this.entries[idx]?.content ?? '');
     const lines = content.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const lower = (lines[i] ?? '').toLowerCase();
@@ -343,8 +408,9 @@ export class RepoIndex {
   }
 }
 
-/** Upper bound on indexed files. Without it a large workspace reads unbounded content into memory. */
+/** Upper bound on indexed files and total raw bytes read into memory. */
 export const SCAN_MAX_FILES = 4_000;
+export const SCAN_MAX_TOTAL_BYTES = 32_000_000;
 
 /**
  * Reads the workspace into memory for indexing. Async on purpose: the previous synchronous
@@ -359,6 +425,7 @@ export async function scanWorkspace(
   maxFiles = SCAN_MAX_FILES,
 ): Promise<FileEntry[]> {
   const out: FileEntry[] = [];
+  let totalBytes = 0;
   const walk = async (dir: string): Promise<void> => {
     let entries: string[] = [];
     try {
@@ -368,18 +435,22 @@ export async function scanWorkspace(
     }
     for (const name of entries) {
       if (ignore.has(name)) continue;
-      if (out.length >= maxFiles) return;
+      if (out.length >= maxFiles || totalBytes >= SCAN_MAX_TOTAL_BYTES) return;
       const full = path.join(dir, name);
       let stat;
       try {
-        stat = await fsp.stat(full);
+        stat = await fsp.lstat(full);
       } catch {
         continue;
       }
+      if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) await walk(full);
-      else if (stat.isFile() && stat.size <= maxBytes) {
+      else if (stat.isFile() && stat.size <= maxBytes && !isBinaryPath(name) && totalBytes + stat.size <= SCAN_MAX_TOTAL_BYTES) {
         try {
-          out.push({ path: path.relative(root, full), content: await fsp.readFile(full, 'utf8') });
+          const buf = await fsp.readFile(full);
+          if (buf.includes(0)) continue;
+          totalBytes += stat.size;
+          out.push({ path: path.relative(root, full), content: buf.toString('utf8') });
         } catch {}
       }
     }

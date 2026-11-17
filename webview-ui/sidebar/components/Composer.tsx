@@ -10,6 +10,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Icon, IconName, iconMarkup } from "../../shared/icons";
+import { decodeFontChar, getCachedFileIcon, subscribeFileIcon } from "../../shared/fileIcons";
 import { vscode } from "../../shared/vscode";
 import { usePresence } from "../../shared/usePresence";
 import { ImagePreview } from "../../shared/ImagePreview";
@@ -74,31 +75,6 @@ function activateFromKeyboard(event: React.KeyboardEvent<HTMLElement>, activate:
 export const KIND_SVG: Record<string, string> = Object.fromEntries(Object.entries(KIND_ICON).map(([kind, icon]) => [kind, iconMarkup(icon)]));
 const X_SVG = iconMarkup("close");
 
-// Cache of IDE file-icon lookups shared by all pills (host resolves them from
-// the active icon theme; same protocol as Tool.tsx).
-const pillIconCache = new Map<string, FileIconInfo | null>();
-const pillIconWaiters = new Map<string, ((i: FileIconInfo | null) => void)[]>();
-const pillLoadedFonts = new Set<string>();
-window.addEventListener("message", (e: MessageEvent) => {
-  const m = e.data;
-  if (m?.type !== "fileIcon") return;
-  const icon: FileIconInfo | null = m.icon || null;
-  pillIconCache.set(m.filename, icon);
-  if (icon?.kind === "font" && !pillLoadedFonts.has(icon.fontFamily)) {
-    pillLoadedFonts.add(icon.fontFamily);
-    const style = document.createElement("style");
-    style.textContent = `@font-face { font-family: "${icon.fontFamily}"; src: url("${icon.src}") format("${icon.format}"); }`;
-    document.head.appendChild(style);
-  }
-  (pillIconWaiters.get(m.filename) || []).forEach((fn) => fn(icon));
-  pillIconWaiters.delete(m.filename);
-});
-
-function decodePillFontChar(ch: string): string {
-  const m = ch.match(/^\\+([0-9a-fA-F]{4,6})$/);
-  return m ? String.fromCodePoint(parseInt(m[1], 16)) : ch;
-}
-
 /** Fill `el` with the IDE's exact file icon once resolved (async). */
 export function applyFileIconTo(el: HTMLElement, path: string) {
   const filename = (path.split(/[\\/]/).pop() || path).replace(/:\d+(-\d+)?$/, "").toLowerCase();
@@ -118,16 +94,16 @@ export function applyFileIconTo(el: HTMLElement, path: string) {
       span.style.fontFamily = icon.fontFamily;
       if (icon.color) span.style.color = icon.color;
       if (icon.size) span.style.fontSize = icon.size;
-      span.textContent = decodePillFontChar(icon.char);
+      span.textContent = decodeFontChar(icon.char);
       el.appendChild(span);
     }
   };
-  if (pillIconCache.has(filename)) {
-    render(pillIconCache.get(filename) ?? null);
+  const cached = getCachedFileIcon(filename);
+  if (cached !== undefined) {
+    render(cached);
     return;
   }
-  pillIconWaiters.set(filename, [...(pillIconWaiters.get(filename) || []), render]);
-  post({ type: "getFileIcon", filename });
+  subscribeFileIcon(filename, render);
 }
 
 let mentionReqId = 0;
@@ -1267,7 +1243,7 @@ function ModelPicker({
 
 export type ComposerDraft = { text: string; attachments: Attachment[] };
 
-export function Composer({
+export const Composer = React.memo(function Composer({
   mode,
   onMode,
   models,
@@ -1372,7 +1348,7 @@ export function Composer({
   /** Slash commands post these directly, since they are not messages the user wrote. */
   onCommand?: (message: OutMessage) => void;
   /** Slash commands that open a composer control instead of posting anything. */
-  onOpenControl?: (control: "context" | "model" | "agent" | "approval") => void;
+  onOpenControl?: (control: "context" | "model" | "agent" | "approval" | "effort") => void;
   activeConversationId?: string;
   /** Which composer control a slash command asked to open, and a token that changes
    * each time — the pickers open on the token rather than guessing. */
@@ -1434,7 +1410,7 @@ export function Composer({
   // True while a Ctrl+Shift+V paste is in flight (paste as plain text, no link pills).
   const plainPasteRef = React.useRef(false);
   // Paste held back while the host checks if it matches project code.
-  const pastePendingRef = React.useRef<{ id: number; text: string } | null>(null);
+  const pastePendingRef = React.useRef<{ id: number; text: string; plain: boolean; timer: ReturnType<typeof setTimeout> } | null>(null);
   // Set after detectMention is defined (insert fns are declared before it).
   const detectMentionRef = React.useRef<(() => void) | null>(null);
   // Walk position for Up/Down prompt recall. Refs, not state: changing it must
@@ -1453,7 +1429,7 @@ export function Composer({
     if (!element) return;
     const editor = new ComposerEditor(element, {
       createMention: makeMentionEl,
-      onChange: () => { refreshEmpty(); setSlashText(richEditor.current?.getText() ?? ""); detectMentionRef.current?.(); emitDraft(); },
+      onChange: () => { refreshEmpty(); setSlashText(richEditor.current?.getSlashCandidate() ?? ""); detectMentionRef.current?.(); emitDraft(); },
       onCodeBlocks: setCodeBlocks,
       submitWithCtrlEnter: () => !!submitWithCtrlEnterRef.current,
       onSubmit: () => submitRef.current(),
@@ -1809,12 +1785,19 @@ export function Composer({
         // Host checked the pasted text against project files.
         const pending = pastePendingRef.current;
         pastePendingRef.current = null;
+        clearTimeout(pending.timer);
         if (msg.mention) insertMention(msg.mention as MentionItem);
-        else insertTextAtCaret(pending.text);
+        else insertTextAtCaret(pending.text, !pending.plain);
       }
     };
     window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
+    return () => {
+      window.removeEventListener("message", handler);
+      if (pastePendingRef.current) {
+        clearTimeout(pastePendingRef.current.timer);
+        pastePendingRef.current = null;
+      }
+    };
   }, []);
 
   const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -2212,23 +2195,34 @@ export function Composer({
               const id = ++mentionReqId;
               // If a previous paste was still waiting for a host reply, insert it
               // as plain text so the user's content is never silently swallowed.
-              if (pastePendingRef.current) insertTextAtCaret(pastePendingRef.current.text);
-              pastePendingRef.current = { id, text };
+              if (pastePendingRef.current) {
+                clearTimeout(pastePendingRef.current.timer);
+                const prev = pastePendingRef.current;
+                pastePendingRef.current = null;
+                insertTextAtCaret(prev.text, !prev.plain);
+              }
               post({ type: "resolvePastedCode", text: t, requestId: id });
               // Safety net: if the host never replies (crash, reload, lost message),
-              // fall back to plain-text insertion after 2 seconds.
-              setTimeout(() => {
+              // fall back to plain-text insertion after 180ms.
+              const timer = setTimeout(() => {
                 if (pastePendingRef.current?.id === id) {
                   pastePendingRef.current = null;
                   insertTextAtCaret(text, !plain);
                 }
-              }, 2000);
+              }, 180);
+              pastePendingRef.current = { id, text, plain, timer };
               return;
             }
             insertTextAtCaret(text, !plain);
           }}
           onKeyDown={(e) => {
             if (e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (pastePendingRef.current && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key.length === 1 || e.key === "Enter")) {
+              const pending = pastePendingRef.current;
+              pastePendingRef.current = null;
+              clearTimeout(pending.timer);
+              insertTextAtCaret(pending.text, !pending.plain);
+            }
             const remove = (e.target as HTMLElement).closest(".mention-x");
             if (remove) {
               if (e.key === "Enter" || e.key === " ") {
@@ -2408,4 +2402,4 @@ export function Composer({
       <ImagePreview images={previewImages} activeId={previewImageId} onClose={() => setPreviewImageId(null)} />
     </div>
   );
-}
+});

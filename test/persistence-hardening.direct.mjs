@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { enqueuePersist, loadEach, splitProjectIndex, trimPersistedConversations } from '../src/persist-core.ts';
+import { enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, trimPersistedConversations } from '../src/persist-core.ts';
 import { assertSource } from './source-assert.mjs';
 import { MAX_TURN_UNDO } from '../src/types.ts';
 
@@ -170,4 +170,23 @@ test('archiving releases the compaction snapshot cache and un-archiving reloads 
   assertSource(agent, /sleepycode\.compactionSnapshots\.\$\{conversationId\}/);
   // Startup and un-archive share one implementation; a second copy would drift.
   assertSource(agent, /this\.loadCompactionSnapshots\(conversation\.id\);/);
+});
+
+test('estimateSerializedBytes accurately estimates UTF-8 size and guards against circular graphs', () => {
+  const sample = {
+    id: 'conv-1',
+    items: [
+      { role: 'user', text: 'hello world 😊' },
+      { role: 'assistant', text: 'response', flags: [true, false, null, 42] },
+    ],
+  };
+  const actualBytes = Buffer.byteLength(JSON.stringify(sample), 'utf8');
+  const estimated = estimateSerializedBytes(sample);
+  assert.ok(estimated >= actualBytes * 0.7 && estimated <= actualBytes * 1.5, `estimated=${estimated}, actual=${actualBytes}`);
+
+  const cyclic = { name: 'root' };
+  cyclic.self = cyclic;
+  cyclic.list = [cyclic];
+  const bounded = estimateSerializedBytes(cyclic, 200);
+  assert.ok(Number.isFinite(bounded) && bounded > 0);
 });

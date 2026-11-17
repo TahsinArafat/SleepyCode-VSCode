@@ -400,8 +400,6 @@ body {
 	/* Above menus and toasts: a blocking prompt must not be covered. */
 	z-index: 300;
 	background: color-mix(in srgb, #000 55%, transparent);
-	backdrop-filter: blur(3px);
-	-webkit-backdrop-filter: blur(3px);
 	display: flex;
 	align-items: center;
 	justify-content: center;

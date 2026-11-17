@@ -38,10 +38,19 @@ export function persistedReasoningBody(text: string): string {
   return text.replace(/^\n?…\(earlier thinking omitted\)\n?/, '').replace(/\n…\(truncated\)$/, '');
 }
 
-/** Append incoming thinking into the persist buffer without exceeding the budget. */
+/** Append incoming thinking into the persist buffer without O(N^2) concat+slice past the budget. */
 export function rememberReasoningText(previous: string, incoming: string, limit: number): { text: string; truncated: boolean } {
   if (!incoming) return clipPersistedReasoning(previous, limit);
-  return clipPersistedReasoning(`${previous}${incoming}`, limit);
+  const cap = normalizePersistedReasoningLimit(limit);
+  if (previous.length + incoming.length <= cap) {
+    return { text: `${previous}${incoming}`, truncated: false };
+  }
+  const keep = Math.max(1, cap - TRUNCATION_MARK.length);
+  if (incoming.length >= keep) {
+    return { text: `${TRUNCATION_MARK}${incoming.slice(-keep)}`, truncated: true };
+  }
+  const prevKeep = keep - incoming.length;
+  return { text: `${TRUNCATION_MARK}${previous.slice(-prevKeep)}${incoming}`, truncated: true };
 }
 
 /** Concatenate reasoning work items from one assistant turn. */

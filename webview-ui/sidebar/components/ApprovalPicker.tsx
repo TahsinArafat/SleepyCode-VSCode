@@ -32,7 +32,7 @@ export function approvalPreset(policy?: ApprovalPolicy): Preset | undefined {
   return (mode === "ask" || mode === "review" || mode === "allow") && rules.every((rule) => rule.mode === mode) ? mode : "custom";
 }
 
-export function ApprovalPicker({ policy, disabled = false, openSignal }: { policy?: ApprovalPolicy; disabled?: boolean; openSignal?: number }) {
+export const ApprovalPicker = React.memo(function ApprovalPicker({ policy, disabled = false, openSignal }: { policy?: ApprovalPolicy; disabled?: boolean; openSignal?: number }) {
   const preset = approvalPreset(policy);
   const selected = OPTIONS.find((option) => option.id === preset);
   const [open, setOpen] = React.useState(false);
@@ -140,4 +140,4 @@ export function ApprovalPicker({ policy, disabled = false, openSignal }: { polic
       </div>
     </div>, document.body)}
   </>;
-}
+});

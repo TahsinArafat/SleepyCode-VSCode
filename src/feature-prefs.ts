@@ -141,7 +141,7 @@ export function configPatchFromFeatures(features: unknown): ConfigPatch {
 }
 
 /** The feature fields to show, taken from what is stored rather than defaulted. */
-export function featuresFromHost(input: { prefs: ChatPrefs; settings: { systemNotifications?: boolean; maxSteps?: number; repoIndex?: boolean } }): Record<string, unknown> {
+export function featuresFromHost(input: { prefs: ChatPrefs; settings: { systemNotifications?: boolean; maxSteps?: number; repoIndex?: boolean; approvalPolicy?: Record<string, unknown> } }): Record<string, unknown> {
   const { prefs, settings } = input;
   return {
     chatTextSize: prefs.chatTextSize,
@@ -154,6 +154,7 @@ export function featuresFromHost(input: { prefs: ChatPrefs; settings: { systemNo
     notifyOnComplete: settings.systemNotifications !== false,
     maxAgentSteps: settings.maxSteps ?? 200,
     indexingEnabled: settings.repoIndex !== false,
+    ...(settings.approvalPolicy ? { approvalPolicy: settings.approvalPolicy } : {}),
   };
 }
 
