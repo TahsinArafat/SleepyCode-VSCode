@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { ConversationStore, conversationV2Key, enqueuePersist, estimateSerializedBytes, loadEach, projectV2Key, splitProjectIndex, summarizeConversation, trimPersistedConversations } from '../src/persist-core.ts';
+import { ConversationStore, conversationFingerprint, conversationV2Key, enqueuePersist, estimateSerializedBytes, loadEach, projectV2Key, splitProjectIndex, summarizeConversation, trimPersistedConversations } from '../src/persist-core.ts';
 import { assertSource } from './source-assert.mjs';
 import { MAX_TURN_UNDO } from '../src/types.ts';
 
@@ -300,3 +300,180 @@ test('estimateSerializedBytes accurately estimates UTF-8 size and guards against
   const bounded = estimateSerializedBytes(cyclic, 200);
   assert.ok(Number.isFinite(bounded) && bounded > 0);
 });
+
+function countingStore() {
+  const data = new Map();
+  const writes = [];
+  return {
+    data,
+    writes,
+    get(key, fallback) {
+      return data.has(key) ? structuredClone(data.get(key)) : fallback;
+    },
+    async update(key, value) {
+      writes.push(key);
+      if (value === undefined) data.delete(key);
+      else data.set(key, structuredClone(value));
+    },
+  };
+}
+
+test('a repeated checkpoint with nothing changed writes nothing', async () => {
+  // Checkpoints fire every three seconds during a run and used to rewrite every
+  // resident conversation in the project: 3 store writes each, measured at ~17 MB
+  // serialized per pass with eight resident chats. That work runs on the extension
+  // host's single thread, so it is felt as editor stutter, not just disk churn.
+  const storage = countingStore();
+  const store = new ConversationStore(storage);
+  const conversation = conversationFixture();
+  conversation.turnUndo = [];
+  conversation.turnRedo = [];
+
+  assert.equal(await store.writeConversation(conversation), true);
+  const firstPass = storage.writes.length;
+  assert.ok(firstPass > 0, 'the first write is a real write');
+
+  storage.writes.length = 0;
+  for (let pass = 0; pass < 20; pass += 1) {
+    assert.equal(await store.writeConversation(conversation), true, 'reporting success keeps the caller contract honest');
+  }
+  assert.equal(storage.writes.length, 0, '20 unchanged checkpoints cost zero store writes');
+});
+
+test('an empty undo stack costs one store write, not three', async () => {
+  // Three writes per conversation were unconditional: snapshot record, core record,
+  // then delete of the previous snapshot. With both stacks empty the snapshot
+  // carries no information at all.
+  const storage = countingStore();
+  const store = new ConversationStore(storage);
+  const conversation = conversationFixture();
+  conversation.turnUndo = [];
+  conversation.turnRedo = [];
+
+  assert.equal(await store.writeConversation(conversation), true);
+  assert.equal(storage.writes.length, 1, `expected only the core write, got ${storage.writes.join(', ')}`);
+  assert.equal(storage.writes[0], conversationV2Key('c1'));
+  assert.equal(conversation.turnSnapshotRevision, undefined, 'no snapshot record, so no revision to point at');
+  const restored = store.readConversation('c1');
+  assert.deepEqual(restored.turnUndo, [], 'a missing snapshot reads back as an empty stack');
+});
+
+test('a stale snapshot revision is dropped when the stacks are cleared', async () => {
+  // Leaving the revision behind would resurrect undo entries the user had already
+  // consumed, because `readConversation` trusts whatever the revision points at.
+  const storage = countingStore();
+  const store = new ConversationStore(storage);
+  const conversation = conversationFixture();
+  assert.equal(await store.writeConversation(conversation), true);
+  const withUndo = conversation.turnSnapshotRevision;
+  assert.ok(withUndo, 'a non-empty stack gets a revision');
+
+  conversation.turnUndo = [];
+  conversation.turnRedo = [];
+  conversation.updatedAt = 99;
+  assert.equal(await store.writeConversation(conversation), true);
+  assert.equal(conversation.turnSnapshotRevision, undefined);
+  assert.equal(storage.data.has(`sleepycode.turnSnapshots.c1.${withUndo}`), false, 'the old snapshot record is deleted');
+  assert.deepEqual(store.readConversation('c1').turnUndo, []);
+});
+
+test('every conversation mutation shape is visible to the fingerprint', () => {
+  const base = () => {
+    const conversation = conversationFixture();
+    conversation.turnUndo = [];
+    conversation.turnRedo = [];
+    return conversation;
+  };
+  const unchanged = conversationFingerprint(base());
+  const assertChanged = (label, mutate) => {
+    const conversation = base();
+    mutate(conversation);
+    assert.notEqual(conversationFingerprint(conversation), unchanged, `${label} must be detected`);
+  };
+
+  // The reason a fingerprint exists instead of comparing `updatedAt`: these three
+  // mutate without bumping it, so a timestamp check would silently skip the write.
+  assertChanged('setPersona', c => { c.personaId = 'reviewer'; });
+  assertChanged('setMode', c => { c.mode = 'ask'; });
+  assertChanged('goal token accrual', c => { c.goal = { text: 'g', status: 'active', tokensUsed: 10, tokenBudget: 100 }; });
+
+  assertChanged('an appended turn', c => { c.items.push({ id: 'i2', role: 'assistant', text: 'done', timestamp: 2 }); });
+  assertChanged('an in-place text edit', c => { c.items[0].text = 'hello again'; });
+  assertChanged('a title rename', c => { c.title = 'Renamed'; });
+  assertChanged('pinning', c => { c.pinned = true; });
+  assertChanged('archiving', c => { c.archived = true; });
+  assertChanged('a model switch', c => { c.model = 'other-model'; });
+  assertChanged('model history growth', c => { c.messages.push({ role: 'assistant', content: 'hi' }); });
+  assertChanged('a pending turn', c => { c.pending = { userText: 'x', messages: [] }; });
+  assertChanged('replacing the item array', c => { c.items = [...c.items]; });
+});
+
+test('the same untouched conversation fingerprints identically across checkpoints', () => {
+  // The per-object reference stamps are identity-based on purpose, so a freshly
+  // rehydrated conversation reads as changed and gets written. What must hold is
+  // that the SAME live object is stable pass to pass, which is what a checkpoint
+  // relies on to skip its writes.
+  const conversation = conversationFixture();
+  conversation.turnUndo = [];
+  conversation.turnRedo = [];
+  const first = conversationFingerprint(conversation);
+  for (let pass = 0; pass < 5; pass += 1) {
+    assert.equal(conversationFingerprint(conversation), first, 'an unmutated conversation is stable');
+  }
+});
+
+function projectFixture() {
+  const first = conversationFixture('c1');
+  first.turnUndo = [];
+  first.turnRedo = [];
+  const second = conversationFixture('c2', 'second');
+  second.turnUndo = [];
+  second.turnRedo = [];
+  return { id: 'p1', name: 'Project', path: '/p1', conversations: [first, second], activeConversationId: 'c1', createdAt: 1, updatedAt: 2 };
+}
+
+test('a manifest is rewritten when a conversation changes and skipped when none do', async () => {
+  // The manifest is a projection: it stores each conversation's message count,
+  // status, and excerpt. If it were skipped while a conversation changed, the
+  // history list would show a stale summary for a turn that had already been saved.
+  const storage = countingStore();
+  const store = new ConversationStore(storage);
+  const project = projectFixture();
+
+  assert.equal(await store.writeManifest(project), true);
+  assert.equal(storage.writes.length, 1);
+
+  storage.writes.length = 0;
+  for (let pass = 0; pass < 10; pass += 1) assert.equal(await store.writeManifest(project), true);
+  assert.equal(storage.writes.length, 0, 'an unchanged project costs zero manifest writes');
+
+  project.conversations[1].updatedAt = 500;
+  assert.equal(await store.writeManifest(project), true);
+  assert.equal(storage.writes.length, 1, 'a changed conversation forces exactly one rewrite');
+  assert.equal(store.readManifest('p1').updatedAt, 2);
+});
+
+test('a cold conversation summary in the manifest is not skipped when it is released', async () => {
+  // Offloading writes `cold`, `messageCount`, `excerpt` and friends without bumping
+  // `updatedAt`. If those were absent from the fingerprint the manifest would keep
+  // advertising a live conversation that had already been released.
+  const storage = countingStore();
+  const store = new ConversationStore(storage);
+  const project = projectFixture();
+  assert.equal(await store.writeManifest(project), true);
+
+  storage.writes.length = 0;
+  const conversation = project.conversations[1];
+  conversation.cold = true;
+  conversation.messageCount = 7;
+  conversation.excerpt = 'released';
+  conversation.lastStatus = 'done';
+  assert.equal(await store.writeManifest(project), true);
+  assert.equal(storage.writes.length, 1);
+  const manifest = store.readManifest('p1');
+  assert.equal(manifest.conversations[1].cold, true);
+  assert.equal(manifest.conversations[1].messageCount, 7);
+  assert.equal(manifest.conversations[1].excerpt, 'released');
+});
+
+

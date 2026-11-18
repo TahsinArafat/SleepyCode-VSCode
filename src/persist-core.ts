@@ -252,6 +252,91 @@ export function summarizeConversation(conversation: Conversation, cold = convers
   return metadataOf(conversation, cold);
 }
 
+/**
+ * Cheap identity of everything a conversation write would store.
+ *
+ * A checkpoint used to rewrite every resident conversation in the project, so a
+ * three-second tick during a run meant 3 sequential `globalState.update` calls for
+ * each of them — measured at ~17 MB serialized per checkpoint with eight resident
+ * chats, all on the extension host's single thread.
+ *
+ * The reason a fingerprint is needed rather than a timestamp comparison: not every
+ * mutation bumps `updatedAt`. `setPersona` and `setMode` deliberately do not, and
+ * `goal.tokensUsed` changes on every step. A timestamp check would therefore skip
+ * writes for real changes, which is silent data loss — the exact failure this file
+ * exists to prevent. Several edits also mutate an item in place (`commitMessage`,
+ * `change.staged`), which no array-length check would see.
+ *
+ * Cost is O(items) of property reads — no string building, no serialization. The
+ * bound is deliberate: an in-place edit that preserves both the item's text length
+ * and its sibling layout is invisible here. Every mutation in this codebase either
+ * pushes, replaces an array, or changes a length, so that case does not arise.
+ */
+export function conversationFingerprint(conversation: Conversation): string {
+  let items = `0:0:0`;
+  // Reference identity per item plus its text length, rolled into one running
+  // number: catches an in-place text edit without allocating per-item strings.
+  let stamp = 0;
+  let textLength = 0;
+  for (const item of conversation.items) {
+    stamp = (stamp * 31 + referenceStamp(item)) | 0;
+    textLength += (item.text?.length ?? 0) + (item.partialText?.length ?? 0);
+  }
+  items = `${stamp}:${textLength}:${conversation.items.length}`;
+  return [
+    conversation.updatedAt,
+    conversation.title,
+    conversation.archived === true ? 1 : 0,
+    conversation.pinned === true ? 1 : 0,
+    conversation.model ?? '',
+    conversation.provider ?? '',
+    conversation.agentId ?? '',
+    conversation.personaId ?? '',
+    conversation.mode ?? '',
+    conversation.reasoningEffort ?? '',
+    conversation.messages?.length ?? -1,
+    conversation.turnUndo?.length ?? 0,
+    conversation.turnRedo?.length ?? 0,
+    // `pending` is replaced with a fresh object on every checkpoint while
+    // streaming, so its identity is what distinguishes "in flight" from "settled"
+    // — and a still-pending turn whose text grew is a real change.
+    referenceStamp(conversation.pending),
+    // Goal token accounting mutates without bumping `updatedAt`, so the numbers
+    // that move are part of the identity.
+    conversation.goal?.tokensUsed ?? -1,
+    conversation.goal?.status ?? '',
+    conversation.goal?.tokenBudget ?? -1,
+    // Cold summaries are themselves stored metadata, and offloading writes them
+    // without bumping `updatedAt`. Leaving them out would let the manifest keep an
+    // old message count for a chat that has since been released.
+    conversation.cold === true ? 1 : 0,
+    conversation.messageCount ?? -1,
+    conversation.changeCount ?? -1,
+    conversation.lastStatus ?? '',
+    conversation.excerpt ?? '',
+    // Reference-level identity for arrays that are replaced wholesale. Cheap, and
+    // it catches a rewrite that happens to preserve every length.
+    referenceStamp(conversation.items),
+    referenceStamp(conversation.messages),
+    referenceStamp(conversation.turnUndo),
+    referenceStamp(conversation.turnRedo),
+    items,
+  ].join('\u0000');
+}
+
+/** A stable per-object integer, so reference identity is usable in a string key. */
+let referenceCounter = 0;
+const referenceIds = new WeakMap<object, number>();
+
+function referenceStamp(value: object | undefined): number {
+  if (!value) return 0;
+  const existing = referenceIds.get(value);
+  if (existing !== undefined) return existing;
+  referenceCounter += 1;
+  referenceIds.set(value, referenceCounter);
+  return referenceCounter;
+}
+
 export function projectV2Key(projectId: string): string {
   return `sleepycode.project.v2.${projectId}`;
 }
@@ -270,6 +355,15 @@ export function turnSnapshotsV2Key(conversationId: string, revision: string): st
  */
 export class ConversationStore {
   private readonly storage: ConversationKeyValueStore;
+  /**
+   * Fingerprint of what was last written successfully, per conversation.
+   *
+   * Kept on the store rather than on the conversation so a failed write is never
+   * recorded as persisted: the entry is set only after both records land.
+   */
+  private readonly written = new Map<string, string>();
+  /** Fingerprint of what was last written successfully, per project manifest. */
+  private readonly writtenManifest = new Map<string, string>();
 
   constructor(storage: ConversationKeyValueStore) {
     this.storage = storage;
@@ -281,6 +375,19 @@ export class ConversationStore {
   }
 
   async writeManifest(project: Project): Promise<boolean> {
+    // The manifest is a projection of every conversation's metadata, so it goes
+    // stale exactly when one of them changes. Fingerprinting the projection is
+    // what lets a checkpoint skip it when nothing moved: without this, dropping
+    // the per-conversation core write would leave the history list showing an old
+    // message count and excerpt for a turn that had already been saved.
+    const conversations = project.conversations.map(conversation => metadataOf(conversation, conversation.cold === true));
+    // Fingerprinted from the SOURCE conversations, not the summaries: `metadataOf`
+    // allocates a fresh `items: []` on every call, so a summary's reference stamp
+    // would differ on each pass and the manifest would never be skipped. The source
+    // carries everything the summary is derived from.
+    const fingerprint = `${project.updatedAt}\u0000${project.activeConversationId}\u0000${project.name}\u0000` +
+      project.conversations.map(conversation => conversationFingerprint(conversation)).join('\u0001');
+    if (this.writtenManifest.get(project.id) === fingerprint) return true;
     try {
       const manifest: ConversationManifest = {
         version: 2,
@@ -290,11 +397,13 @@ export class ConversationStore {
         activeConversationId: project.activeConversationId,
         createdAt: project.createdAt,
         updatedAt: project.updatedAt,
-        conversations: project.conversations.map(conversation => metadataOf(conversation, conversation.cold === true)),
+        conversations,
       };
       await this.storage.update(projectV2Key(project.id), manifest);
+      this.writtenManifest.set(project.id, fingerprint);
       return true;
     } catch {
+      this.writtenManifest.delete(project.id);
       return false;
     }
   }
@@ -315,20 +424,32 @@ export class ConversationStore {
   }
 
   async writeConversation(conversation: Conversation): Promise<boolean> {
+    const fingerprint = conversationFingerprint(conversation);
+    // Already durable and nothing changed: this is the common case on a checkpoint,
+    // which fires every three seconds and previously rewrote every resident chat.
+    // `true` is correct here — the caller's contract is "is this conversation on
+    // disk", and it is.
+    if (this.written.get(conversation.id) === fingerprint) return true;
     const previousRevision = conversation.turnSnapshotRevision;
-    const revision = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const undo = conversation.turnUndo ?? [];
+    const redo = conversation.turnRedo ?? [];
+    // An empty stack carries no information, so it does not need a record of its
+    // own. Writing one meant a checkpoint paid three store writes per conversation
+    // to persist two empty arrays, and leaving `turnSnapshotRevision` pointing at
+    // the OLD record would resurrect undo entries that have since been cleared.
+    const revision = undo.length || redo.length
+      ? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      : undefined;
     try {
-      await this.storage.update(turnSnapshotsV2Key(conversation.id, revision), {
-        revision,
-        undo: conversation.turnUndo ?? [],
-        redo: conversation.turnRedo ?? [],
-      });
+      if (revision) {
+        await this.storage.update(turnSnapshotsV2Key(conversation.id, revision), { revision, undo, redo });
+      }
       const core = {
         ...metadataOf(conversation, false),
         items: conversation.items,
         messages: conversation.messages,
         pending: conversation.pending,
-        turnSnapshotRevision: revision,
+        ...(revision ? { turnSnapshotRevision: revision } : {}),
       };
       await this.storage.update(conversationV2Key(conversation.id), core);
       if (previousRevision && previousRevision !== revision) {
@@ -336,8 +457,12 @@ export class ConversationStore {
       }
       conversation.turnSnapshotRevision = revision;
       conversation.cold = false;
+      // Recorded only after both writes land, so a failure is retried next time
+      // instead of being remembered as saved.
+      this.written.set(conversation.id, fingerprint);
       return true;
     } catch {
+      this.written.delete(conversation.id);
       return false;
     }
   }
@@ -351,6 +476,9 @@ export class ConversationStore {
   }
 
   async deleteConversation(conversationId: string, turnSnapshotRevision?: string): Promise<void> {
+    // Drop the memo first: a conversation recreated under the same id must be
+    // written, not skipped as already-durable.
+    this.written.delete(conversationId);
     await this.storage.update(conversationV2Key(conversationId), undefined);
     if (turnSnapshotRevision) await this.storage.update(turnSnapshotsV2Key(conversationId, turnSnapshotRevision), undefined);
   }
