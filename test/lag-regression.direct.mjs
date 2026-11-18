@@ -324,3 +324,39 @@ test('a duplicate send still settles its optimistic attachments', () => {
   assert.match(body, /this\.postAcceptedAttachments\(/, 'the optimistic turn is settled on the duplicate path');
   assert.doesNotMatch(body.slice(0, body.indexOf('return;')), /return;\s*\}/, 'settling happens before the early return');
 });
+
+test('reopening the sidebar does not reload, re-migrate, or re-probe', () => {
+  // The view is disposable (`retainContextWhenHidden: false`), so resolveWebviewView
+  // runs on every open. Anything expensive on that path is paid per sidebar click on
+  // the extension host's single thread, which reads as the whole editor stuttering.
+  const start = agent.indexOf('resolveWebviewView(view: vscode.WebviewView)');
+  const body = agent.slice(start, agent.indexOf('private sendCachedModelGroups', start) + 4000 || start + 12000);
+
+  // Projects load once; a reopened view republishes in-memory state instead of
+  // re-reading blobs, re-normalizing the transcript, retrying migration and
+  // rewriting every conversation record.
+  assertSource(agent, /private projectsLoaded = false;/, 'the once-per-session load flag exists');
+  assertSource(agent, /private loadProjects\(\): void \{\s*\/\/[\s\S]{0,600}?if \(this\.projectsLoaded\) return;/, 'loadProjects short-circuits after the first load');
+
+  // The MCP warm-up spawns a login shell and connects every enabled server. Once.
+  assertSource(agent, /private mcpWarmedOnce = false;/, 'the once-per-session MCP flag exists');
+  assertSource(agent, /if \(!this\.mcpWarmedOnce\) \{[\s\S]{0,160}this\.mcpWarmedOnce = true;[\s\S]{0,120}this\.warmMcpConnections\(\);/, 'the warm-up is guarded');
+
+  // No awaited provider round trip before the chat can paint.
+  const readyStart = agent.indexOf("message.type === 'ready'");
+  const ready = agent.slice(readyStart, readyStart + 2200);
+  assert.doesNotMatch(ready, /await this\.refreshModels\(\)/, 'the ready path must not block on a model fetch');
+  assertSource(ready, /MODEL_CACHE_TTL_MS/, 'a recent catalog is reused instead of re-fetched');
+});
+
+test('a fresh renderer is re-sent the model list and account it no longer has', () => {
+  // Cached groups used to be posted only when the in-memory list was empty, which was
+  // correct while the webview survived being hidden. Now every open is a fresh
+  // renderer, so skipping the refresh without re-posting left an empty model picker.
+  const start = agent.indexOf('private postCachedModelGroups');
+  const body = agent.slice(start, start + 900);
+  assert.doesNotMatch(body, /if \(this\.lastModelGroups\.length\) return;/, 'in-memory groups are posted, not skipped');
+  assertSource(body, /this\.lastModelGroups\.length \? this\.lastModelGroups/, 'memory is preferred over disk');
+  const account = agent.slice(agent.indexOf('private postCachedAccount'), agent.indexOf('private postCachedAccount') + 900);
+  assert.doesNotMatch(account, /if \(this\.lastSleepyAccountRefresh\) return;/, 'the account is re-posted to a fresh renderer');
+});

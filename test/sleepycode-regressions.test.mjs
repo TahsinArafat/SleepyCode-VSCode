@@ -920,9 +920,16 @@ test('the last known models and account answer before the network does', () => {
   assertSource(agentSource, /this\.postCachedModelGroups\(\);[\s\S]{0,80}this\.postCachedAccount\(\);/);
   assertSource(agentSource, /globalState\.update\('sleepycode\.cache\.models'/);
   assertSource(agentSource, /globalState\.update\('sleepycode\.cache\.account'/);
-  // The cache is only a head start: a fetch that arrives later still wins.
-  assertSource(agentSource, /if \(this\.lastModelGroups\.length\) return;/);
-  assertSource(agentSource, /if \(this\.lastSleepyAccountRefresh\) return;/);
+  // Every open is a FRESH renderer now (the view is disposable), so the cached copy
+  // must always be posted. Skipping it whenever the in-memory list was populated was
+  // only correct while the webview survived being hidden: it left a reopened sidebar
+  // with no models and no account until something else refreshed them.
+  assert.doesNotMatch(agentSource, /if \(this\.lastModelGroups\.length\) return;/);
+  assert.doesNotMatch(agentSource, /if \(this\.lastSleepyAccountRefresh\) return;/);
+  // Memory is fresher than disk, so it is preferred when both exist.
+  assertSource(agentSource, /this\.lastModelGroups\.length \? this\.lastModelGroups/);
+  // The cache is still only a head start: a fetch that arrives later still wins.
+  assertSource(agentSource, /this\.lastModelGroups = groups;/);
 });
 
 test('a status scrolled out of view stops animating', () => {

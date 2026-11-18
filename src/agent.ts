@@ -427,6 +427,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private static readonly LOG_FLUSH_MS = 1_000;
   /** Minimum gap between coalesced mid-run checkpoint writes. */
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
+  /**
+   * How long a fetched model catalog is trusted when the view is reopened.
+   *
+   * The sidebar is disposable, so resolving it is a frequent event. This bounds how
+   * often that costs a provider round trip; an expired cache refreshes in the
+   * background, so the chat never waits on it.
+   */
+  private static readonly MODEL_CACHE_TTL_MS = 5 * 60_000;
   private view?: vscode.WebviewView;
   private webviewVisible = true;
   // The classic webview was removed; the React chat is the only UI, so this is
@@ -468,6 +476,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private activeProjectId = '';
   private loaded = false;
+  /** Projects are loaded once per host session; a reopened view republishes instead. */
+  private projectsLoaded = false;
+  /** The MCP warm-up runs once per session; reopening the view must not re-probe. */
+  private mcpWarmedOnce = false;
   private runs = new Map<string, ActiveRun>();
   private mcpNoticeSignatures = new Map<string, string>();
   private queue: { id: string; text: string; conversationId: string; context?: ComposerContext; promptContext?: string; steering?: true }[] = [];
@@ -520,6 +532,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private logRing?: ExtensionLogEntry[];
   private logFlushTimer?: NodeJS.Timeout;
   private lastModelGroups: ProviderModelGroup[] = [];
+  /** When the catalog was last fetched from a provider, for the reopen TTL. */
+  private lastModelRefreshAt = 0;
   private lastSleepyModelPrices: SleepyModelPrice[] = [];
   private lastSleepyPriceRefresh = 0;
   /**
@@ -1246,10 +1260,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'error', conversationId: '', text: `SleepyCode could not load your conversations: ${errorMessage(error)}` });
     }
     this.syncConversations();
-    // Connect the saved MCP servers as the window opens. Without this every
-    // configured server read as unknown after a restart until someone pressed Sync,
-    // because nothing held a connection open before the first run.
-    void this.warmMcpConnections();
+    // Connect the saved MCP servers as the window opens — ONCE per session. Without
+    // this every configured server read as unknown after a restart until someone
+    // pressed Sync. It must not repeat on every reopen: each pass spawns a login
+    // shell for PATH and connects every enabled server, which is seconds of work on
+    // the extension host thread. The heartbeat it arms keeps them alive after that.
+    if (!this.mcpWarmedOnce) {
+      this.mcpWarmedOnce = true;
+      void this.warmMcpConnections();
+    }
     void this.migrateProvidersIfNeeded().then(() => this.loadApiKeys()).then(() => {
       if (this.view !== view) return;
       this.postConfig();
@@ -1258,12 +1277,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Last session's model list, if this window has not fetched its own yet. */
+  /**
+   * Hand the new view the model list before the network answers.
+   *
+   * The webview is disposable, so this runs for a FRESH renderer on every reopen:
+   * always publish whatever is known (memory is fresher than disk), or a reopened
+   * sidebar shows an empty model picker until something else refreshes it.
+   */
   private postCachedModelGroups(): void {
-    if (this.lastModelGroups.length) return;
-    const cached = this.context.globalState.get<{ at?: number; groups?: ProviderModelGroup[] }>('sleepycode.cache.models');
-    const groups = Array.isArray(cached?.groups) ? cached.groups : [];
+    const cached = this.lastModelGroups.length
+      ? undefined
+      : this.context.globalState.get<{ at?: number; groups?: ProviderModelGroup[] }>('sleepycode.cache.models');
+    const groups = this.lastModelGroups.length ? this.lastModelGroups : (Array.isArray(cached?.groups) ? cached.groups : []);
     if (!groups.length) return;
-    this.lastModelGroups = groups;
+    if (!this.lastModelGroups.length) this.lastModelGroups = groups;
     const config = this.config();
     const selection = this.activeSelection();
     this.post({
@@ -1278,7 +1305,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   /** The last known account, so the banner and the quota pages are populated at once. */
   private postCachedAccount(): void {
-    if (this.lastSleepyAccountRefresh) return;
+    // Same reason as the model list: a fresh renderer needs the last known account
+    // re-posted, or the banner and quota pages start blank on every reopen.
+    if (this.lastSleepyAccountRefresh) {
+      const account = getSleepyAccount();
+      if (account.loggedIn) this.post({ type: 'sleepyStatus', ...account, busy: false, text: '' });
+      return;
+    }
     const cached = this.context.globalState.get<{ at?: number; status?: Record<string, unknown> }>('sleepycode.cache.account');
     if (!cached?.status || cached.status.loggedIn !== true) return;
     this.post({ type: 'sleepyStatus', ...cached.status, busy: false, text: '' });
@@ -3131,6 +3164,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private loadProjects(): void {
+    // The webview is disposable now (`retainContextWhenHidden: false`), so this runs
+    // again every time the sidebar is reopened. Reloading here means re-reading every
+    // project blob, normalizing the whole active transcript, retrying storage
+    // migration and rewriting every conversation record — on the extension host's
+    // single thread, so the entire editor stutters. The state is already in memory;
+    // a re-opened view only needs to republish it.
+    if (this.projectsLoaded) return;
+    this.projectsLoaded = true;
     const stored = this.context.globalState.get<unknown[]>('sleepycode.projectIndex', []);
     const indexEntries = Array.isArray(stored) ? stored : [];
     // Entries that do not validate are remembered, not discarded: loadProjects ends by
@@ -3796,13 +3837,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.ensureSleepyProvider();
       }
       this.postConfig();
-      await this.refreshModels();
+      // Not awaited, and not repeated on every open. This used to `await` a
+      // `fetchProviderModels` round trip each time the view resolved; now that the
+      // view is disposable that means every sidebar click paid for a network call
+      // before the chat could paint. Cached groups are already posted by the
+      // bootstrap, so a recent cache is reused and only a stale one refreshes itself
+      // in the background.
+      if (!this.lastModelGroups.length || Date.now() - this.lastModelRefreshAt > AgentViewProvider.MODEL_CACHE_TTL_MS) {
+        void this.refreshModels();
+      }
       await this.maybeShowFirstLaunchSettings();
       this.sendUsage();
       this.sendEditorContext();
       void this.ensureProjectIntelligence(false);
       if (getSleepyAccount().loggedIn) {
-        void this.sendSleepyAccountData(true);
+        // Not forced: the 30 s throttle is what keeps a reopened sidebar from
+        // paying for an account round trip every time it is clicked.
+        void this.sendSleepyAccountData(false);
       }
       if (this.reactMode) this.sendReactBootstrap();
       return;
@@ -8132,7 +8183,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       sleepy.baseURL = sleepyApiBase();
       await this.context.globalState.update('sleepycode.providers', providers);
     }
-    await this.context.globalState.update('sleepycode.activeProvider', 'sleepyai');
+    // Only write when it actually differs. This runs on every `ready`, and the view
+    // being disposable makes that a frequent event; an unconditional write meant a
+    // storage update on each sidebar click.
+    if (this.context.globalState.get<string>('sleepycode.activeProvider') !== 'sleepyai') {
+      await this.context.globalState.update('sleepycode.activeProvider', 'sleepyai');
+    }
     return sleepy;
   }
 
@@ -8425,6 +8481,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     }
     this.lastModelGroups = groups;
+    this.lastModelRefreshAt = Date.now();
     // Kept on disk so the next start has a working model list before the network
     // answers, or when it cannot answer at all.
     if (groups.some(group => group.models.length)) {
