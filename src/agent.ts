@@ -5422,7 +5422,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         this.postConfig();
       }
-      if (!steering && this.sendingConversations.has(conversationId)) return;
+      if (!steering && this.sendingConversations.has(conversationId)) {
+        // A duplicate send for a conversation already being sent: nothing new runs, but
+        // the optimistic turn must still be settled, or any attachment on it keeps
+        // waiting for an answer that will never come.
+        this.postAcceptedAttachments((message as { requestId?: string }).requestId, conversationId, message.context);
+        return;
+      }
       if (!steering) this.sendingConversations.add(conversationId);
       // The React composer sends its own attachment shape. Images arrive as data
       // URLs, so they are written to temp files here before the run reads them.

@@ -313,3 +313,14 @@ test('the React markdown cache is bounded by entries, bytes and a per-entry ceil
   // An oversized entry is returned WITHOUT being cached, so its bytes are never counted.
   assertSource(markdown, /if \(bytes > MAX_ENTRY_BYTES\) return entry;/, 'an oversized entry is not retained');
 });
+
+test('a duplicate send still settles its optimistic attachments', () => {
+  // `sendingConversations` guards against running the same conversation twice. That
+  // early return used to sit BEFORE the attachment stage, so `attachmentsResolved`
+  // never fired and any image on the duplicate turn waited forever for a reply.
+  const start = agent.indexOf('sendingConversations.has(conversationId)');
+  assert.ok(start > 0, 'the duplicate-send guard must exist');
+  const body = agent.slice(start, start + 600);
+  assert.match(body, /this\.postAcceptedAttachments\(/, 'the optimistic turn is settled on the duplicate path');
+  assert.doesNotMatch(body.slice(0, body.indexOf('return;')), /return;\s*\}/, 'settling happens before the early return');
+});
