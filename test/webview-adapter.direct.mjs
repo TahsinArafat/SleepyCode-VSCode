@@ -442,6 +442,14 @@ test('requestAccepted passes through to the webview', () => {
   assert.equal(out.created, true);
 });
 
+test('attachmentsResolved passes resource metadata through to the webview', () => {
+  const out = adapter.toReactMessage({ type: 'attachmentsResolved', requestId: 'req-1', convId: 'c9', attachments: [{ kind: 'image', data: 'vscode-webview://preview', tempPath: '/original.png', previewPath: '/preview.jpg' }] });
+  assert.equal(out.type, 'attachmentsResolved');
+  assert.equal(out.requestId, 'req-1');
+  assert.equal(out.attachments[0].tempPath, '/original.png');
+  assert.equal(out.attachments[0].previewPath, '/preview.jpg');
+});
+
 // ---------------------------------------------------------------- streaming guard
 
 test('a transcript snapshot suppressed mid-run still says which conversation is active', () => {
@@ -685,6 +693,23 @@ test('image and text attachments are split cleanly', () => {
   assert.equal(split.images[0].mimeType, 'image/png');
   assert.equal(split.files.length, 1);
   assert.equal(split.files[0].name, 'notes.txt');
+});
+
+test('original data and thumbnail stay separate, and resource-only edits reuse files', () => {
+  const original = 'data:image/png;base64,ORIGINAL';
+  const thumbnail = 'data:image/jpeg;base64,THUMB';
+  const split = adapter.reactAttachmentsOf([
+    { id: '1', name: 'shot.png', mime: 'image/png', data: thumbnail, sourceData: original, kind: 'image' },
+  ]);
+  assert.equal(split.images[0].dataUrl, original);
+  assert.equal(split.images[0].previewDataUrl, thumbnail);
+
+  const editing = adapter.reactAttachmentsOf([
+    { id: '1', name: 'shot.png', mime: 'image/png', data: 'vscode-webview://preview', tempPath: '/original.png', previewPath: '/preview.jpg', kind: 'image' },
+  ]);
+  assert.equal(editing.images[0].dataUrl, '');
+  assert.equal(editing.images[0].tempPath, '/original.png');
+  assert.equal(editing.images[0].previewPath, '/preview.jpg');
 });
 
 test('non-image and malformed attachments are not treated as images', () => {

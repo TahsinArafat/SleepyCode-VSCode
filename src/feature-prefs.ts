@@ -153,7 +153,7 @@ export function featuresFromHost(input: { prefs: ChatPrefs; settings: { systemNo
     trackUsage: prefs.trackUsage,
     notifyOnComplete: settings.systemNotifications !== false,
     maxAgentSteps: settings.maxSteps ?? 200,
-    indexingEnabled: settings.repoIndex !== false,
+    indexingEnabled: settings.repoIndex === true,
     ...(settings.approvalPolicy ? { approvalPolicy: settings.approvalPolicy } : {}),
   };
 }

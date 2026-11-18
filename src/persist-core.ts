@@ -201,3 +201,157 @@ export function estimateSerializedBytes(value: unknown, maxNodes = 250_000): num
   }
   return bytes;
 }
+
+// ---------------------------------------------------------------------------
+// Lazy per-conversation storage (v2)
+
+import type { Conversation, Project } from './types.ts';
+
+export interface ConversationKeyValueStore {
+  get<T>(key: string, defaultValue?: T): T | undefined;
+  update(key: string, value: unknown): PromiseLike<void>;
+}
+
+export type ConversationManifest = Omit<Project, 'conversations'> & {
+  version: 2;
+  conversations: Conversation[];
+};
+
+const HEAVY_CONVERSATION_KEYS = new Set([
+  'items', 'messages', 'pending', 'turnUndo', 'turnRedo',
+  'cold', 'resident', 'lastUsed', 'estimatedBytes', 'turnSnapshotRevision',
+]);
+
+function lastAssistantOf(conversation: Conversation): Conversation['items'][number] | undefined {
+  for (let index = conversation.items.length - 1; index >= 0; index -= 1) {
+    const item = conversation.items[index];
+    if (item?.role === 'assistant') return item;
+  }
+  return undefined;
+}
+
+function metadataOf(conversation: Conversation, cold: boolean): Conversation {
+  const metadata = Object.fromEntries(Object.entries(conversation).filter(([key]) => !HEAVY_CONVERSATION_KEYS.has(key))) as unknown as Conversation;
+  if (conversation.cold !== true) {
+    const assistant = lastAssistantOf(conversation);
+    metadata.messageCount = conversation.items.length;
+    metadata.changeCount = assistant?.changes?.length ?? 0;
+    metadata.lastStatus = assistant?.paused
+      ? 'paused'
+      : assistant?.kind === 'error'
+        ? (assistant.errorInfo?.code === 'interrupted' ? 'stopped' : 'failed')
+        : assistant ? 'done' : 'empty';
+    metadata.excerpt = (assistant?.text || conversation.items[conversation.items.length - 1]?.text || '').slice(0, 240);
+  }
+  metadata.items = [];
+  metadata.cold = cold;
+  return metadata;
+}
+
+export function summarizeConversation(conversation: Conversation, cold = conversation.cold === true): Conversation {
+  return metadataOf(conversation, cold);
+}
+
+export function projectV2Key(projectId: string): string {
+  return `sleepycode.project.v2.${projectId}`;
+}
+
+export function conversationV2Key(conversationId: string): string {
+  return `sleepycode.conversation.${conversationId}`;
+}
+
+export function turnSnapshotsV2Key(conversationId: string, revision: string): string {
+  return `sleepycode.turnSnapshots.${conversationId}.${revision}`;
+}
+
+/**
+ * Copy-on-write per-conversation records. Snapshot revisions are immutable, so a
+ * failed core update leaves the previous core and its previous undo readable.
+ */
+export class ConversationStore {
+  private readonly storage: ConversationKeyValueStore;
+
+  constructor(storage: ConversationKeyValueStore) {
+    this.storage = storage;
+  }
+
+  readManifest(projectId: string): ConversationManifest | undefined {
+    const manifest = this.storage.get<ConversationManifest>(projectV2Key(projectId));
+    return manifest?.version === 2 && Array.isArray(manifest.conversations) ? manifest : undefined;
+  }
+
+  async writeManifest(project: Project): Promise<boolean> {
+    try {
+      const manifest: ConversationManifest = {
+        version: 2,
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        activeConversationId: project.activeConversationId,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+        conversations: project.conversations.map(conversation => metadataOf(conversation, conversation.cold === true)),
+      };
+      await this.storage.update(projectV2Key(project.id), manifest);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  readConversation(conversationId: string): Conversation | undefined {
+    const core = this.storage.get<Conversation & { turnSnapshotRevision?: string }>(conversationV2Key(conversationId));
+    if (!core || !Array.isArray(core.items)) return undefined;
+    let turnUndo: Conversation['turnUndo'] = [];
+    let turnRedo: Conversation['turnRedo'] = [];
+    if (core.turnSnapshotRevision) {
+      const snapshots = this.storage.get<{ undo?: Conversation['turnUndo']; redo?: Conversation['turnRedo'] }>(
+        turnSnapshotsV2Key(conversationId, core.turnSnapshotRevision),
+      );
+      turnUndo = snapshots?.undo ?? [];
+      turnRedo = snapshots?.redo ?? [];
+    }
+    return { ...core, turnUndo, turnRedo, cold: false };
+  }
+
+  async writeConversation(conversation: Conversation): Promise<boolean> {
+    const previousRevision = conversation.turnSnapshotRevision;
+    const revision = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      await this.storage.update(turnSnapshotsV2Key(conversation.id, revision), {
+        revision,
+        undo: conversation.turnUndo ?? [],
+        redo: conversation.turnRedo ?? [],
+      });
+      const core = {
+        ...metadataOf(conversation, false),
+        items: conversation.items,
+        messages: conversation.messages,
+        pending: conversation.pending,
+        turnSnapshotRevision: revision,
+      };
+      await this.storage.update(conversationV2Key(conversation.id), core);
+      if (previousRevision && previousRevision !== revision) {
+        await Promise.resolve(this.storage.update(turnSnapshotsV2Key(conversation.id, previousRevision), undefined)).catch(() => undefined);
+      }
+      conversation.turnSnapshotRevision = revision;
+      conversation.cold = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Write every record before exposing the v2 manifest; v1 remains untouched. */
+  async migrateProject(project: Project): Promise<boolean> {
+    for (const conversation of project.conversations) {
+      if (!(await this.writeConversation(conversation))) return false;
+    }
+    return this.writeManifest(project);
+  }
+
+  async deleteConversation(conversationId: string, turnSnapshotRevision?: string): Promise<void> {
+    await this.storage.update(conversationV2Key(conversationId), undefined);
+    if (turnSnapshotRevision) await this.storage.update(turnSnapshotsV2Key(conversationId, turnSnapshotRevision), undefined);
+  }
+}

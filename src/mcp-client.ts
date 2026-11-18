@@ -22,6 +22,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { terminateProcessTree } from './process-tree.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -203,6 +204,7 @@ export class McpConnection {
       cwd: this.workspaceRoot,
       env: { ...process.env, ...(this.config.env ?? {}) },
       shell: useShell,
+      detached: process.platform !== 'win32',
     });
     this.proc = proc;
 
@@ -519,7 +521,7 @@ export class McpConnection {
     void this.client?.close().catch(() => {});
     for (const { reject } of this.pending.values()) reject(new Error('MCP connection closed'));
     this.pending.clear();
-    this.proc?.kill();
+    if (this.proc) terminateProcessTree(this.proc);
     this.proc = undefined;
     this.connected = false;
   }

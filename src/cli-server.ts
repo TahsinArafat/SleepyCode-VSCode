@@ -10,6 +10,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { terminateProcessTree } from './process-tree.ts';
 
 /** Ports tried when looking for an already-running server. 4096 is the CLI default. */
 export const CLI_PROBE_PORTS = [4096, 4097, 4098];
@@ -219,7 +220,7 @@ export async function startOrAttach(opts: {
     // start can always reach this workspace.
     cwd: opts.directory,
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: false,
+    detached: process.platform !== 'win32',
   });
 
   // Capture stderr lines for diagnostics (binary crashes, auth errors, etc.).
@@ -237,28 +238,48 @@ export async function startOrAttach(opts: {
 
   const url = await new Promise<string>((resolve, reject) => {
     let output = '';
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for the sleepy server to start.')), 30_000);
+    let settled = false;
+    const cleanup = (timer: ReturnType<typeof setTimeout>, onData: (chunk: Buffer) => void, onError: (error: Error) => void, onExit: (code: number | null) => void): void => {
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
     const onData = (chunk: Buffer): void => {
       output += chunk.toString();
       const found = parseListeningUrl(output);
-      if (!found) return;
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
+      if (!found || settled) return;
+      settled = true;
+      cleanup(timer, onData, onError, onExit);
       resolve(found);
     };
-    child.stdout?.on('data', onData);
-    child.once('error', error => {
-      clearTimeout(timer);
+    const onError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      terminateProcessTree(child);
+      cleanup(timer, onData, onError, onExit);
       reject(error);
-    });
-    child.once('exit', code => {
-      clearTimeout(timer);
+    };
+    const onExit = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      terminateProcessTree(child);
       const detail = stderrLines.length ? ` Last stderr: ${stderrLines.slice(-3).join(' | ')}` : '';
+      cleanup(timer, onData, onError, onExit);
       reject(new Error(`The sleepy server exited with code ${code ?? 'unknown'} before listening.${detail}`));
-    });
+    };
+    const timer = setTimeout(() => onError(new Error('Timed out waiting for the sleepy server to start.')), 30_000);
+    child.stdout?.on('data', onData);
+    child.once('error', onError);
+    child.once('exit', onExit);
   });
 
   // Keep draining stdout so a chatty server cannot fill the pipe buffer.
   child.stdout?.resume();
   return { url, child, owned: true, stderrLines };
+}
+
+/** Stop only a server this extension owns; attached servers are never signalled. */
+export function stopOwnedCliServer(server?: CliServer): void {
+  if (server?.owned && server.child) terminateProcessTree(server.child);
 }

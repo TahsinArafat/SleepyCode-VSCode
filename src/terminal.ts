@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { terminateProcessTree } from './process-tree.ts';
 
 const MAX_SESSION_OUTPUT = 120_000;
+const MAX_SESSIONS = 8;
+const EXITED_RETENTION_MS = 5 * 60_000;
 
 export type TerminalShellConfig = {
   executable: string;
@@ -25,13 +28,19 @@ type TerminalSession = {
   output: string;
   baseOffset: number;
   exitCode?: number | null;
+  closedAt?: number;
 };
 
 export class TerminalManager {
   private readonly sessions = new Map<string, TerminalSession>();
 
   start(name: string, cwd: string, initialCommand?: string): string {
+    this.pruneExited();
     const sessionName = this.normalizeName(name);
+    const runningCount = [...this.sessions.values()].filter(session => session.exitCode === undefined).length;
+    if (runningCount >= MAX_SESSIONS && !this.sessions.get(sessionName)) {
+      throw new Error(`Terminal limit reached (${MAX_SESSIONS}). Stop a running terminal before starting another.`);
+    }
     const existing = this.sessions.get(sessionName);
     if (existing && existing.exitCode === undefined) throw new Error(`Terminal '${sessionName}' is already running.`);
     if (existing) this.sessions.delete(sessionName);
@@ -51,6 +60,7 @@ export class TerminalManager {
     child.on('error', error => this.append(session, `\n[terminal error] ${error.message}\n`));
     child.on('close', code => {
       session.exitCode = code;
+      session.closedAt = Date.now();
       this.append(session, `\n[process exited with code ${code ?? 'unknown'}]\n`);
     });
     if (initialCommand?.trim()) child.stdin.write(`${initialCommand.trim()}${shell.lineEnding}`);
@@ -76,6 +86,7 @@ export class TerminalManager {
   }
 
   list(): Array<{ name: string; cwd: string; running: boolean; exitCode?: number | null }> {
+    this.pruneExited();
     return [...this.sessions.values()].map(session => ({
       name: session.name,
       cwd: session.cwd,
@@ -86,27 +97,22 @@ export class TerminalManager {
 
   stop(name: string): string {
     const session = this.require(name);
-    if (session.exitCode === undefined && session.process.pid) {
-      if (process.platform === 'win32') {
-        session.process.kill('SIGTERM');
-      } else {
-        try { process.kill(-session.process.pid, 'SIGTERM'); } catch { session.process.kill('SIGTERM'); }
-      }
-    }
+    if (session.exitCode === undefined && session.process.pid) terminateProcessTree(session.process);
     return `Stopped terminal '${session.name}'.`;
   }
 
   dispose(): void {
     for (const session of this.sessions.values()) {
-      if (session.exitCode === undefined && session.process.pid) {
-        if (process.platform === 'win32') {
-          session.process.kill('SIGTERM');
-        } else {
-          try { process.kill(-session.process.pid, 'SIGTERM'); } catch { session.process.kill('SIGTERM'); }
-        }
-      }
+      if (session.exitCode === undefined && session.process.pid) terminateProcessTree(session.process);
     }
     this.sessions.clear();
+  }
+
+  private pruneExited(): void {
+    const cutoff = Date.now() - EXITED_RETENTION_MS;
+    for (const [name, session] of this.sessions) {
+      if (session.exitCode !== undefined && (session.closedAt ?? 0) <= cutoff) this.sessions.delete(name);
+    }
   }
 
   private append(session: TerminalSession, text: string): void {

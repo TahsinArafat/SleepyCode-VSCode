@@ -229,6 +229,9 @@ export class RepoIndex {
   private symbols: SymbolEntry[] = [];
   private docFrequency = new Map<string, number>();
   private totalDocs = 0;
+  private sourceBytes = 0;
+  private readonly lastUsed = new Map<string, number>();
+  private useTick = 0;
   /**
    * Set when `entries` changes, so `indexSymbols` knows its result is stale.
    *
@@ -245,17 +248,9 @@ export class RepoIndex {
   }
 
   ingest(entries: FileEntry[]): void {
-    for (const entry of entries) {
-      if (entry.content.includes('\u0000')) continue;
-      const existingIdx = this.indexByPath.get(entry.path);
-      if (existingIdx !== undefined) {
-        this.entries[existingIdx] = entry;
-      } else {
-        this.indexByPath.set(entry.path, this.entries.length);
-        this.entries.push(entry);
-      }
-    }
-    this.symbolsStale = true;
+    for (const entry of entries) this.store(entry);
+    this.enforceEntryLimits();
+    this.invalidateDerived();
   }
 
   upsert(entry: FileEntry): void {
@@ -263,21 +258,61 @@ export class RepoIndex {
       this.remove(entry.path);
       return;
     }
+    this.store(entry);
+    this.enforceEntryLimits();
+    this.invalidateDerived();
+  }
+
+  private store(entry: FileEntry): void {
+    if (entry.content.includes('\u0000') || Buffer.byteLength(entry.content, 'utf8') > SCAN_MAX_ENTRY_BYTES) return;
     const existingIdx = this.indexByPath.get(entry.path);
     if (existingIdx !== undefined) {
+      const previous = this.entries[existingIdx];
+      if (previous) this.sourceBytes -= Buffer.byteLength(previous.content, 'utf8');
       this.entries[existingIdx] = entry;
     } else {
       this.indexByPath.set(entry.path, this.entries.length);
       this.entries.push(entry);
     }
-    this.invalidateDerived();
+    this.sourceBytes += Buffer.byteLength(entry.content, 'utf8');
+    this.lastUsed.set(entry.path, ++this.useTick);
+  }
+
+  /** Every mutation uses the same caps as the initial scan, including watcher updates. */
+  private enforceEntryLimits(): void {
+    if (this.entries.length <= SCAN_MAX_FILES && this.sourceBytes <= SCAN_MAX_TOTAL_BYTES) return;
+    const ranked = this.entries.map((entry, index) => ({
+      entry,
+      index,
+      used: this.lastUsed.get(entry.path) ?? 0,
+      bytes: Buffer.byteLength(entry.content, 'utf8'),
+    })).sort((a, b) => b.used - a.used || b.index - a.index);
+    const keep = new Set<number>();
+    let bytes = 0;
+    for (const candidate of ranked) {
+      if (keep.size >= SCAN_MAX_FILES || bytes + candidate.bytes > SCAN_MAX_TOTAL_BYTES) continue;
+      keep.add(candidate.index);
+      bytes += candidate.bytes;
+    }
+    this.entries = this.entries.filter((_entry, index) => keep.has(index));
+    this.indexByPath.clear();
+    this.lastUsed.clear();
+    this.sourceBytes = 0;
+    for (let index = 0; index < this.entries.length; index += 1) {
+      const entry = this.entries[index]!;
+      this.indexByPath.set(entry.path, index);
+      this.lastUsed.set(entry.path, ++this.useTick);
+      this.sourceBytes += Buffer.byteLength(entry.content, 'utf8');
+    }
   }
 
   remove(filePath: string): void {
     const at = this.indexByPath.get(filePath);
     if (at !== undefined) {
-      this.entries.splice(at, 1);
+      const [removed] = this.entries.splice(at, 1);
+      if (removed) this.sourceBytes -= Buffer.byteLength(removed.content, 'utf8');
       this.indexByPath.delete(filePath);
+      this.lastUsed.delete(filePath);
       for (let i = at; i < this.entries.length; i += 1) {
         this.indexByPath.set(this.entries[i]!.path, i);
       }
@@ -304,6 +339,11 @@ export class RepoIndex {
     return this.entries;
   }
 
+  /** UTF-8 source bytes currently retained, exposed for memory diagnostics/tests. */
+  get contentBytes(): number {
+    return this.sourceBytes;
+  }
+
   indexSymbols(): SymbolEntry[] {
     if (!this.symbolsStale) return this.symbols;
     this.symbols = [];
@@ -321,12 +361,14 @@ export class RepoIndex {
     const q = query.trim().toLowerCase();
     if (!q) return [];
     if (this.symbolsStale) this.indexSymbols();
-    return this.symbols
+    const results = this.symbols
       .map((s) => ({ s, score: this.symbolScore(s, q) }))
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
       .map((x) => x.s);
+    for (const result of results) this.lastUsed.set(result.path, ++this.useTick);
+    return results;
   }
 
   private symbolScore(s: SymbolEntry, q: string): number {
@@ -369,10 +411,12 @@ export class RepoIndex {
       const idf = Math.log((this.totalDocs + 1) / ((this.docFrequency.get(term) ?? 0) + 1));
       for (const [filePath, tf] of postings) scores.set(filePath, (scores.get(filePath) ?? 0) + tf * idf);
     }
-    return [...scores.entries()]
+    const results = [...scores.entries()]
       .map(([filePath, score]) => ({ path: filePath, score: Number(score.toFixed(3)), snippet: this.snippetFor(filePath, queryTerms) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topK);
+    for (const result of results) this.lastUsed.set(result.path, ++this.useTick);
+    return results;
   }
 
   private snippetFor(filePath: string, terms: string[]): string {
@@ -411,6 +455,7 @@ export class RepoIndex {
 /** Upper bound on indexed files and total raw bytes read into memory. */
 export const SCAN_MAX_FILES = 4_000;
 export const SCAN_MAX_TOTAL_BYTES = 32_000_000;
+export const SCAN_MAX_ENTRY_BYTES = 250_000;
 
 /**
  * Reads the workspace into memory for indexing. Async on purpose: the previous synchronous
@@ -421,7 +466,7 @@ export const SCAN_MAX_TOTAL_BYTES = 32_000_000;
 export async function scanWorkspace(
   root: string,
   ignore: Set<string> = DEFAULT_IGNORE,
-  maxBytes = 250_000,
+  maxBytes = SCAN_MAX_ENTRY_BYTES,
   maxFiles = SCAN_MAX_FILES,
 ): Promise<FileEntry[]> {
   const out: FileEntry[] = [];

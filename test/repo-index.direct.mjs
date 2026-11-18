@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
   RepoIndex,
+  SCAN_MAX_ENTRY_BYTES,
+  SCAN_MAX_FILES,
+  SCAN_MAX_TOTAL_BYTES,
   SourceCitedMemory,
   buildManifest,
   diffManifest,
@@ -14,6 +17,7 @@ import {
   scanWorkspace,
   tokenize,
 } from '../src/repo-index.ts';
+import { RepoIndexService } from '../src/repo-index-service.ts';
 
 // --- hashContent / manifest ---
 
@@ -166,6 +170,48 @@ test('scanWorkspace stops at the file cap', async () => {
   const uncapped = await scanWorkspace(root);
   assert.equal(uncapped.length, 5, 'without a cap every file is indexed');
 });
+
+test('upsert enforces the file-count cap and keeps recently written entries', () => {
+  const index = new RepoIndex();
+  for (let i = 0; i < SCAN_MAX_FILES + 2; i++) index.upsert({ path: `f${i}.ts`, content: 'x' });
+  assert.equal(index.files.length, SCAN_MAX_FILES);
+  assert.equal(index.files.some(file => file.path === 'f0.ts'), false);
+  assert.equal(index.files.some(file => file.path === `f${SCAN_MAX_FILES + 1}.ts`), true);
+});
+
+test('upsert enforces aggregate and per-file byte caps', () => {
+  const index = new RepoIndex();
+  const body = 'x'.repeat(SCAN_MAX_ENTRY_BYTES);
+  for (let i = 0; i < 130; i++) index.upsert({ path: `f${i}.ts`, content: body });
+  assert.ok(index.contentBytes <= SCAN_MAX_TOTAL_BYTES);
+  assert.ok(index.files.every(file => Buffer.byteLength(file.content, 'utf8') <= SCAN_MAX_ENTRY_BYTES));
+  index.upsert({ path: 'too-large.ts', content: 'x'.repeat(SCAN_MAX_ENTRY_BYTES + 1) });
+  assert.equal(index.files.some(file => file.path === 'too-large.ts'), false);
+});
+
+test('watcher refresh honors aggregate caps and concurrent loads share one index', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'repo-index-service-'));
+  writeFileSync(path.join(root, 'seed.ts'), 'export const seed = 1;');
+  const service = new RepoIndexService();
+  const uri = { fsPath: root };
+  const [first, second, third] = await Promise.all([service.load(uri), service.load(uri), service.load(uri)]);
+  assert.equal(first, second);
+  assert.equal(second, third);
+  const body = 'x'.repeat(SCAN_MAX_ENTRY_BYTES);
+  for (let i = 0; i < 130; i++) {
+    const relative = `f${i}.ts`;
+    const absolute = path.join(root, relative);
+    writeFileSync(absolute, body);
+    service.refreshEntry(uri, relative, uriFor(absolute));
+  }
+  assert.ok(first.contentBytes <= SCAN_MAX_TOTAL_BYTES);
+  service.dispose();
+  assert.equal(service.fileCount, 0);
+});
+
+function uriFor(fsPath) {
+  return { fsPath };
+}
 
 // --- SourceCitedMemory ---
 

@@ -271,6 +271,17 @@ body {
 .chat-turn-group:last-child {
 	content-visibility: visible;
 }
+/* The live group can sit above a trailing spacer, so it is marked explicitly
+   rather than relying on :last-child. */
+.chat-turn-group[data-live] {
+	content-visibility: visible;
+}
+/* Stand-ins for turns outside the window: they hold the measured height so the
+   scrollbar and scroll offset still describe the whole transcript. */
+.turn-spacer {
+	flex: none;
+	width: 100%;
+}
 .msg {
 	display: flex;
 	flex-direction: column;

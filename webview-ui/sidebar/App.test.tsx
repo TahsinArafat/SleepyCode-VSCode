@@ -77,10 +77,26 @@ describe("transcript resource usage", () => {
     expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns").map(([msg]) => (msg as any).convId)).toEqual(["A", "B"]);
 
     message({ type: "agentEvent", convId: "A", event: { type: "run-status", status: "finished" } });
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns").map(([msg]) => (msg as any).convId)).toEqual(["B"]);
+
     message({ type: "loadConversation", activeId: "C", turns: [{ role: "user", text: "Third chat" }], running: false });
     vi.mocked(vscode.postMessage).mockClear();
     act(() => window.dispatchEvent(new Event("pagehide")));
     expect(vi.mocked(vscode.postMessage).mock.calls.filter(([msg]) => (msg as any).type === "persistTurns").map(([msg]) => (msg as any).convId)).toEqual(["C"]);
+  });
+  it("replaces optimistic base64 with the accepted resource thumbnail", () => {
+    const original = "data:image/png;base64," + "A".repeat(100_000);
+    initial({ turns: [{ role: "user", text: "Image request", requestId: "request-1", attachments: [{ id: "image", name: "image.png", kind: "image", mime: "image/png", data: original, sourceData: original }] }] });
+    message({ type: "attachmentsResolved", convId: "A", requestId: "request-1", attachments: [{ id: "image", name: "image.png", kind: "image", mime: "image/png", data: "vscode-webview://thumb", tempPath: "/original.png", previewPath: "/preview.jpg" }] });
+    expect(container.querySelector<HTMLImageElement>(".msg-attach-img")?.src).toContain("vscode-webview://thumb");
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    const persisted = vi.mocked(vscode.postMessage).mock.calls.map(([msg]) => msg as any).find(msg => msg.type === "persistTurns");
+    expect(persisted.turns[0].attachments[0].data).toBe("vscode-webview://thumb");
+    expect(persisted.turns[0].attachments[0].sourceData).toBeUndefined();
+    expect(JSON.stringify(persisted.turns)).not.toContain(original);
   });
 });
 
@@ -341,7 +357,7 @@ describe("conversation message actions", () => {
     initial({ turns: history, runningConvIds: [] });
     vi.mocked(vscode.postMessage).mockClear();
     act(() => container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
-    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "sendMessage", convId: "A", text: "First request", attachments, fromIndex: 0, model: "api::model-A", mode: "ask", revertFiles: false });
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "sendMessage", convId: "A", text: "First request", attachments, fromIndex: 0, model: "api::model-A", mode: "ask", revertFiles: false, requestId: expect.any(String) });
     expect(container.querySelectorAll(".msg")).toHaveLength(2);
     expect(container.querySelector(".working-head")?.textContent).toBe("Working");
     expect(container.querySelector('[data-testid="composer"]')?.getAttribute("data-running")).toBe("true");
@@ -354,7 +370,7 @@ describe("conversation message actions", () => {
     expect(container.querySelectorAll(".msg.user.editing")).toHaveLength(1);
     vi.mocked(vscode.postMessage).mockClear();
     act(() => container.querySelector<HTMLButtonElement>('.msg.user.editing [data-testid="send"]')!.click());
-    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "sendMessage", convId: "A", text: "queued-A", attachments: undefined, fromIndex: 2, model: "api::model-A", mode: "ask", revertFiles: false });
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "sendMessage", convId: "A", text: "queued-A", attachments: undefined, fromIndex: 2, model: "api::model-A", mode: "ask", revertFiles: false, requestId: expect.any(String) });
   });
 
   it("keeps file-change confirmation before retrying a response", () => {

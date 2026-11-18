@@ -143,8 +143,40 @@ test('the workspace watcher arms with the view, not with activation', () => {
   assert.doesNotMatch(ctor, /createFileSystemWatcher/, 'the constructor must not create the watcher');
   assertSource(agent, /private startWorkspaceWatcher\(\): void \{\s*if \(this\.workspaceWatcher\) return;/, 'arming is idempotent');
   assertSource(agent, /resolveWebviewView\(view: vscode\.WebviewView\): void \{\s*this\.startWorkspaceWatcher\(\);/, 'the view resolve arms it');
-  // Scheduled tasks must keep firing with the chat closed, so they stay on the constructor.
-  assertSource(ctor, /this\.schedulerTimer = setInterval\(\(\) => \{ void this\.runDueScheduledTasks\(\); \}, 30_000\);/, 'scheduled tasks are not gated on the view');
+  // Scheduled tasks must keep firing with the chat closed, so the timer is armed from
+  // the constructor rather than the view. It is only armed when a schedule exists:
+  // an always-on 30 s interval is ~2,900 no-op wakeups a day for the common case of
+  // no schedules at all, so the constructor arms it conditionally.
+  assertSource(ctor, /this\.armScheduler\(\);/, 'scheduled tasks are not gated on the view');
+  assertSource(agent, /private armScheduler\(\): void \{[\s\S]{0,400}if \(!hasTasks\) \{[\s\S]{0,200}return;/, 'the timer is not started when there is nothing to run');
+  assertSource(agent, /this\.schedulerTimer = setInterval\(\(\) => \{ void this\.runDueScheduledTasks\(\); \}, 30_000\);/, 'a real schedule still fires every 30 s');
+  // A task written after activation must still be picked up.
+  assertSource(agent, /private armScheduler\(\)[\s\S]{0,700}scheduledTasks\(\)\.length > 0/);
+});
+
+test('a hidden sidebar releases the index but never interrupts a run', () => {
+  // The index is the largest resident cache in the extension, and a hidden view is
+  // idle by definition. A live run still reads it through its tools, so it is kept
+  // until the run finishes.
+  const start = agent.indexOf('view.onDidChangeVisibility');
+  const body = agent.slice(start, start + 700);
+  assertSource(body, /else if \(!this\.runs\.size\) \{[\s\S]{0,200}this\.releaseRepoIndex\(\);/, 'hiding the view drops the index when idle');
+  assertSource(body, /if \(view\.visible\) \{[\s\S]{0,200}this\.sendEditorContext\(\);/, 'showing the view still refreshes editor context');
+});
+
+test('activating the extension does not touch the network before the chat opens', () => {
+  // `onUri` and plain commands also activate. A token refresh at construction made an
+  // extension whose chat is never shown hit the network on every window start.
+  const ctor = agent.slice(agent.indexOf('constructor(private readonly context'), agent.indexOf('private async ensureEngine'));
+  assert.doesNotMatch(ctor, /getSleepyToken\(\)/, 'no token warm-up in the constructor');
+  const resolve = agent.slice(agent.indexOf('resolveWebviewView('), agent.indexOf('resolveWebviewView(') + 900);
+  assertSource(resolve, /void getSleepyToken\(\)\.catch/, 'the token is warmed when the view opens');
+});
+
+test('no MCP servers means no login-shell probe', () => {
+  // `loginShellEnv()` spawns a real `zsh -ilc`. The probe runs on every view resolve
+  // and every settings open, so it must not run when nothing is configured.
+  assertSource(agent, /if \(!connections\.length\) return \[\];[\s\S]{0,300}await loginShellEnv\(\)/, 'the empty list returns before the shell probe');
 });
 
 test('dispose clears every timer the provider owns', () => {
@@ -179,6 +211,9 @@ test('every per-conversation map is released when a conversation is deleted', ()
     sessionAutoApproveEditRoots: 'root paths for the session grant',
     reviewTempDirs: 'temp dir paths, removed on dispose',
     cliServer: 'server handles, not conversations',
+    migratingProjects: 'project ids, removed when each migration settles',
+    compactionUndoAvailable: 'lightweight durable availability marker; cleared on permanent deletion',
+    compactionRedoAvailable: 'lightweight durable availability marker; cleared on permanent deletion',
   };
   // Released by the archive/delete handlers rather than `forgetConversation`, because
   // archive keeps them durable under `sleepycode.compactionSnapshots.<id>` and reloads

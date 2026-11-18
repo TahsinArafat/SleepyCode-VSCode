@@ -101,6 +101,25 @@ function probeHarness(messagesImpl) {
   return { manager, registry, created, lost };
 }
 
+test('detach releases the chat but reattaches the same durable CLI session', async () => {
+  const { manager, registry, created, releaseCreate } = harness();
+  const opening = manager.open('conv_detach');
+  releaseCreate();
+  await opening;
+  assert.equal(manager.chatCount, 1);
+  const sessionId = registry.sessionFor('conv_detach');
+
+  manager.detach('conv_detach');
+  assert.equal(manager.chatCount, 0);
+  assert.equal(registry.sessionFor('conv_detach'), sessionId);
+
+  await manager.open('conv_detach');
+  assert.equal(manager.chatCount, 1);
+  assert.equal(registry.sessionFor('conv_detach'), sessionId);
+  assert.equal(created.length, 1, 'detach must not mint a new CLI session');
+  manager.dispose();
+});
+
 test('a transient probe failure does NOT start a new CLI session', async () => {
   // The old probe was `catch { return false }`, so a timeout, a 5xx, or the CLI
   // restarting all minted a fresh session and orphaned the conversation's history.

@@ -8,8 +8,8 @@ import * as skillIdentity from './skill-identity';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ToolLoopAgent, streamText, isLoopFinished, isStepCount } from 'ai';
@@ -22,7 +22,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_PROJECT_BYTES, MAX_STORED_ITEMS, MAX_TURN_UNDO } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
-import { enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, trimPersistedConversations } from './persist-core';
+import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
@@ -63,7 +63,7 @@ import { ProjectIndexService } from './project-index';
 import { retrieveProjectContext, summarizeProjectIndex, type ProjectIntelligence } from './project-index-core';
 import { RepoIndex, SourceCitedMemory, loadMemoryJson } from './repo-index';
 import { RepoIndexService } from './repo-index-service';
-import { captureFileSnapshot as captureSnapshot, captureRedoSnapshot, isRestorable, unrestorableReason } from './file-snapshot-core';
+import { captureFileSnapshot as captureSnapshot, captureRedoSnapshot, isRestorable, MAX_TURN_SNAPSHOT_BYTES, unrestorableReason } from './file-snapshot-core';
 import { dueTasks, evaluateHooks, nextRunAt, type HookContext, type HookRule, type ScheduledTask } from './hooks';
 import { diffLines, fileChangeStats } from './line-diff';
 import { createWorktree, listWorktrees } from './worktrees';
@@ -78,7 +78,7 @@ import {
   type ReasoningEffort,
 } from './reasoning-effort';
 import { hasLocalHistory, usesCliEngine } from './engine-routing-core';
-import type { CliServer } from './cli-server';
+import { stopOwnedCliServer, type CliServer } from './cli-server';
 import { BrowserPreviewPanel } from './browser-preview';
 
 type PlanState = {
@@ -413,7 +413,7 @@ type Selection = {
   mode?: 'agent' | 'ask' | 'plan';
 };
 
-type ProjectMetaEntry = { id?: unknown; name?: unknown; path?: unknown; createdAt?: unknown; updatedAt?: unknown };
+type ProjectMetaEntry = { id?: unknown; name?: unknown; path?: unknown; createdAt?: unknown; updatedAt?: unknown; storageVersion?: unknown };
 
 function isProjectMeta(entry: unknown): entry is ProjectMetaEntry & { id: string; name: string; path: string } {
   const meta = entry as ProjectMetaEntry | undefined;
@@ -457,8 +457,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private readonly subagentControllers = new Map<string, AbortController>();
   private projects: Project[] = [];
-  private otherProjectMetas: Array<{ id: string; name: string; path: string; createdAt: number; updatedAt: number }> = [];
+  private otherProjectMetas: Array<{ id: string; name: string; path: string; createdAt: number; updatedAt: number; storageVersion?: 1 | 2 }> = [];
   private readonly pendingProjectPersist = new WeakSet<Project>();
+  private readonly persistSucceeded = new WeakMap<Project, boolean>();
   private readonly imageTempDirList: string[] = [];
   private sentIconFonts: string[] = [];
   private readonly pendingCliPermissions = new Map<number, { conversationId: string; sessionId: string; permissionId: string }>();
@@ -497,11 +498,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly terminals = new TerminalManager();
   private compactionUndoStacks = new Map<string, SessionCompactionSnapshot<TranscriptItem, ModelMessage>[]>();
   private compactionRedoStacks = new Map<string, SessionCompactionSnapshot<TranscriptItem, ModelMessage>[]>();
+  /** Lightweight availability markers; heavy stacks are hydrated only on undo/redo. */
+  private readonly compactionUndoAvailable = new Set<string>();
+  private readonly compactionRedoAvailable = new Set<string>();
+  private readonly pressureNoticeAt = new Map<string, number>();
   private agentPromptCache = new Map<string, string>(); // agentId -> prompt text
   private sessionAllowedCommands = new Set<string>();
   private sessionAutoApproveEditRoots = new Set<string>();
   private lastSleepyAccountRefresh = 0;
   private readonly projectIndex: ProjectIndexService;
+  private readonly conversationStore: ConversationStore;
   private readonly repoIndex = new RepoIndexService();
   private readonly browser = new BrowserController();
   private readonly browserPreview = new BrowserPreviewPanel();
@@ -533,6 +539,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private fsVersion = 0;
   /** Cached merged MCP connection, reused across turns while its config signature is unchanged. */
   private mcpCache: { key: string; connection: McpConnection } | undefined;
+  private mcpIdleTimer?: ReturnType<typeof setTimeout>;
   /** Pending background MCP reconnect attempt (see `warmMcpConnections`). */
   private mcpWarmTimer?: ReturnType<typeof setTimeout>;
   /**
@@ -563,9 +570,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   /** Close and forget the cached MCP connection (on config change or deactivate). */
   private closeMcpCache(): void {
+    if (this.mcpIdleTimer) clearTimeout(this.mcpIdleTimer);
+    this.mcpIdleTimer = undefined;
     const cached = this.mcpCache?.connection;
     this.mcpCache = undefined;
     if (cached) void cached.close().catch(() => { });
+  }
+
+  private armMcpIdleCleanup(): void {
+    if (!this.mcpCache) return;
+    if (this.mcpIdleTimer) clearTimeout(this.mcpIdleTimer);
+    this.mcpIdleTimer = setTimeout(() => this.closeMcpCache(), 10 * 60_000);
+    this.mcpIdleTimer.unref?.();
   }
 
   private editorContextTimer: ReturnType<typeof setTimeout> | undefined;
@@ -578,6 +594,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   constructor(private readonly context: vscode.ExtensionContext) {
+    this.conversationStore = new ConversationStore(context.globalState);
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
     // The workspace watcher is started by `resolveWebviewView`, not here.
     //
@@ -593,11 +610,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       vscode.window.onDidChangeActiveTextEditor(() => { if (this.webviewVisible) this.sendEditorContext(); }),
       vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorContextDebounced()),
     );
-    // Scheduled tasks stay on the constructor's interval on purpose: they are meant to fire
-    // whether or not anyone has the chat open, so gating this on the view would silently
-    // stop every schedule. `runDueScheduledTasks` early-returns with no tasks configured,
-    // and the timer is cleared in `dispose`.
-    this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
+    // Scheduled tasks stay on a constructor-level timer on purpose: they are meant to
+    // fire whether or not anyone has the chat open, so gating this on the view would
+    // silently stop every schedule. It is only ARMED when there is something to run,
+    // though — an always-on 30 s interval is ~2,900 wakeups a day of pure no-op (a
+    // config read plus a globalState read) for the common case of no schedules at all.
+    this.armScheduler();
     context.subscriptions.push({ dispose: () => { if (this.schedulerTimer) clearInterval(this.schedulerTimer); } });
     context.subscriptions.push({ dispose: () => { void this.shutdownCli(); } });
     context.subscriptions.push({ dispose: () => this.closeMcpCache() });
@@ -609,8 +627,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (typeof value === 'number' && Number.isFinite(value) && value > 0) this.learnedContextWindows[modelId] = value;
       }
     }
-    // Warm the SleepyAI token in the background so the first send doesn't block on a cold refresh.
-    void getSleepyToken().catch(() => { });
+    // The SleepyAI token is warmed when the chat view opens, not here. Activation
+    // also fires for `onUri` (an MCP OAuth callback) and for commands, so doing a
+    // disk read plus a possible refresh request at construction made an extension
+    // that never shows the chat still touch the network on every window start.
   }
 
   /**
@@ -677,7 +697,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private async shutdownCli(): Promise<void> {
     this.cliSessions?.dispose();
     // Only stop a server this extension started; an attached one is not ours.
-    if (this.cliServer?.owned) this.cliServer.child?.kill();
+    stopOwnedCliServer(this.cliServer);
     this.cliServer = undefined;
     this.cliSessions = undefined;
     this.cliClient = undefined;
@@ -777,7 +797,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private findConversation(conversationId: string): Conversation | undefined {
     for (const project of this.projects) {
-      const found = project.conversations.find(conversation => conversation.id === conversationId);
+      const found = this.conversationForId(project, conversationId);
       if (found) return found;
     }
     return undefined;
@@ -968,6 +988,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return changed;
   }
 
+  /**
+   * Start the schedule timer only when there is a schedule to run.
+   *
+   * Called at startup and whenever the view opens or a task list changes, so a task
+   * added later is still picked up. With no tasks (the normal case) the extension
+   * holds no timer at all.
+   */
+  private armScheduler(): void {
+    const enabled = vscode.workspace.getConfiguration('sleepycode').get<boolean>('tasksHooks', true);
+    const hasTasks = enabled && this.scheduledTasks().length > 0;
+    if (!hasTasks) {
+      if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+      this.schedulerTimer = undefined;
+      return;
+    }
+    if (this.schedulerTimer) return;
+    this.schedulerTimer = setInterval(() => { void this.runDueScheduledTasks(); }, 30_000);
+    this.schedulerTimer.unref?.();
+  }
+
   private scheduledTasks(): ScheduledTask[] {
     const stored = this.context.globalState.get<unknown[]>('sleepycode.scheduledTasks', []);
     if (!Array.isArray(stored)) return [];
@@ -975,9 +1015,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async runDueScheduledTasks(): Promise<void> {
-    if (!vscode.workspace.getConfiguration('sleepycode').get<boolean>('tasksHooks', true)) return;
+    if (!vscode.workspace.getConfiguration('sleepycode').get<boolean>('tasksHooks', true)) {
+      // The feature was switched off under us: stop holding a timer for it.
+      this.armScheduler();
+      return;
+    }
     const tasks = this.scheduledTasks();
-    if (!tasks.length) return;
+    if (!tasks.length) {
+      this.armScheduler();
+      return;
+    }
     const due = dueTasks(tasks, Date.now());
     if (!due.length) return;
     const now = Date.now();
@@ -1011,6 +1058,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.releaseRepoIndex();
     if (!this.loaded) return;
     this.reanchorToWorkspace();
+    void this.unloadInactiveProjects();
     void this.ensureProjectIntelligence(false);
   }
 
@@ -1042,6 +1090,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async ensureProjectIntelligence(force: boolean): Promise<ProjectIntelligence | undefined> {
+    // Indexing is opt-in. Without it the agent still receives the workspace path,
+    // OS, and git context, and reads files on demand with its normal tools.
+    if (!this.indexEnabled()) return undefined;
     const root = this.workspaceRoot();
     if (!root) return undefined;
     try { return await this.projectIndex.ensure(root, force); }
@@ -1108,6 +1159,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.startWorkspaceWatcher();
+    // Warm the SleepyAI token once the chat is actually opened, so the first send
+    // does not block on a cold refresh. Deliberately not in the constructor: that
+    // runs for `onUri` and plain commands too, where nothing will ever send.
+    void getSleepyToken().catch(() => { });
+    // A task may have been written since activation; arm the timer if so.
+    this.armScheduler();
     this.view = view;
     // The classic webview was removed. A stored `false` gets flipped so the
     // user is never stuck on a blank panel, and told once.
@@ -1168,9 +1225,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => this.disposePendingNotifies());
     view.onDidChangeVisibility(() => {
       this.webviewVisible = view.visible;
-      // Flush latest editor context when the webview reappears so the
-      // file/selection indicator is current even though updates were paused.
-      if (view.visible) this.sendEditorContext();
+      if (view.visible) {
+        // Flush latest editor context when the webview reappears so the
+        // file/selection indicator is current even though updates were paused.
+        this.sendEditorContext();
+      } else if (!this.runs.size) {
+        // A hidden sidebar is idle by definition. The index is the largest resident
+        // cache in the extension and a search can rebuild it, so drop it — but never
+        // while a run is live, since the agent reads it through its tools.
+        this.releaseRepoIndex();
+      }
     });
     this.loaded = true;
     // loadProjects runs after the webview is live, so an escaped throw rendered an
@@ -1239,9 +1303,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!item.attachments?.length) return item;
       let changed = false;
       const attachments = item.attachments.map(att => {
-        if (att.kind === 'image' && att.tempPath && !att.previewDataUrl) {
+        const previewPath = att.kind === 'image' ? (att.previewPath ?? att.tempPath) : undefined;
+        if (att.kind === 'image' && previewPath && att.previewFailed !== true) {
           changed = true;
-          return { ...att, previewDataUrl: webview.asWebviewUri(vscode.Uri.file(att.tempPath)).toString() };
+          return { ...att, previewDataUrl: webview.asWebviewUri(vscode.Uri.file(previewPath)).toString() };
         }
         return att;
       });
@@ -1505,8 +1570,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    */
   private async exportConversation(conversationId?: string): Promise<void> {
     const project = this.activeProject();
-    const conversation = conversationId
-      ? project?.conversations.find(item => item.id === conversationId)
+    const conversation = conversationId && project
+      ? this.conversationForId(project, conversationId)
       : this.activeConversation();
     if (!conversation) {
       void vscode.window.showInformationMessage('There is no conversation to export.');
@@ -1817,8 +1882,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       setIndexEnabled: async (enabled) => {
         const config = vscode.workspace.getConfiguration('sleepycode');
         await config.update('repoIndex', Boolean(enabled), vscode.ConfigurationTarget.Global);
-        // Off means the cached copy must not answer the next question.
-        if (!enabled) this.projectIndex.invalidate();
+        if (!enabled) {
+          // Off means both caches must go, or they keep answering and keep costing RAM.
+          this.projectIndex.invalidate();
+          this.releaseRepoIndex();
+        } else {
+          // Turning it on is the request to build it; leaving the panel empty until a
+          // manual Rebuild would read as the switch doing nothing.
+          await this.ensureProjectIntelligence(true);
+        }
         this.postConfig();
         return this.publishIndexReport();
       },
@@ -2035,7 +2107,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         settings: {
           systemNotifications: vscode.workspace.getConfiguration('sleepycode').get<boolean>('systemNotifications', true),
           maxSteps: this.config().maxSteps,
-          repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+          repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', false),
           approvalPolicy: adapter.approvalPolicyForMode(this.config().approvalMode),
         },
       }),
@@ -2049,7 +2121,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         model: this.config().model,
         maxSteps: this.config().maxSteps,
         systemPrompt: this.config().systemPrompt,
-        repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true),
+        repoIndex: vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', false),
         // The web-search tool exists only when this is set, so the window shows
         // it as the web-search switch.
         searxngUrl: this.config().searxngUrl,
@@ -2174,7 +2246,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const raw = (message as { attachments?: unknown }).attachments;
     const split = adapter.reactAttachmentsOf(raw);
     if (!split.images.length && !split.files.length) return message.context;
-    const images = await Promise.all(split.images.map(image => this.materializeImage(image)));
+    let imageBytes = 0;
+    let skipped = 0;
+    let acceptedImageCount = 0;
+    const acceptedImages = split.images.filter(image => {
+      const size = image.size ?? Math.floor(image.dataUrl.length * 3 / 4);
+      if (acceptedImageCount >= 8 || size > 10_000_000 || imageBytes + size > 32_000_000) {
+        skipped += 1;
+        return false;
+      }
+      acceptedImageCount += 1;
+      imageBytes += size;
+      return true;
+    });
+    if (skipped) {
+      this.post({ type: 'toast', id: Date.now(), title: 'Attachments skipped', message: `${skipped} image(s) exceeded the 8-file / 32 MB message budget.`, kind: 'attention' });
+    }
+    const images = await Promise.all(acceptedImages.map(image => this.materializeImage(image)));
     const attachments: Attachment[] = [
       ...images.filter((image): image is Extract<Attachment, { kind: 'image' }> => Boolean(image)),
       ...split.files.map(file => ({
@@ -2189,8 +2277,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return { ...(message.context ?? {}), attachments };
   }
 
-  /** Write a data-URL image to a temp file the provider can read. */
-  private async materializeImage(image: { name: string; mimeType: string; dataUrl: string }): Promise<Attachment | undefined> {
+  private postAcceptedAttachments(requestId: unknown, conversationId: string, context?: ComposerContext): void {
+    if (typeof requestId !== 'string' || !requestId) return;
+    const item = createTranscriptItem('user', '');
+    item.attachments = context?.attachments;
+    const turn = adapter.itemsToTurns(this.withResolvedImageUris([item]))[0];
+    this.post({ type: 'attachmentsResolved', requestId, convId: conversationId, attachments: turn?.attachments ?? [] });
+  }
+
+  /** Persist original model input and a bounded preview without retaining base64. */
+  private async materializeImage(image: { name: string; mimeType: string; dataUrl: string; previewDataUrl?: string; tempPath?: string; previewPath?: string; size?: number }): Promise<Attachment | undefined> {
+    if (image.tempPath) {
+      return { kind: 'image', name: image.name, size: image.size ?? 0, mimeType: image.mimeType, tempPath: image.tempPath, previewPath: image.previewPath, previewFailed: !image.previewPath || undefined };
+    }
     const match = image.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
     if (!match?.[1]) return undefined;
     const bytes = Buffer.from(match[1], 'base64');
@@ -2199,12 +2298,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       return undefined;
     }
     try {
-      const folder = await mkdtemp(path.join(tmpdir(), 'sleepycode-image-'));
-      this.imageTempDirList.push(folder);
+      const storage = this.context.storageUri ?? this.context.globalStorageUri;
+      const root = storage ? path.join(storage.fsPath, 'attachments') : tmpdir();
+      await mkdir(root, { recursive: true });
+      const folder = await mkdtemp(path.join(root, 'sleepycode-image-'));
+      if (!storage) this.imageTempDirList.push(folder);
       const extension = image.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
-      const filePath = path.join(folder, `pasted.${extension}`);
+      const filePath = path.join(folder, `original.${extension}`);
       await writeFile(filePath, bytes);
-      return { kind: 'image', name: image.name, size: bytes.byteLength, mimeType: image.mimeType, tempPath: filePath, previewDataUrl: image.dataUrl };
+      let previewPath: string | undefined;
+      const previewMatch = image.previewDataUrl?.match(/^data:image\/[^;]+;base64,(.+)$/);
+      if (previewMatch?.[1]) {
+        const preview = Buffer.from(previewMatch[1], 'base64');
+        if (preview.byteLength <= 2_000_000) {
+          previewPath = path.join(folder, 'preview.jpg');
+          await writeFile(previewPath, preview);
+        }
+      }
+      return { kind: 'image', name: image.name, size: bytes.byteLength, mimeType: image.mimeType, tempPath: filePath, previewPath, previewFailed: !previewPath || undefined };
     } catch {
       return undefined;
     }
@@ -2349,22 +2460,37 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private reportMemory(): void {
     const mb = (bytes: number): string => (bytes / 1048576).toFixed(1);
     let conversations = 0;
+    let coldConversations = 0;
     let items = 0;
     let snapshotChars = 0;
+    let serializedState = 0;
     for (const project of this.projects) {
       conversations += project.conversations.length;
       for (const conversation of project.conversations) {
+        if (conversation.cold) {
+          coldConversations += 1;
+          continue;
+        }
         items += conversation.items.length;
+        serializedState += estimateSerializedBytes({
+          items: conversation.items,
+          messages: conversation.messages,
+          pending: conversation.pending,
+          turnUndo: conversation.turnUndo,
+          turnRedo: conversation.turnRedo,
+        });
         for (const item of conversation.items) {
           for (const snapshot of item.fileSnapshot ?? []) snapshotChars += snapshot.content.length;
         }
       }
     }
     const memory = process.memoryUsage();
-    const indexed = this.repoIndex.fileCount;
+    const root = this.workspaceRoot();
+    const index = root ? this.repoIndex.indexFor(root) : undefined;
     this.log('info', 'perf.memory',
       `heap ${mb(memory.heapUsed)}MB rss ${mb(memory.rss)}MB · ${this.projects.length} projects · ` +
-      `${conversations} conversations · ${items} items · snapshots ${mb(snapshotChars)}MB · index ${indexed} files`);
+      `${conversations} conversations (${coldConversations} cold) · ${items} items · state ${mb(serializedState)}MB · ` +
+      `snapshots ${mb(snapshotChars)}MB · index ${index?.files.length ?? 0} files/${mb(index?.contentBytes ?? 0)}MB`);
   }
 
   private sendExtensionLogs(): void {
@@ -2450,31 +2576,51 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async restoreFileSnapshots(rootPath: string, snapshots: FileSnapshot[]): Promise<void> {
-    const failures: string[] = [];
-    for (const snap of snapshots) {
-      const uri = vscode.Uri.file(path.join(rootPath, snap.path));
-      try {
-        if (!isRestorable(snap)) {
-          // No content was kept, so there is nothing to write back. Reported as a failure
-          // rather than writing `''`, which would blank a file the user could still recover
-          // by hand. Checked before `existed`, because an oversized snapshot of a file that
-          // did not exist would otherwise be "restored" by deleting the file the agent made.
-          failures.push(unrestorableReason(snap));
-          continue;
+    const unavailable = snapshots.filter(snapshot => !isRestorable(snapshot));
+    if (unavailable.length) {
+      throw new Error(`Restore unavailable for this turn. No files were changed.\n${unavailable.map(unrestorableReason).join('\n')}`);
+    }
+
+    const backupRoot = await mkdtemp(path.join(tmpdir(), 'sleepycode-restore-'));
+    const backups: { uri: vscode.Uri; backup?: string; attempted: boolean }[] = [];
+    try {
+      for (const snapshot of snapshots) {
+        const uri = vscode.Uri.file(path.join(rootPath, snapshot.path));
+        let backup: string | undefined;
+        if (existsSync(uri.fsPath)) {
+          backup = path.join(backupRoot, String(backups.length));
+          await copyFile(uri.fsPath, backup);
         }
-        if (snap.existed) {
-          await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
-          await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(snap.content));
+        backups.push({ uri, backup, attempted: false });
+      }
+
+      for (let index = 0; index < snapshots.length; index += 1) {
+        const snapshot = snapshots[index]!;
+        const state = backups[index]!;
+        state.attempted = true;
+        if (snapshot.existed) {
+          await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(state.uri.fsPath)));
+          await vscode.workspace.fs.writeFile(state.uri, new TextEncoder().encode(snapshot.content));
         } else {
-          try { await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false }); } catch (error) {
+          try { await vscode.workspace.fs.delete(state.uri, { recursive: false, useTrash: false }); } catch (error) {
             if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) throw error;
           }
         }
-      } catch (error) {
-        failures.push(`${snap.path}: ${errorMessage(error)}`);
       }
+    } catch (error) {
+      const rollbackFailures: string[] = [];
+      for (const state of backups.filter(entry => entry.attempted)) {
+        try {
+          if (state.backup) await copyFile(state.backup, state.uri.fsPath);
+          else await rm(state.uri.fsPath, { force: true });
+        } catch (rollbackError) {
+          rollbackFailures.push(`${state.uri.fsPath}: ${errorMessage(rollbackError)}`);
+        }
+      }
+      throw new Error(`Restore failed and every attempted file was rolled back${rollbackFailures.length ? `, except: ${rollbackFailures.join(' | ')}` : '.'}: ${errorMessage(error)}`);
+    } finally {
+      await rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
     }
-    if (failures.length) throw new Error(`Could not restore ${failures.length} file${failures.length === 1 ? '' : 's'}:\n${failures.join('\n')}`);
   }
 
   private itemIndexForTurnIndex(items: readonly TranscriptItem[], turnIndex: number): number {
@@ -2588,6 +2734,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * root `Uri`; see `repo-index-service.ts` for the lifetime itself.
    */
   private loadRepoIndex(root: vscode.Uri): Promise<RepoIndex> {
+    // Explicit scans (the Index panel, repo_search) only happen when indexing is on.
+    if (!this.indexEnabled()) return Promise.resolve(this.repoIndex.indexFor(root) ?? new RepoIndex());
     return this.repoIndex.load(root);
   }
 
@@ -2621,6 +2769,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.lastAutoCompactAt.delete(id);
     this.sendingConversations.delete(id);
     this.pendingDeltas.delete(id);
+    this.pressureNoticeAt.delete(id);
     for (const [reqId, entry] of this.pendingCliPermissions) {
       if (entry.conversationId === id) this.pendingCliPermissions.delete(reqId);
     }
@@ -2648,8 +2797,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       beforeMessages: snapshot.beforeMessages ?? [],
       afterMessages: snapshot.afterMessages ?? [],
     });
-    if (stacks.undo.length) this.compactionUndoStacks.set(conversationId, stacks.undo.slice(-3).map(normalize));
-    if (stacks.redo.length) this.compactionRedoStacks.set(conversationId, stacks.redo.slice(-3).map(normalize));
+    if (stacks.undo.length) {
+      this.compactionUndoStacks.set(conversationId, stacks.undo.slice(-3).map(normalize));
+      this.compactionUndoAvailable.add(conversationId);
+    } else {
+      this.compactionUndoAvailable.delete(conversationId);
+    }
+    if (stacks.redo.length) {
+      this.compactionRedoStacks.set(conversationId, stacks.redo.slice(-3).map(normalize));
+      this.compactionRedoAvailable.add(conversationId);
+    } else {
+      this.compactionRedoAvailable.delete(conversationId);
+    }
   }
 
   private loadRepoMemory(root: vscode.Uri): SourceCitedMemory {
@@ -2873,32 +3032,75 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.imageTempDirList.length = 0;
   }
 
+  private restoreConversationForLoad(conversation: Conversation): Conversation {
+    const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
+    const restored = restoreLoadedConversation(conversation, {
+      maxStoredMessages: this.storedMessageLimitFor(conversation),
+      maxTurnUndo: MAX_TURN_UNDO,
+      normalizeItem: (item, index) => normalizeTranscriptItem(item as Partial<TranscriptItem>, baseTimestamp + index),
+      fallbackItem: () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
+      interruptedItem: extras => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree as string | undefined),
+      onCorruptItem: error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
+    }) as Conversation;
+    // Legacy records stored the whole image inline. The file already exists on disk,
+    // so keep the reference and drop the multi-megabyte string.
+    for (const item of restored.items) {
+      if (!item.attachments?.length) continue;
+      item.attachments = item.attachments.map(attachment => {
+        if (attachment.kind !== 'image' || !attachment.tempPath) return attachment;
+        if (!attachment.previewDataUrl?.startsWith('data:')) return attachment;
+        const { previewDataUrl: _inline, ...rest } = attachment;
+        return rest;
+      });
+    }
+    return restored;
+  }
+
   private loadProjectByMeta(entry: ProjectMetaEntry & { id: string; name: string; path: string }): Project {
+    const manifest = this.conversationStore.readManifest(entry.id);
+    if (manifest) {
+      const activeId = typeof manifest.activeConversationId === 'string' ? manifest.activeConversationId : '';
+      const activeRecord = activeId ? this.conversationStore.readConversation(activeId) : undefined;
+      if (!activeId || activeRecord) {
+        const conversations = manifest.conversations.map(summary => {
+          if (summary.id !== activeId) return { ...summary, items: [], messages: undefined, pending: undefined, turnUndo: [], turnRedo: [], cold: true };
+          const restored = this.restoreConversationForLoad(activeRecord!);
+          if (restored.archived) {
+            restored.turnUndo = [];
+            restored.turnRedo = [];
+          } else {
+            this.loadCompactionSnapshots(restored.id);
+          }
+          return restored;
+        });
+        return {
+          id: entry.id,
+          name: entry.name,
+          path: entry.path,
+          createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
+          updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+          activeConversationId: activeId,
+          conversations,
+          storageVersion: 2,
+        };
+      }
+      // A missing active record is corruption or an interrupted migration. Prefer
+      // the intact v1 fallback over manufacturing an empty conversation with that id.
+    }
+
     const data = this.context.globalState.get<{ conversations?: unknown; activeConversationId?: unknown } | undefined>(`sleepycode.project.${entry.id}`, undefined);
     const conversations = Array.isArray(data?.conversations) ? data.conversations as Conversation[] : [];
     const loadedConversations = conversations.map(conversation => {
-      const baseTimestamp = Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now();
-      const restored = restoreLoadedConversation(conversation as Conversation, {
-        // The limit is per model, and the catalog may not be resolved this early; the
-        // floor it falls back to is still far above a conversation that has been
-        // compacting on its token budget.
-        maxStoredMessages: this.storedMessageLimitFor(conversation),
-        maxTurnUndo: MAX_TURN_UNDO,
-        normalizeItem: (item, index) => normalizeTranscriptItem(item as Partial<TranscriptItem>, baseTimestamp + index),
-        fallbackItem: () => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error'),
-        interruptedItem: extras => createTranscriptItem('assistant', INTERRUPTED_TURN_TEXT, 'error', extras.gitTree as string | undefined),
-        onCorruptItem: error => this.log('warn', 'conversation.load.corrupt', errorMessage(error)),
-      }) as Conversation;
+      const restored = this.restoreConversationForLoad(conversation);
       if (restored.archived) {
         restored.turnUndo = [];
         restored.turnRedo = [];
       } else {
-        // Rehydrate durable compaction snapshots so undo survives an extension reload.
         this.loadCompactionSnapshots(conversation.id);
       }
       return restored;
     });
-    return {
+    const project: Project = {
       id: entry.id,
       name: entry.name,
       path: entry.path,
@@ -2906,7 +3108,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
       activeConversationId: typeof data?.activeConversationId === 'string' ? data.activeConversationId : '',
       conversations: loadedConversations,
+      storageVersion: 1,
     };
+    void this.migrateProjectStorage(project);
+    return project;
+  }
+
+  private readonly migratingProjects = new Set<string>();
+
+  private async migrateProjectStorage(project: Project): Promise<void> {
+    if (this.migratingProjects.has(project.id)) return;
+    this.migratingProjects.add(project.id);
+    try {
+      if (!(await this.conversationStore.migrateProject(project))) return;
+      project.storageVersion = 2;
+      for (const meta of this.otherProjectMetas) if (meta.id === project.id) meta.storageVersion = 2;
+      await this.persistProjects();
+      await this.offloadColdConversations(project);
+    } finally {
+      this.migratingProjects.delete(project.id);
+    }
   }
 
   private loadProjects(): void {
@@ -2931,6 +3152,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         path: entry.path,
         createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
         updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+        storageVersion: entry.storageVersion === 2 ? 2 : undefined,
       }));
     if (root) {
       let project = this.projects.find(item => item.path === root);
@@ -2984,6 +3206,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       activeConversationId: '',
       createdAt: now,
       updatedAt: now,
+      storageVersion: 2,
     };
   }
 
@@ -3014,6 +3237,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.projects.unshift(project);
     }
     this.activeProjectId = project.id;
+    void this.unloadInactiveProjects();
     return project;
   }
 
@@ -3028,10 +3252,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private ensureConversationResident(conversation: Conversation): Conversation {
+    if (conversation.cold !== true) {
+      conversation.lastUsed = Date.now();
+      return conversation;
+    }
+    const stored = this.conversationStore.readConversation(conversation.id);
+    if (!stored) throw new Error(`Conversation ${conversation.id} could not be loaded; its record is missing. No data was overwritten.`);
+    const restored = this.restoreConversationForLoad(stored);
+    Object.assign(conversation, {
+      items: restored.items,
+      messages: restored.messages,
+      pending: restored.pending,
+      turnUndo: restored.turnUndo,
+      turnRedo: restored.turnRedo,
+      turnSnapshotRevision: restored.turnSnapshotRevision,
+      cold: false,
+      lastUsed: Date.now(),
+    });
+    if (conversation.archived) {
+      conversation.turnUndo = [];
+      conversation.turnRedo = [];
+    } else {
+      this.loadCompactionSnapshots(conversation.id);
+    }
+    return conversation;
+  }
+
+  private conversationForId(project: Project, id: string, hydrate = true): Conversation | undefined {
+    const conversation = project.conversations.find(item => item.id === id);
+    return conversation && hydrate ? this.ensureConversationResident(conversation) : conversation;
+  }
+
   private activeConversation(): Conversation | undefined {
     const project = this.activeProject();
     if (!project) return undefined;
-    let conversation = project.conversations.find(item => item.id === project.activeConversationId);
+    let conversation = this.conversationForId(project, project.activeConversationId);
     if (!conversation) {
       conversation = this.createConversation();
       project.conversations.unshift(conversation);
@@ -3058,21 +3314,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     void this.ensureCliSelection(conversation);
   }
 
-  /**
-   * Hard safety bound only. History is NOT routinely trimmed; this guard exists
-   * solely to keep an unbounded conversation from exhausting memory. When it does
-   * trim, the user is told, so loss is never silent.
-   */
+  /** Count guards trigger compaction; visible history is never sliced to fit a count. */
   private boundConversationItems(conversation: Conversation): void {
-    if (conversation.items.length <= MAX_STORED_ITEMS) return;
-    // Start the kept window on a user turn. A window that opens on an assistant item renders that
-    // answer without the question it answers, so the turn reads as missing rather than trimmed.
-    let first = conversation.items.length - MAX_STORED_ITEMS;
-    while (first < conversation.items.length && conversation.items[first]?.role !== 'user') first++;
-    if (first >= conversation.items.length) first = conversation.items.length - MAX_STORED_ITEMS;
-    const dropped = first;
-    conversation.items = conversation.items.slice(first);
-    this.post({ type: 'contextNotice', conversationId: conversation.id, kind: 'trimmed', text: `Older history was trimmed (${dropped} item${dropped === 1 ? '' : 's'}) to keep this conversation within memory limits.` });
+    if (conversation.items.length <= MAX_STORED_ITEMS || this.historyBoundNoticed.has(conversation.id)) return;
+    this.historyBoundNoticed.add(conversation.id);
+    this.post({
+      type: 'contextNotice',
+      conversationId: conversation.id,
+      kind: 'trimmed',
+      text: `This conversation reached the ${MAX_STORED_ITEMS.toLocaleString()}-item memory guard. Older turns will be summarized; visible history is not being discarded.`,
+    });
   }
 
   /**
@@ -3170,13 +3421,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     } else {
       await this.context.globalState.update(`sleepycode.compactionSnapshots.${conversationId}`, undefined);
     }
+    if (persisted.undo.length) this.compactionUndoAvailable.add(conversationId);
+    else this.compactionUndoAvailable.delete(conversationId);
+    if (persisted.redo.length) this.compactionRedoAvailable.add(conversationId);
+    else this.compactionRedoAvailable.delete(conversationId);
   }
 
   private persistProjects(): Promise<void> {
     const loadedProjects = this.projects.slice(0, MAX_PERSISTED_PROJECTS);
     const loadedIds = new Set(loadedProjects.map(project => project.id));
     const combinedMetas = [
-      ...loadedProjects.map(({ id, name, path, createdAt, updatedAt }) => ({ id, name, path, createdAt, updatedAt })),
+      ...loadedProjects.map(({ id, name, path, createdAt, updatedAt, storageVersion }) => ({ id, name, path, createdAt, updatedAt, storageVersion })),
       ...this.otherProjectMetas.filter(meta => !loadedIds.has(meta.id)),
     ].slice(0, MAX_PERSISTED_PROJECTS);
     this.persistChain = enqueuePersist(this.persistChain, async () => {
@@ -3187,10 +3442,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         ...this.unreadableProjectEntries,
       ]);
       for (const project of loadedProjects) {
-        await this.context.globalState.update(`sleepycode.project.${project.id}`, {
-          conversations: this.persistedConversationsFor(project),
-          activeConversationId: project.activeConversationId,
-        });
+        this.persistSucceeded.set(project, false);
+        if (project.storageVersion === 2) {
+          for (const conversation of project.conversations) {
+            if (conversation.cold !== true && !(await this.conversationStore.writeConversation(conversation))) {
+              throw new Error(`Could not save conversation ${conversation.id}.`);
+            }
+          }
+          if (!(await this.conversationStore.writeManifest(project))) throw new Error(`Could not save project ${project.id}.`);
+        } else {
+          await this.context.globalState.update(`sleepycode.project.${project.id}`, {
+            conversations: this.persistedConversationsFor(project),
+            activeConversationId: project.activeConversationId,
+          });
+        }
+        this.persistSucceeded.set(project, true);
       }
     }, error => this.reportPersistFailure(error));
     return this.persistChain;
@@ -3211,7 +3477,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         const attachments = item.attachments.map(att => {
           if (att.kind !== 'image') return att;
           const preview = (att as { previewDataUrl?: string }).previewDataUrl;
-          if (att.tempPath && typeof preview === 'string' && preview.length > 8192) {
+          if ((att.tempPath || att.previewPath) && typeof preview === 'string') {
             attChanged = true;
             const copy = { ...att } as { previewDataUrl?: string };
             delete copy.previewDataUrl;
@@ -3271,17 +3537,127 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private persistProject(project: Project): Promise<void> {
     if (this.pendingProjectPersist.has(project)) return this.persistChain;
     this.pendingProjectPersist.add(project);
+    this.persistSucceeded.set(project, false);
     this.persistChain = enqueuePersist(this.persistChain, async () => {
       this.pendingProjectPersist.delete(project);
-      await this.context.globalState.update(`sleepycode.project.${project.id}`, {
-        conversations: this.persistedConversationsFor(project),
-        activeConversationId: project.activeConversationId,
-      });
+      if (project.storageVersion === 2) {
+        for (const conversation of project.conversations) {
+          if (conversation.cold !== true && !(await this.conversationStore.writeConversation(conversation))) {
+            throw new Error(`Could not save conversation ${conversation.id}.`);
+          }
+        }
+        if (!(await this.conversationStore.writeManifest(project))) throw new Error(`Could not save project ${project.id}.`);
+      } else {
+        await this.context.globalState.update(`sleepycode.project.${project.id}`, {
+          conversations: this.persistedConversationsFor(project),
+          activeConversationId: project.activeConversationId,
+        });
+      }
+      this.persistSucceeded.set(project, true);
     }, error => {
       this.pendingProjectPersist.delete(project);
+      this.persistSucceeded.set(project, false);
       this.reportPersistFailure(error);
     });
     return this.persistChain;
+  }
+
+  private async offloadColdConversations(project: Project): Promise<void> {
+    if (project.storageVersion !== 2) return;
+    const candidates = project.conversations.filter(conversation =>
+      conversation.cold !== true &&
+      conversation.id !== project.activeConversationId &&
+      !this.runs.has(conversation.id) &&
+      !this.compactionControllers.has(conversation.id) &&
+      !this.queue.some(entry => entry.conversationId === conversation.id),
+    ).map(conversation => {
+      conversation.estimatedBytes = estimateSerializedBytes(conversation);
+      conversation.lastUsed ??= conversation.updatedAt;
+      return conversation;
+    }).sort((a, b) => (a.lastUsed ?? a.updatedAt) - (b.lastUsed ?? b.updatedAt));
+    let bytes = candidates.reduce((total, conversation) => total + (conversation.estimatedBytes ?? 0), 0);
+    let evicted = 0;
+    for (const conversation of candidates) {
+      if (candidates.length - evicted <= 8 && bytes <= 16_000_000) break;
+      if (!(await this.conversationStore.writeConversation(conversation))) {
+        this.log('warn', 'conversation.offload.failed', conversation.id);
+        continue;
+      }
+      const summary = summarizeConversation(conversation, true);
+      const previousBytes = conversation.estimatedBytes ?? 0;
+      conversation.messageCount = summary.messageCount;
+      conversation.changeCount = summary.changeCount;
+      conversation.lastStatus = summary.lastStatus;
+      conversation.excerpt = summary.excerpt;
+      conversation.items = [];
+      conversation.messages = undefined;
+      conversation.pending = undefined;
+      conversation.turnUndo = [];
+      conversation.turnRedo = [];
+      conversation.cold = true;
+      conversation.estimatedBytes = 0;
+      this.forgetConversation(conversation.id);
+      this.compactionUndoStacks.delete(conversation.id);
+      this.compactionRedoStacks.delete(conversation.id);
+      this.cliSessions?.detach(conversation.id);
+      bytes -= previousBytes;
+      evicted += 1;
+    }
+    if (evicted) {
+      await this.conversationStore.writeManifest(project);
+      this.syncConversations(false);
+    }
+  }
+
+  private async unloadInactiveProjects(): Promise<void> {
+    for (const project of [...this.projects]) {
+      if (project.id === this.activeProjectId) continue;
+      if (project.storageVersion !== 2) await this.migrateProjectStorage(project);
+      if (project.storageVersion !== 2) continue;
+      const ids = new Set(project.conversations.map(conversation => conversation.id));
+      const busy = project.conversations.some(conversation => this.runs.has(conversation.id) || this.compactionControllers.has(conversation.id))
+        || this.queue.some(entry => ids.has(entry.conversationId))
+        || [...this.pendingCliPermissions.values()].some(entry => ids.has(entry.conversationId))
+        || [...this.pendingNotifies.values()].some(entry => entry.approval?.conversationId && ids.has(entry.approval.conversationId));
+      if (busy) continue;
+      await this.persistProject(project);
+      if (this.persistSucceeded.get(project) !== true || this.activeProjectId === project.id) continue;
+      const index = this.projects.indexOf(project);
+      if (index < 0) continue;
+      this.projects.splice(index, 1);
+      if (!this.otherProjectMetas.some(meta => meta.id === project.id)) {
+        this.otherProjectMetas.push({ id: project.id, name: project.name, path: project.path, createdAt: project.createdAt, updatedAt: project.updatedAt, storageVersion: 2 });
+      }
+      for (const conversation of project.conversations) {
+        this.forgetConversation(conversation.id);
+        this.compactionUndoStacks.delete(conversation.id);
+        this.compactionRedoStacks.delete(conversation.id);
+        this.cliSessions?.detach(conversation.id);
+      }
+    }
+    void this.persistProjects();
+  }
+
+  private async deleteAttachmentFiles(conversation: Conversation): Promise<void> {
+    const storage = this.context.storageUri ?? this.context.globalStorageUri;
+    if (!storage) return;
+    const root = path.join(storage.fsPath, 'attachments') + path.sep;
+    for (const item of conversation.items) {
+      for (const attachment of item.attachments ?? []) {
+        if (attachment.kind !== 'image') continue;
+        const file = attachment.tempPath || attachment.previewPath;
+        if (file && file.startsWith(root)) await rm(path.dirname(file), { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  private async deleteConversationFiles(conversation: Conversation): Promise<void> {
+    if (conversation.cold !== true) {
+      await this.deleteAttachmentFiles(conversation);
+      return;
+    }
+    const stored = this.conversationStore.readConversation(conversation.id);
+    if (stored) await this.deleteAttachmentFiles(stored);
   }
 
   /** The project that owns a conversation, so a checkpoint writes the right blob. */
@@ -3307,7 +3683,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const project = this.projectForConversation(conversation.id);
     if (!project) return this.persistChain;
     project.updatedAt = now;
-    return this.persistProject(project);
+    return this.persistProject(project).then(() => this.offloadColdConversations(project));
   }
 
   private sortConversations(project: Project): void {
@@ -3332,16 +3708,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       else queueByConversation.set(entry.conversationId, [entry]);
     }
     this.post({
-      type: 'conversations', conversations: project.conversations.map(({ id, title, archived, pinned, updatedAt, items }) => {
-        // Scan backwards instead of copying and reversing the whole item array.
+      type: 'conversations', conversations: project.conversations.map(conversation => {
+        const { id, title, archived, pinned, updatedAt, items, cold } = conversation;
         const lastAssistant = findLastAssistant(items);
+        const messageCount = cold ? conversation.messageCount ?? 0 : items.length;
+        const changeCount = cold ? conversation.changeCount ?? 0 : lastAssistant?.changes?.length ?? 0;
+        const lastStatus = cold
+          ? conversation.lastStatus ?? 'empty'
+          : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? (lastAssistant.errorInfo?.code === 'interrupted' ? 'stopped' : 'failed') : lastAssistant ? 'done' : 'empty';
         const queued = queueByConversation.get(id) ?? [];
         return {
           id, title, archived, pinned: Boolean(pinned), updatedAt,
-          hasMessages: items.length > 0,
-          messageCount: items.length,
-          changeCount: lastAssistant?.changes?.length ?? 0,
-          status: this.runs.has(id) ? 'running' : lastAssistant?.paused ? 'paused' : lastAssistant?.kind === 'error' ? (lastAssistant.errorInfo?.code === 'interrupted' ? 'stopped' : 'failed') : lastAssistant ? 'done' : 'empty',
+          hasMessages: messageCount > 0,
+          messageCount,
+          changeCount,
+          status: this.runs.has(id) ? 'running' : lastStatus,
           running: this.runs.has(id),
           queued: queued.map(entry => entry.text),
           queuedIds: queued.map(entry => entry.id),
@@ -3352,8 +3733,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const active = this.activeConversation();
       if (active) {
         const selection = this.selectionFor(active);
-        const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && (this.compactionUndoStacks.get(active.id)?.length ?? 0) > 0;
-        const compactionRedoable = (this.compactionRedoStacks.get(active.id)?.length ?? 0) > 0;
+        const compactionUndoable = active.items[active.items.length - 1]?.kind === 'divider' && this.compactionUndoAvailable.has(active.id);
+        const compactionRedoable = this.compactionRedoAvailable.has(active.id);
         this.post({ type: 'conversation', id: active.id, items: webviewTranscriptItems(active.items), model: selection.model, provider: selection.provider, agentId: selection.agentId, reasoningEffort: selection.reasoningEffort, personaId: this.personaIdFor(active), compactionUndoable, compactionRedoable });
       }
     }
@@ -3538,8 +3919,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // and model history. Its real value is recovering a chat that would
       // otherwise open blank.
       const project = this.activeProject();
-      const conversation = message.conversationId
-        ? project?.conversations.find(item => item.id === message.conversationId)
+      const conversation = message.conversationId && project
+        ? this.conversationForId(project, message.conversationId)
         : undefined;
       const turns = Array.isArray(message.turns) ? message.turns : [];
       if (project && conversation && !conversation.items.length && turns.length) {
@@ -3703,7 +4084,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // withheld mid-run. Republishing is otherwise suppressed while streaming;
       // this one answer is exempt, and it is consumed by the message it allows.
       const project = this.activeProject();
-      const requested = project?.conversations.find(entry => entry.id === (message.conversationId || project.activeConversationId));
+      const requested = project ? this.conversationForId(project, message.conversationId || project.activeConversationId) : undefined;
       if (!project || !requested) return;
       project.activeConversationId = requested.id;
       this.reactSnapshotOnce = true;
@@ -3712,12 +4093,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'openConversation') {
       const project = this.activeProject();
-      const opened = project?.conversations.find(item => item.id === message.id);
+      const opened = project ? this.conversationForId(project, message.id) : undefined;
       if (project && opened) {
         project.activeConversationId = message.id;
         project.updatedAt = Date.now();
         void this.persistProject(project);
         this.syncConversations();
+        void this.offloadColdConversations(project);
         this.refreshSessionStats();
         // The bar restored from this conversation's history needs its turn id,
         // or every button on it resolves nothing and reads as broken.
@@ -3798,11 +4180,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // nothing: un-archiving reloads them.
         this.compactionUndoStacks.delete(message.id);
         this.compactionRedoStacks.delete(message.id);
+        this.cliSessions?.detach(message.id);
       } else {
-        // Restored to the list: bring the stacks back so compact/undo behaves as it did
-        // before the conversation was archived. A conversation that never compacted has
-        // no stored record and simply gets nothing back.
-        this.loadCompactionSnapshots(message.id);
+        // Restoring a cold conversation stays metadata-only; its next open hydrates
+        // the transcript and compaction snapshots together.
+        if (conversation.cold !== true) this.loadCompactionSnapshots(message.id);
       }
       conversation.updatedAt = Date.now();
       project.updatedAt = Date.now();
@@ -3823,7 +4205,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const project = this.activeProject();
       const conversation = project?.conversations.find(item => item.id === message.id);
       if (!project || !conversation || this.runs.has(message.id)) return;
-      const messageCount = conversation.items.length;
+      const messageCount = conversation.cold ? conversation.messageCount ?? 0 : conversation.items.length;
       const detail = 'This permanently deletes ' + (conversation.archived ? 'the archived conversation' : 'this conversation') + (messageCount ? ' and its ' + messageCount + ' message' + (messageCount === 1 ? '' : 's') : '') + '. This cannot be undone.';
       if (this.confirmDeleteConversations()) {
         const choice = await this.prompt('Delete conversation \'' + conversation.title + '\'?', detail, { ok: 'Delete', secondary: 'Don\'t ask again', cancel: 'Cancel', danger: true });
@@ -3836,6 +4218,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.queue = this.queue.filter(entry => entry.conversationId !== message.id);
       this.compactionUndoStacks.delete(message.id);
       this.compactionRedoStacks.delete(message.id);
+      this.compactionUndoAvailable.delete(message.id);
+      this.compactionRedoAvailable.delete(message.id);
       // Drop the CLI session binding too. The conversation's rows in sleepy.db
       // are untouched and stay reachable from the CLI, but leaving the binding
       // here would let a later conversation that reuses this id silently adopt
@@ -3845,6 +4229,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // copy, so leaving it behind kept the deleted conversation's whole history resident.
       this.forgetConversation(message.id);
       void this.context.globalState.update(`sleepycode.compactionSnapshots.${message.id}`, undefined);
+      void this.conversationStore.deleteConversation(message.id, conversation.turnSnapshotRevision);
+      void this.deleteConversationFiles(conversation);
       project.conversations = project.conversations.filter(item => item.id !== message.id);
       project.updatedAt = Date.now();
       if (project.activeConversationId === message.id) {
@@ -3908,7 +4294,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'branchConversation') {
       const project = this.activeProject();
-      const conversation = project?.conversations.find(item => item.id === message.conversationId);
+      const conversation = project ? this.conversationForId(project, message.conversationId) : undefined;
       if (!project || !conversation) return;
       const targetIndex = message.itemId
         ? conversation.items.findIndex(item => item.id === message.itemId)
@@ -3939,7 +4325,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const revertMsg = message as unknown as { conversationId?: string; index?: number; revertFiles?: boolean };
       const project = this.activeProject();
       const convId = revertMsg.conversationId || project?.activeConversationId || '';
-      const conversation = project?.conversations.find(item => item.id === convId);
+      const conversation = project ? this.conversationForId(project, convId) : undefined;
       if (!project || !conversation || this.runs.has(convId)) return;
       if (this.refuseIfCliOwned(conversation, 'Reverting to an earlier message')) return;
       const targetIndex = typeof revertMsg.index === 'number'
@@ -4071,7 +4457,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // retained in `turnUndo`/`turnRedo` (up to 5 turns) for the life of the session, so
         // an unbounded read here pinned the current contents of every edited file in memory.
         const rootPath = root.fsPath;
-        popped.snapshot.redoFiles = assistantItem.fileSnapshot.map(snap => captureRedoSnapshot(rootPath, snap.path));
+        let redoBytes = 0;
+        let redoExceeded = false;
+        const redoFiles = assistantItem.fileSnapshot.map(snap => {
+          const captured = captureRedoSnapshot(rootPath, snap.path);
+          redoBytes += Buffer.byteLength(captured.content, 'utf8');
+          if (redoBytes > MAX_TURN_SNAPSHOT_BYTES) redoExceeded = true;
+          return captured;
+        });
+        popped.snapshot.redoFiles = redoExceeded
+          ? assistantItem.fileSnapshot.map(snap => ({ path: snap.path, existed: snap.existed, content: '', pressureEvicted: true }))
+          : redoFiles;
+        if (redoExceeded) {
+          this.post({ type: 'contextNotice', conversationId: conversation.id, kind: 'trimmed', text: 'Redo snapshots exceeded the turn memory budget. File-level redo is disabled for this turn.' });
+        }
       }
       const gitTracked = root && project.path === root.fsPath && isGitTrackedWorkspace(root.fsPath);
       if (gitTracked && root) {
@@ -4836,14 +5235,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         void vscode.window.showWarningMessage('Images must be under 10 MB.');
         return;
       }
-      const match = message.dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
-      if (!match) return;
-      const folder = await mkdtemp(path.join(tmpdir(), 'sleepycode-image-'));
-      this.imageTempDirList.push(folder);
-      const extension = message.mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
-      const filePath = path.join(folder, `pasted.${extension}`);
-      await writeFile(filePath, Buffer.from(match[1]!, 'base64'));
-      this.post({ type: 'contextAttachments', attachments: [{ kind: 'image', name: message.name || `pasted.${extension}`, size: message.size, mimeType: message.mimeType, tempPath: filePath, previewDataUrl: message.dataUrl }] });
+      const attachment = await this.materializeImage({ name: message.name || 'pasted.png', mimeType: message.mimeType, dataUrl: message.dataUrl, size: message.size });
+      if (attachment) this.post({ type: 'contextAttachments', attachments: [attachment] });
       return;
     }
     if (message.type === 'dropFiles') {
@@ -4989,7 +5382,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const steering = (message as { steering?: boolean }).steering === true;
       const fromIndex = (message as { fromIndex?: number }).fromIndex;
 
-      const targetConversation = project.conversations.find(conversation => conversation.id === conversationId);
+      const targetConversation = this.conversationForId(project, conversationId);
       const isContinuation = /^(?:continue|keep going|go on|please continue|continue from where you stopped|proceed|finish)\.?$/i.test(sendText.trim());
       if (typeof fromIndex !== 'number' && isContinuation && targetConversation && !this.runs.has(conversationId)) {
         const resumeFrom = resumeFromLastAssistant(targetConversation.items);
@@ -5038,12 +5431,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const stage = this.beginSendStage(conversationId);
       try {
         if (typeof fromIndex === 'number' && !steering && !this.runs.has(conversationId)) {
-          const targetConv = project.conversations.find(conversation => conversation.id === conversationId);
+          const targetConv = this.conversationForId(project, conversationId);
           const itemIndex = targetConv ? this.itemIndexForTurnIndex(targetConv.items, fromIndex) : -1;
           const targetItem = itemIndex >= 0 ? targetConv?.items[itemIndex] : undefined;
           if (targetConv && targetItem && targetItem.role === 'user') {
             stage('attachments');
             const editContext = await this.withReactAttachments(message);
+            this.postAcceptedAttachments((message as { requestId?: string }).requestId, conversationId, editContext);
             await this.onMessage({
               type: 'editUserMessage',
               conversationId,
@@ -5057,6 +5451,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         stage('attachments');
         const composerContext = await this.withReactAttachments(message);
+        if (!steering) this.postAcceptedAttachments((message as { requestId?: string }).requestId, conversationId, composerContext);
         stage('editor-context');
         const editorContext = root ? await this.composerContextBlock(root, composerContext) : '';
         stage('project-context');
@@ -5069,7 +5464,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // run this send. A chat with leftover local history stays local instead.
         const engine = await this.ensureEngine();
         stage('dispatch');
-        const sending = project.conversations.find(conversation => conversation.id === conversationId);
+        const sending = this.conversationForId(project, conversationId);
         // A CLI conversation is owned by a process whose step loop this build has
         // no mid-step hook into: the update would be delivered as a brand-new prompt
         // (interrupting the turn) while the composer already drew it as inline
@@ -5150,7 +5545,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'retryMessage') {
       const project = this.activeProject();
-      const conversation = project?.conversations.find(item => item.id === message.conversationId);
+      const conversation = project ? this.conversationForId(project, message.conversationId) : undefined;
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       // The CLI resumes the interrupted assistant by id. Retrying there must not
       // pop a local item or resend text as a new user turn.
@@ -5178,7 +5573,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === 'continueIteration') {
       const project = this.activeProject();
-      const conversation = project?.conversations.find(item => item.id === message.conversationId);
+      const conversation = project ? this.conversationForId(project, message.conversationId) : undefined;
       if (!project || !conversation || this.runs.has(message.conversationId)) return;
       const last = conversation.items[conversation.items.length - 1];
       if (!last?.paused || last.id !== message.itemId) return;
@@ -5282,12 +5677,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const promptContext = resume ? '' : preparedPromptContext ?? await this.composerContextBlock(root, composerContext);
 
-    let conversation = project.conversations.find(item => item.id === conversationId);
+    let conversation = this.conversationForId(project, conversationId);
     if (!conversation) {
       conversation = this.createConversation();
       project.conversations.unshift(conversation);
       conversationId = conversation.id;
     }
+    if (!(await this.relieveConversationPressure(conversation))) return;
     const historyUserText = resume ? (resume.originalUserText || userText) : userText;
     const gitTracked = isGitTrackedWorkspace(root.fsPath);
     const run: ActiveRun = { conversationId, controller: new AbortController() };
@@ -5363,6 +5759,33 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       for (const guidance of runGuidanceLog.splice(0)) runMessages.push({ role: 'assistant', content: guidance } as ModelMessage);
     };
     const snapshotByPath = new Map<string, FileSnapshot>((resume?.fileSnapshot ?? []).map(snap => [snap.path, snap]));
+    let snapshotContentBytes = [...snapshotByPath.values()].reduce((total, snapshot) => total + Buffer.byteLength(snapshot.content, 'utf8'), 0);
+    let snapshotPressureNoticed = false;
+    const releaseTurnSnapshots = (): void => {
+      for (const [relative, snapshot] of snapshotByPath) {
+        snapshotByPath.set(relative, { path: relative, existed: snapshot.existed, content: '', pressureEvicted: true });
+      }
+      snapshotContentBytes = 0;
+      if (snapshotPressureNoticed) return;
+      snapshotPressureNoticed = true;
+      this.post({
+        type: 'contextNotice',
+        conversationId,
+        kind: 'trimmed',
+        text: `This turn exceeded the ${Math.round(MAX_TURN_SNAPSHOT_BYTES / 1_000_000)} MB snapshot budget. File restore for the turn is disabled; no files will be partially restored.`,
+      });
+    };
+    const captureTurnSnapshot = (relative: string, before: unknown, existed: boolean): FileSnapshot => {
+      const snapshot = captureFileSnapshot(root.fsPath, relative, before, existed);
+      const bytes = Buffer.byteLength(snapshot.content, 'utf8');
+      if (snapshotContentBytes + bytes > MAX_TURN_SNAPSHOT_BYTES) {
+        releaseTurnSnapshots();
+        return { path: relative, existed, content: '', pressureEvicted: true };
+      }
+      snapshotContentBytes += bytes;
+      return snapshot;
+    };
+    if (snapshotContentBytes > MAX_TURN_SNAPSHOT_BYTES) releaseTurnSnapshots();
     const postToolEvent = (message: unknown): void => {
       if (!message || typeof message !== 'object') {
         this.post(message);
@@ -5383,7 +5806,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
             next = { ...next, path: relative, action, additions: 0, deletions: 0, preview: [] };
           } else {
             if (!snapshotByPath.has(relative)) {
-              snapshotByPath.set(relative, captureFileSnapshot(root.fsPath, relative, record.before, action !== 'Created'));
+              snapshotByPath.set(relative, captureTurnSnapshot(relative, record.before, action !== 'Created'));
             }
             const snapshot = snapshotByPath.get(relative);
             const beforeText = typeof record.before === 'string'
@@ -5680,6 +6103,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           mcpCached = true;
         }
       }
+      this.armMcpIdleCleanup();
       if (mcpConnection.errors.length) {
         // A server that fails to connect used to leave one line buried in the
         // system prompt, so "MCP is not working" had no visible cause. Say it
@@ -6599,6 +7023,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'state', conversationId, running: false, label: '' });
       this.syncConversations(false);
       this.notifyHooks('onAgentEnd', { text: userText });
+      await this.relieveConversationPressure(conversation);
       // Auto-compaction must run after this.runs.delete above: compactConversation
       // refuses to compact while a run is active for the conversation.
       if (providerConfig) this.maybeAutoCompact(conversation, providerConfig.id, this.selectionFor(conversation).model);
@@ -6624,10 +7049,97 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private responseItem(conversationId: string, itemId: string): { project: Project; conversation: Conversation; item: TranscriptItem } | undefined {
     const project = this.activeProject();
-    const conversation = project?.conversations.find(entry => entry.id === conversationId);
+    const conversation = project ? this.conversationForId(project, conversationId) : undefined;
     const item = conversation?.items.find(entry => entry.id === itemId && entry.role === 'assistant');
     if (!project || !conversation || !item) return undefined;
     return { project, conversation, item };
+  }
+
+  private conversationStateBytes(conversation: Conversation): number {
+    return estimateSerializedBytes({
+      items: conversation.items,
+      messages: conversation.messages,
+      pending: conversation.pending,
+      turnUndo: conversation.turnUndo,
+      turnRedo: conversation.turnRedo,
+    });
+  }
+
+  private async releaseCompactionCache(conversationId: string): Promise<void> {
+    if (this.compactionUndoStacks.has(conversationId) || this.compactionRedoStacks.has(conversationId)) {
+      await this.persistCompactionSnapshots(conversationId);
+    }
+    this.compactionUndoStacks.delete(conversationId);
+    this.compactionRedoStacks.delete(conversationId);
+  }
+
+  private evictOldestSnapshotContent(conversation: Conversation): { bytes: number; evicted: number } {
+    const lists = [
+      ...conversation.items.map(item => item.fileSnapshot ?? []),
+      ...(conversation.turnUndo ?? []).flatMap(snapshot => snapshot.items.map(item => item.fileSnapshot ?? [])),
+      ...(conversation.turnRedo ?? []).flatMap(snapshot => snapshot.items.map(item => item.fileSnapshot ?? [])),
+      ...(conversation.pending?.fileSnapshot ? [conversation.pending.fileSnapshot] : []),
+    ];
+    let bytes = this.conversationStateBytes(conversation);
+    let evicted = 0;
+    const visited = new Set<FileSnapshot>();
+    for (const snapshots of lists) {
+      for (const snapshot of snapshots) {
+        if (visited.has(snapshot) || !snapshot.content || snapshot.pressureEvicted) continue;
+        visited.add(snapshot);
+        bytes -= Buffer.byteLength(snapshot.content, 'utf8');
+        snapshot.content = '';
+        snapshot.pressureEvicted = true;
+        evicted += 1;
+      }
+      if (bytes <= 8_000_000) break;
+    }
+    return { bytes, evicted };
+  }
+
+  private async relieveConversationPressure(conversation: Conversation): Promise<boolean> {
+    const project = this.projectForConversation(conversation.id);
+    if (!project) return false;
+    await this.offloadColdConversations(project);
+    await this.releaseCompactionCache(conversation.id);
+    let bytes = this.conversationStateBytes(conversation);
+    if (bytes <= 6_000_000) return true;
+
+    const compact = async (): Promise<boolean> => {
+      if (this.runs.has(conversation.id) || conversation.items.length < 4) return false;
+      const before = conversation.items.length;
+      await this.compactConversation(conversation.id, { auto: true });
+      if (conversation.items.length >= before) return false;
+      this.lastAutoCompactAt.set(conversation.id, Date.now());
+      await this.releaseCompactionCache(conversation.id);
+      return true;
+    };
+
+    await compact();
+    bytes = this.conversationStateBytes(conversation);
+    if (bytes > 8_000_000) {
+      const result = this.evictOldestSnapshotContent(conversation);
+      if (result.evicted) {
+        this.post({ type: 'contextNotice', conversationId: conversation.id, kind: 'trimmed', text: `${result.evicted} older file snapshot(s) were released to stay within memory limits. Their restore is unavailable; visible history is preserved.` });
+        await this.persistProject(project);
+      }
+      bytes = result.bytes;
+      if (bytes > 6_000_000) await compact();
+      bytes = this.conversationStateBytes(conversation);
+    }
+    if (bytes <= 8_000_000) return true;
+
+    const now = Date.now();
+    if (now - (this.pressureNoticeAt.get(conversation.id) ?? 0) > 30_000) {
+      this.pressureNoticeAt.set(conversation.id, now);
+      this.post({
+        type: 'contextNotice',
+        conversationId: conversation.id,
+        kind: 'trimmed',
+        text: 'This conversation still exceeds the 8 MB live-memory limit after compaction and snapshot cleanup. Start a new chat or export the conversation before continuing; history was not silently discarded.',
+      });
+    }
+    return false;
   }
 
   /**
@@ -6640,7 +7152,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const project = this.activeProject();
     if (!project) return;
     const targetId = conversationId ?? project.activeConversationId;
-    const conversation = project.conversations.find(entry => entry.id === targetId);
+    const conversation = this.conversationForId(project, targetId ?? '');
     const progress = (phase: 'start' | 'summarizing' | 'done' | 'cancelled' | 'error', extra: { auto?: boolean; text?: string; beforeTokens?: number; afterTokens?: number; contextWindow?: number; itemCount?: number } = {}): void => {
       this.post({ type: 'compactProgress', conversationId: targetId ?? '', phase, ...extra });
     };
@@ -6823,7 +7335,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * globalState (see persistCompactionSnapshots) so this survives a reload too.
    */
   private undoCompaction(conversation: Conversation): boolean {
-    const stack = this.compactionUndoStacks.get(conversation.id);
+    let stack = this.compactionUndoStacks.get(conversation.id);
+    if (!stack?.length) {
+      this.loadCompactionSnapshots(conversation.id);
+      stack = this.compactionUndoStacks.get(conversation.id);
+    }
     if (!stack?.length) return false;
     const snapshot = stack.pop()!;
     if (!stack.length) this.compactionUndoStacks.delete(conversation.id);
@@ -6841,7 +7357,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * user sends or undoes a turn at that boundary the redo is discarded.
    */
   private redoCompaction(conversation: Conversation): boolean {
-    const stack = this.compactionRedoStacks.get(conversation.id);
+    let stack = this.compactionRedoStacks.get(conversation.id);
+    if (!stack?.length) {
+      this.loadCompactionSnapshots(conversation.id);
+      stack = this.compactionRedoStacks.get(conversation.id);
+    }
     if (!stack?.length) return false;
     const snapshot = stack[stack.length - 1];
     if (!snapshot) return false;
@@ -7279,6 +7799,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   ): Promise<settingsAdapter.PanelMcpStatus[]> {
     const connections = await loadMcpConnections(this.context);
     this.log('info', 'mcp.sync.start', `${connections.length} saved: ${connections.map((c) => `${c.name}(${c.transport ?? 'http'}${c.enabled === false ? ',off' : ''})`).join(', ') || 'none'}`);
+    // Nothing configured: there is no status to report and nothing to connect, so
+    // do not pay for the login-shell probe below. It spawns a real `zsh -ilc`, and
+    // this path runs on every view resolve and every settings open.
+    if (!connections.length) return [];
     // Spawned servers inherit this PATH. Recording it makes "command not found"
     // diagnosable without asking the user to reproduce it.
     const resolvedPath = await loginShellEnv();
@@ -8208,9 +8732,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return this.defaultPersonaId();
   }
 
-  /** Whether the project index is switched on, for the Indexing page and the readout. */
+  /** Whether project indexing is switched on. Off by default: it is an opt-in cost. */
   private indexEnabled(): boolean {
-    return vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', true) !== false;
+    return vscode.workspace.getConfiguration('sleepycode').get<boolean>('repoIndex', false) === true;
   }
 
   /** The index readout the settings window renders: report plus whether it is on. */
@@ -8218,12 +8742,48 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     return indexReport.indexReport(this.projectIndex.snapshot, Date.now(), { enabled: this.indexEnabled() });
   }
 
+  /**
+   * A cheap top-level sketch of the workspace, for when indexing is off.
+   *
+   * Without it a run would know only the absolute path. `readdir` on one directory
+   * is the smallest useful replacement for a full index: it tells the agent whether
+   * this is a Node app, a Go module, a monorepo, and so on, before it reads anything.
+   * Cached per root so a send does not re-scan, and bounded so a huge or unusual
+   * directory cannot bloat the prompt.
+   */
+  private topLevelContext: { root: string; at: number; text: string } | undefined;
+
+  private basicWorkspaceContext(root: vscode.Uri): string {
+    const ttlMs = 60_000;
+    if (this.topLevelContext?.root === root.fsPath && Date.now() - this.topLevelContext.at < ttlMs) {
+      return this.topLevelContext.text;
+    }
+    const ignored = /^(node_modules|\.git|dist|out|build|coverage|\.next|\.cache|\.venv|venv|target|vendor|__pycache__|\.sleepycode)$/;
+    let names: string[] = [];
+    try {
+      names = readdirSync(root.fsPath, { withFileTypes: true })
+        .filter(entry => !ignored.test(entry.name))
+        .slice(0, 80)
+        .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+        .sort();
+    } catch {
+      return '';
+    }
+    if (!names.length) return '';
+    const shown = names.slice(0, 40);
+    const more = names.length > shown.length ? `, …${names.length - shown.length} more` : '';
+    const text = `Top-level entries in the workspace folder: ${shown.join(', ')}${more}. Read files with your tools as needed; no repository index is being built.`;
+    this.topLevelContext = { root: root.fsPath, at: Date.now(), text };
+    return text;
+  }
+
   private async systemPrompt(root: vscode.Uri, agentId: string, personaId?: string): Promise<string> {
+    const folderContext = this.basicWorkspaceContext(root);
     const ideContext = `You are SleepyCode, an autonomous coding agent embedded inside VS Code. Work carefully and persist until the task is fully complete.
 
 Environment:
 - User OS: ${userOsName()}
-- Workspace: ${root.fsPath}
+- Workspace: ${root.fsPath}${folderContext ? `\n- ${folderContext}` : ''}
 - You run inside the VS Code extension context. There is no CLI, no session system, no actor/spawn/workflow tools.
 
 Tools available to you:
@@ -8428,6 +8988,7 @@ ${cached}`);
         this.stopBrowserPreviewPolling();
         return;
       }
+      if (!this.browserPreview.visible) return;
       void this.browser.previewDataUrl().then(dataUrl => {
         if (dataUrl) this.browserPreview.update(dataUrl);
       }).catch(() => undefined);

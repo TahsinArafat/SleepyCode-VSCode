@@ -523,6 +523,10 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
                 name: att.name || 'image.png',
                 mime: att.mimeType || 'image/png',
                 data: att.previewDataUrl || att.data || '',
+                ...(att.tempPath ? { tempPath: att.tempPath } : {}),
+                ...(att.previewPath ? { previewPath: att.previewPath } : {}),
+                ...(att.size !== undefined ? { size: att.size } : {}),
+                ...(att.previewFailed ? { previewFailed: true } : {}),
                 kind: 'image',
               }
             : {
@@ -775,6 +779,7 @@ export function toReactMessage(message: SleepyMsg): ReactMsg | null {
       return { type: 'queueDraft', convId: message.conversationId ?? '', draft: { text: message.text ?? '', attachments: [] } };
 
     case 'initialState':
+    case 'attachmentsResolved':
     case 'requestAccepted':
       // Already in React shape.
       return message;
@@ -1110,6 +1115,10 @@ function toReactAttachment(att: any, index: number, resolveImageUri?: (tempPath:
       name: att.name || 'image.png',
       mime: att.mimeType || 'image/png',
       data,
+      ...(att.tempPath ? { tempPath: att.tempPath } : {}),
+      ...(att.previewPath ? { previewPath: att.previewPath } : {}),
+      ...(att.size !== undefined ? { size: att.size } : {}),
+      ...(att.previewFailed ? { previewFailed: true } : {}),
       kind: 'image',
     };
   }
@@ -1429,20 +1438,29 @@ export function latestAssistantItemId(items: readonly any[] | undefined): string
  * context (a fabricated path would make the agent read the wrong file).
  */
 export function reactAttachmentsOf(attachments: unknown): {
-  images: { name: string; mimeType: string; dataUrl: string }[];
+  images: { name: string; mimeType: string; dataUrl: string; previewDataUrl?: string; tempPath?: string; previewPath?: string; size?: number }[];
   files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string; text?: string; mimeType?: string; size?: number }[];
 } {
-  const images: { name: string; mimeType: string; dataUrl: string }[] = [];
+  const images: { name: string; mimeType: string; dataUrl: string; previewDataUrl?: string; tempPath?: string; previewPath?: string; size?: number }[] = [];
   const files: { kind: 'file' | 'folder' | 'link'; path: string; name?: string; text?: string; mimeType?: string; size?: number }[] = [];
   if (!Array.isArray(attachments)) return { images, files };
   for (const attachment of attachments) {
     if (!attachment || typeof attachment !== 'object') continue;
-    const a = attachment as { kind?: string; name?: string; mime?: string; data?: string; path?: string };
-    if (a.kind === 'image' && typeof a.data === 'string' && a.data.startsWith('data:image/')) {
+    const a = attachment as { kind?: string; name?: string; mime?: string; data?: string; sourceData?: string; path?: string; tempPath?: string; previewPath?: string; size?: number };
+    if (a.kind === 'image') {
+      const source = typeof a.sourceData === 'string' && a.sourceData.startsWith('data:image/')
+        ? a.sourceData
+        : (typeof a.data === 'string' && a.data.startsWith('data:image/') ? a.data : '');
+      if (!source && !a.tempPath) continue;
+      const preview = typeof a.data === 'string' && a.data.startsWith('data:image/') && a.data !== source ? a.data : undefined;
       images.push({
         name: a.name || 'image.png',
-        mimeType: a.mime || a.data.slice(5, a.data.indexOf(';')) || 'image/png',
-        dataUrl: a.data,
+        mimeType: a.mime || source.slice(5, source.indexOf(';')) || 'image/png',
+        dataUrl: source,
+        ...(preview ? { previewDataUrl: preview } : {}),
+        ...(a.tempPath ? { tempPath: a.tempPath } : {}),
+        ...(a.previewPath ? { previewPath: a.previewPath } : {}),
+        ...(a.size !== undefined ? { size: a.size } : {}),
       });
       continue;
     }
@@ -1616,6 +1634,12 @@ export function searchConversationSummaries(
     if (!needle) return { hit: true };
     const title = typeof conversation?.title === 'string' ? conversation.title : '';
     if (title.toLowerCase().includes(needle)) return { hit: true };
+    if (conversation?.cold) {
+      const excerpt = typeof conversation.excerpt === 'string' ? conversation.excerpt : '';
+      const index = excerpt.toLowerCase().indexOf(needle);
+      if (index >= 0) return { hit: true, excerpt: excerpt.slice(Math.max(0, index - 40), index + 160).replace(/\s+/g, ' ').trim() };
+      return { hit: false };
+    }
     for (const item of conversation?.items ?? []) {
       const text = typeof item?.text === 'string' ? item.text : '';
       const index = text.toLowerCase().indexOf(needle);

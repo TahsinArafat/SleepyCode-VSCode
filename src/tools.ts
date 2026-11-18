@@ -547,11 +547,14 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
   }
   if (ctx.browser) {
     const browser = ctx.browser;
-    const browserRun = (fn: () => Promise<string>): Promise<string> => fn().catch((error: unknown) => {
+    const browserRun = (fn: () => Promise<string>): Promise<string> => {
+      browser.touch();
+      return fn().catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       const hint = error && typeof error === 'object' && typeof (error as { installHint?: unknown }).installHint === 'string' ? (error as { installHint: string }).installHint : '';
       return hint ? `${message}\n\n${hint}` : message;
-    });
+      });
+    };
     // Best-effort live preview: a capture failure must never fail the browser tool it follows.
     const postBrowserPreview = async (cursorSelector?: string): Promise<void> => {
       try {

@@ -47,7 +47,7 @@ export class CliSessionManager {
 
   open(conversationId: string): Promise<CliChatSession | undefined> {
     const existing = this.chats.get(conversationId);
-    if (existing) return Promise.resolve(existing);
+    if (existing) return existing.open().then(() => existing);
     const pending = this.opening.get(conversationId);
     if (pending) return pending;
 
@@ -56,6 +56,18 @@ export class CliSessionManager {
     });
     this.opening.set(conversationId, task);
     return task;
+  }
+
+  get chatCount(): number {
+    return this.chats.size;
+  }
+
+  /** Release one chat's stream/history while preserving its CLI session binding. */
+  detach(conversationId: string): void {
+    this.chats.get(conversationId)?.detach();
+    this.chats.delete(conversationId);
+    void this.opening.get(conversationId)?.then(chat => chat?.detach());
+    this.opening.delete(conversationId);
   }
 
   forget(conversationId: string): void {

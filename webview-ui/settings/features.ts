@@ -402,7 +402,7 @@ export const EMPTY_FEATURES: FeatureConfig = {
   webSearchEnabled: true,
   webFetchEnabled: true,
   approvalPolicy: DEFAULT_APPROVAL,
-  indexingEnabled: true,
+  indexingEnabled: false,
   indexNewFolders: true,
   indexForGrep: true,
 };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, trimPersistedConversations } from '../src/persist-core.ts';
+import { ConversationStore, conversationV2Key, enqueuePersist, estimateSerializedBytes, loadEach, projectV2Key, splitProjectIndex, summarizeConversation, trimPersistedConversations } from '../src/persist-core.ts';
 import { assertSource } from './source-assert.mjs';
 import { MAX_TURN_UNDO } from '../src/types.ts';
 
@@ -170,6 +170,116 @@ test('archiving releases the compaction snapshot cache and un-archiving reloads 
   assertSource(agent, /sleepycode\.compactionSnapshots\.\$\{conversationId\}/);
   // Startup and un-archive share one implementation; a second copy would drift.
   assertSource(agent, /this\.loadCompactionSnapshots\(conversation\.id\);/);
+});
+
+function memoryStore(failOn = () => false) {
+  const data = new Map();
+  return {
+    data,
+    get(key, fallback) {
+      return data.has(key) ? structuredClone(data.get(key)) : fallback;
+    },
+    async update(key, value) {
+      if (failOn(key, value)) throw new Error(`injected write failure: ${key}`);
+      if (value === undefined) data.delete(key);
+      else data.set(key, structuredClone(value));
+    },
+  };
+}
+
+function conversationFixture(id = 'c1', text = 'hello') {
+  return {
+    id,
+    title: 'Conversation',
+    items: [{ id: `${id}-item`, role: 'user', text, timestamp: 1 }],
+    messages: [{ role: 'user', content: text }],
+    archived: false,
+    createdAt: 1,
+    updatedAt: 2,
+    turnUndo: [{ items: [{ id: 'before', role: 'user', text: 'before', timestamp: 0 }], messages: [] }],
+    turnRedo: [],
+  };
+}
+
+test('v2 migration writes manifests and hydrates individual records with undo', async () => {
+  const storage = memoryStore();
+  const store = new ConversationStore(storage);
+  const project = { id: 'p1', name: 'Project', path: '/p1', conversations: [conversationFixture()], activeConversationId: 'c1', createdAt: 1, updatedAt: 2 };
+  assert.equal(await store.migrateProject(project), true);
+  const manifest = store.readManifest('p1');
+  assert.equal(manifest.version, 2);
+  assert.equal(manifest.conversations[0].items.length, 0);
+  assert.equal(manifest.conversations[0].messageCount, 1);
+  const restored = store.readConversation('c1');
+  assert.equal(restored.items[0].text, 'hello');
+  assert.equal(restored.turnUndo.length, 1);
+  assert.equal(restored.cold, false);
+});
+
+test('a failed v2 core write preserves the previous record and snapshot revision', async () => {
+  const storage = memoryStore();
+  const store = new ConversationStore(storage);
+  const conversation = conversationFixture();
+  assert.equal(await store.writeConversation(conversation), true);
+  const firstRevision = conversation.turnSnapshotRevision;
+  const firstCore = storage.get(conversationV2Key('c1'));
+  conversation.items[0].text = 'newer but unsaved';
+  storage.update = async (key, value) => {
+    if (key === conversationV2Key('c1')) throw new Error('core write failed');
+    if (value === undefined) storage.data.delete(key);
+    else storage.data.set(key, structuredClone(value));
+  };
+  assert.equal(await store.writeConversation(conversation), false);
+  assert.equal(conversation.turnSnapshotRevision, firstRevision);
+  assert.deepEqual(storage.get(conversationV2Key('c1')), firstCore);
+  const restored = store.readConversation('c1');
+  assert.equal(restored.items[0].text, 'hello');
+  assert.equal(restored.turnUndo.length, 1);
+  assert.equal(store.readManifest('p1'), undefined);
+});
+
+test('a failed migration never exposes a partial manifest', async () => {
+  const storage = memoryStore();
+  const store = new ConversationStore(storage);
+  const project = { id: 'p1', name: 'Project', path: '/p1', conversations: [conversationFixture('c1'), conversationFixture('c2', 'second')], activeConversationId: 'c1', createdAt: 1, updatedAt: 2 };
+  storage.update = async (key, value) => {
+    if (key === conversationV2Key('c2')) throw new Error('second record failed');
+    if (value === undefined) storage.data.delete(key);
+    else storage.data.set(key, structuredClone(value));
+  };
+  assert.equal(await store.migrateProject(project), false);
+  assert.equal(storage.get(projectV2Key('p1')), undefined);
+  assert.equal(store.readConversation('c1').items[0].text, 'hello');
+  assert.equal(store.readConversation('c2'), undefined);
+});
+
+test('cold summaries preserve history metadata without heavy arrays', () => {
+  const summary = summarizeConversation(conversationFixture(), true);
+  assert.equal(summary.cold, true);
+  assert.equal(summary.items.length, 0);
+  assert.equal(summary.messages, undefined);
+  assert.equal(summary.messageCount, 1);
+  assert.equal(summary.lastStatus, 'empty');
+  assert.equal(summary.excerpt, 'hello');
+});
+
+test('snapshot restore preflights before writing and keeps a rollback path', () => {
+  const start = agent.indexOf('private async restoreFileSnapshots');
+  const body = agent.slice(start, agent.indexOf('private itemIndexForTurnIndex', start));
+  const preflight = body.indexOf('const unavailable = snapshots.filter');
+  const backup = body.indexOf('const backupRoot = await mkdtemp');
+  const write = body.indexOf('vscode.workspace.fs.writeFile');
+  assert.ok(preflight >= 0 && backup > preflight && write > backup, 'preflight and backups must precede every write');
+  assertSource(body, /backups\.filter\(entry => entry\.attempted\)/, 'failed writes roll back every attempted file');
+});
+
+test('cold offload writes successfully before clearing heavy conversation state', () => {
+  const start = agent.indexOf('private async offloadColdConversations');
+  const body = agent.slice(start, agent.indexOf('private async unloadInactiveProjects', start));
+  const write = body.indexOf('await this.conversationStore.writeConversation');
+  const clear = body.indexOf('conversation.items = [];');
+  assert.ok(write >= 0 && clear > write, 'heavy state must not be released before a successful write');
+  assertSource(body, /conversation\.cold = true;/);
 });
 
 test('estimateSerializedBytes accurately estimates UTF-8 size and guards against circular graphs', () => {

@@ -249,12 +249,21 @@ export class BrowserController {
   private capturingConsole = false;
   private capturingNetwork = false;
   private resolvedViewport: Viewport | undefined;
+  private idleTimer?: ReturnType<typeof setTimeout>;
+  private previewInFlight?: Promise<string>;
 
   get consoleMessages(): ConsoleMessage[] {
     return [...this.activeLog().console];
   }
   get networkRequests(): NetworkRequest[] {
     return [...this.activeLog().network];
+  }
+
+  /** Reset the ten-minute idle browser lifetime on every agent interaction. */
+  touch(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => { void this.close(); }, 10 * 60_000);
+    this.idleTimer.unref?.();
   }
 
   private requirePage(): PageLike {
@@ -349,6 +358,7 @@ export class BrowserController {
     this.pages = [this.page];
     this.wirePage(this.page);
     await this.page.goto(options.url, { waitUntil: options.waitUntil ?? 'load', timeout: options.timeoutMs ?? 30_000 });
+    this.touch();
   }
 
   async snapshot(frame?: string): Promise<BrowserSnapshot> {
@@ -539,9 +549,19 @@ export class BrowserController {
   }
 
   async previewDataUrl(): Promise<string> {
-    const page = this.requirePage();
-    const image = await page.screenshot({ type: 'jpeg', quality: 72, fullPage: false, scale: 'css' });
-    return `data:image/jpeg;base64,${Buffer.from(image).toString('base64')}`;
+    this.touch();
+    if (this.previewInFlight) return this.previewInFlight;
+    const capture = (async () => {
+      const page = this.requirePage();
+      const image = await page.screenshot({ type: 'jpeg', quality: 72, fullPage: false, scale: 'css' });
+      return `data:image/jpeg;base64,${Buffer.from(image).toString('base64')}`;
+    })();
+    this.previewInFlight = capture;
+    try {
+      return await capture;
+    } finally {
+      if (this.previewInFlight === capture) this.previewInFlight = undefined;
+    }
   }
 
   async cursorPoint(selector: string): Promise<{ x: number; y: number } | undefined> {
@@ -561,6 +581,8 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
     await this.browser?.close?.().catch(() => undefined);
     this.browser = undefined;
     this.page = undefined;

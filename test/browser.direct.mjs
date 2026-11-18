@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BROWSER_RESULT_CAP,
+  BrowserController,
   BrowserError,
   VIEWPORTS,
   analyzeGeometry,
@@ -96,6 +97,29 @@ test('findFrameIndex resolves numeric frame indexes and URL substrings', () => {
   assert.equal(findFrameIndex(frames, 'app.example.com'), -2); // frames 0 and 2
   assert.equal(findFrameIndex(frames, 'missing'), -1);
   assert.equal(findFrameIndex([], '0'), -1);
+});
+
+test('concurrent preview requests share one in-flight screenshot', async () => {
+  const controller = new BrowserController();
+  let calls = 0;
+  controller.page = {
+    screenshot: async () => {
+      calls += 1;
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return Buffer.from('jpeg');
+    },
+  };
+  const [first, second, third] = await Promise.all([
+    controller.previewDataUrl(),
+    controller.previewDataUrl(),
+    controller.previewDataUrl(),
+  ]);
+  assert.equal(first, second);
+  assert.equal(second, third);
+  assert.equal(calls, 1);
+  await controller.previewDataUrl();
+  assert.equal(calls, 2);
+  await controller.close();
 });
 
 test('stringifyEvalResult handles scalars, undefined, cycles, and caps', () => {

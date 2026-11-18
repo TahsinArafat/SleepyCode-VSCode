@@ -354,3 +354,13 @@ test('a session that really is empty still renders its empty state', async () =>
   await chat.open();
   assert.ok(stub.updates.length > 0, 'a first-ever empty read still publishes');
 });
+
+test('detach clears mirrors and reopen reloads authoritative history', async () => {
+  const { chat, stub } = await openChat();
+  chat.detach();
+  stub.updates.length = 0;
+  await chat.open();
+  assert.ok(stub.updates.length > 0, 'reopen republishes the CLI transcript');
+  assert.ok(stub.updates.at(-1).length > 0);
+  chat.dispose();
+});

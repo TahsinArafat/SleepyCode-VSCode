@@ -20,6 +20,7 @@ import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
 import { compactionActions, compactionMessages } from "../../src/compaction-actions.ts";
+import { buildMetrics, initialWindow, shiftAbove, spacerHeights, visibleWindow } from "./windowing";
 
 /** Relative time for the message footer, matching the thread list's phrasing. */
 function footerTime(ts: number | undefined): string {
@@ -969,7 +970,7 @@ const UserMessage = React.memo(function UserMessage({ turn, index, isRunning, on
                     event.stopPropagation();
                     onPreviewImage(turn.attachments!.filter(attachment => attachment.kind === "image"), a.id);
                   }}>
-                  <img className="msg-attach-img" src={a.data} alt="" />
+                  {a.data ? <img className="msg-attach-img" src={a.data} alt="" /> : <span className="msg-attach-file"><Icon name="file" /> {a.name}</span>}
                 </button>
               ) : (
                 <span key={a.id} className="msg-attach-file">
@@ -1343,6 +1344,105 @@ export function App() {
     return () => { window.removeEventListener("resize", sizeSpacer); observer?.disconnect(); };
   }, [sizeSpacer]);
 
+  // --- Transcript windowing -------------------------------------------------
+  // Only a band around the viewport is mounted; the rest of the transcript is
+  // replaced by spacers sized from measured heights. `content-visibility` already
+  // skipped paint for off-screen groups, but every node and string still existed:
+  // a 1,000-turn chat built ~63k nodes and blocked the main thread ~600 ms on open.
+  const measuredHeights = React.useRef<Map<number, number>>(new Map());
+  const measuredCountRef = React.useRef(0);
+  const [windowRange, setWindowRange] = React.useState<{ start: number; end: number }>({ start: 0, end: 0 });
+  const windowRangeRef = React.useRef(windowRange);
+  windowRangeRef.current = windowRange;
+  const turnGroups = React.useMemo(() => groupTurns(turns), [turns]);
+  measuredCountRef.current = turnGroups.length;
+  // Groups are measured after paint, so the first window uses estimates and is
+  // corrected on the next frame. Keeping it in state (not a ref) is what lets the
+  // spacer heights update once measurements land.
+  const recomputeWindow = React.useCallback((groupCount: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const metrics = buildMetrics(groupCount, measuredHeights.current);
+    const next = visibleWindow({ scrollTop: el.scrollTop, viewport: el.clientHeight, metrics });
+    setWindowRange(current => (current.start === next.start && current.end === next.end ? current : next));
+  }, []);
+
+  // Measure what is mounted, then re-window. A measurement that disagrees with the
+  // estimate changes the document height above the viewport, so the scroll offset is
+  // corrected by the difference — otherwise the content the user is reading jumps.
+  const measureGroups = React.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const before = buildMetrics(measuredCountRef.current, measuredHeights.current);
+    const nodes = el.querySelectorAll<HTMLElement>(".chat-turn-group[data-group-index]");
+    let changed = false;
+    nodes.forEach(node => {
+      const index = Number(node.dataset.groupIndex);
+      if (!Number.isFinite(index)) return;
+      const height = node.offsetHeight;
+      if (height <= 0) return;
+      if (measuredHeights.current.get(index) !== height) {
+        measuredHeights.current.set(index, height);
+        changed = true;
+      }
+    });
+    if (!changed) return;
+    const after = buildMetrics(measuredCountRef.current, measuredHeights.current);
+    const anchor = windowRangeRef.current.start;
+    const shift = shiftAbove(before, after, anchor);
+    if (shift) {
+      selfScrollRef.current = true;
+      el.scrollTop += shift;
+      selfScrollRef.current = false;
+    }
+    recomputeWindow(measuredCountRef.current);
+  }, [recomputeWindow]);
+
+  // Re-window on scroll. Separate from `onScroll` (which owns follow state) so a
+  // window update can never flip stick mode, and so our own scroll corrections
+  // above still trigger a recompute.
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const onScrolled = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        recomputeWindow(measuredCountRef.current);
+      });
+    };
+    el.addEventListener("scroll", onScrolled, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScrolled);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [recomputeWindow]);
+
+  // A new conversation, a new turn, or a resize invalidates the layout: re-measure
+  // what is mounted and recompute which band is visible.
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    recomputeWindow(turnGroups.length);
+    const first = requestAnimationFrame(() => measureGroups());
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => measureGroups());
+    if (observer) el.querySelectorAll(".chat-turn-group[data-group-index]").forEach(node => observer.observe(node));
+    return () => {
+      cancelAnimationFrame(first);
+      observer?.disconnect();
+    };
+  }, [activeId, turnGroups.length, measureGroups, recomputeWindow]);
+
+  // Switching conversations starts from the top of a fresh layout, so stale
+  // measurements from the previous chat would size the spacers wrongly.
+  React.useEffect(() => {
+    measuredHeights.current.clear();
+    setWindowRange({ start: 0, end: 0 });
+    const raf = requestAnimationFrame(() => recomputeWindow(measuredCountRef.current));
+    return () => cancelAnimationFrame(raf);
+  }, [activeId, recomputeWindow]);
+
   // Stick-to-bottom may ONLY be re-armed by an explicit user gesture that lands
   // at the bottom (wheel down / touch / scrollbar drag). Scroll *events* alone
   // are never trusted: after a send the pinned-to-top position IS the scroll
@@ -1513,24 +1613,8 @@ export function App() {
   });
 
 
-  // Auto-scroll already handled below; persistence happens on settle per session.
-
-  // Throttled per-conversation persistence of live turns (max ~1/sec each) so the
-  // host store stays close to the on-screen state during a run.
-  const persistTimers = React.useRef(new Map<string, number>());
-  const schedulePersist = (id: string, s: ChatSession) => {
-    if (!id || persistTimers.current.has(id)) return;
-    // While a run is live the HOST owns turns and persists them itself; it drops
-    // webview snapshots for such conversations. Sending them anyway would
-    // structured-clone the whole transcript (tool results included) across the
-    // bridge every 800ms just to be discarded.
-    if (s.running) return;
-    const t = window.setTimeout(() => {
-      persistTimers.current.delete(id);
-      post({ type: "persistTurns", convId: id, turns: s.turns });
-    }, 800);
-    persistTimers.current.set(id, t);
-  };
+  // The host owns authoritative history. Full turns are sent only for last-chance
+  // pagehide recovery, where the host may have no record of its own yet.
 
   // Reconcile each session's `running` flag with the host's authoritative set of
   // in-flight runs (after a webview reload the agent may still be working).
@@ -1666,6 +1750,14 @@ export function App() {
             setOpenTabs((tabs) => [...new Set([...tabs.filter((id) => id !== ""), msg.convId])]);
           }
           break;
+        case "attachmentsResolved": {
+          const session = sessionFor(msg.convId);
+          session.turns = session.turns.map(turn => turn.role === "user" && turn.requestId === msg.requestId
+            ? { ...turn, attachments: msg.attachments }
+            : turn);
+          force();
+          break;
+        }
         case "steeringAccepted":
           sessionFor(msg.convId).status = { text: "Update will apply at the next agent step" };
           force();
@@ -1904,7 +1996,6 @@ export function App() {
                 closeTrailingThinking(s.turns),
                 ev.status === "error" ? "error" : "cancelled",
               );
-              post({ type: "persistTurns", convId: msg.convId, turns: s.turns });
             }
           } else {
             s.turns = applyEvent(s.turns, ev);
@@ -1918,9 +2009,6 @@ export function App() {
               }
               queueRef.current.set(msg.convId, (queueRef.current.get(msg.convId) ?? []).filter(item => item.id !== ev.requestId));
             }
-            // Throttle-persist live turns so a pane move / remount (which destroys
-            // the webview without a reliable pagehide) restores the in-flight chat.
-            schedulePersist(msg.convId, s);
             if (ev.type === "thinking-delta") s.status = { text: "Thinking" };
             else if (ev.type === "text-delta") s.status = { text: "Generating" };
             else if (ev.type === "tool-call-started") s.status = { text: capitalize(toolLabel(ev.name)) };
@@ -1939,13 +2027,17 @@ export function App() {
             }
             else if (ev.type === "shell-notify") s.status = { text: ev.message };
             else if (ev.type === "error") {
-              // Keep the rendered error block; persist so the chat survives reloads.
               s.status = { text: "Error: " + ev.message, error: true };
-              post({ type: "persistTurns", convId: msg.convId, turns: s.turns });
             }             else if (ev.type === "mode-changed") {
               setMode(ev.mode);
               post({ type: "setMode", mode: ev.mode });
             }
+          }
+          // Settled background transcripts have an authoritative host record. Drop
+          // the renderer copy immediately instead of waiting for another tab switch.
+          if (settled && msg.convId !== activeIdRef.current) {
+            sessionsRef.current.delete(msg.convId);
+            break;
           }
           // Background runs update their session without rerendering the visible
           // transcript on every token. Settling still updates the tab indicator.
@@ -2009,8 +2101,6 @@ export function App() {
     return () => {
       if (raf) cancelAnimationFrame(raf);
       flush();
-      for (const timer of persistTimers.current.values()) window.clearTimeout(timer);
-      persistTimers.current.clear();
       window.removeEventListener("message", handler);
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("beforeunload", flush);
@@ -2036,14 +2126,15 @@ export function App() {
       post({ type: "steerMessage", convId, text, requestId } as any);
       return;
     }
+    const requestId = crypto.randomUUID();
     if (!s.running && !(queueRef.current.get(convId ?? "") ?? []).some(item => item.status !== "running")) {
-      s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2 }];
+      s.turns = [...s.turns, { role: "user", text, attachments, model, mode: mode2, requestId }];
       s.running = true;
       s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
     }
     pinTopRef.current = true;
     force();
-    post({ ...sendMessageIntent(convId, text, attachments, model, mode2), context, requestId: crypto.randomUUID() });
+    post({ ...sendMessageIntent(convId, text, attachments, model, mode2), context, requestId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2148,7 +2239,8 @@ export function App() {
     const s = sessionFor(activeIdRef.current);
     if (s.running) return;
     // Drop this turn and everything after it, then append the edited message.
-    s.turns = [...s.turns.slice(0, index), { role: "user", text, attachments: attachments.length ? attachments : undefined, model: selectedModel, mode }];
+    const requestId = crypto.randomUUID();
+    s.turns = [...s.turns.slice(0, index), { role: "user", text, attachments: attachments.length ? attachments : undefined, model: selectedModel, mode, requestId }];
     s.running = true;
     s.turns = applyEvent(s.turns, { type: "run-status", status: "running" });
     s.status = { text: "Starting" };
@@ -2156,7 +2248,7 @@ export function App() {
     setRevertPrompt(null);
     pinTopRef.current = true;
     force();
-    post({ type: "sendMessage", convId: activeIdRef.current ?? null, text, attachments: attachments.length ? attachments : undefined, fromIndex: index, model: selectedModel, mode, revertFiles });
+    post({ type: "sendMessage", convId: activeIdRef.current ?? null, text, attachments: attachments.length ? attachments : undefined, fromIndex: index, model: selectedModel, mode, revertFiles, requestId });
   };
 
   const retryResponse = (index: number) => {
@@ -2289,6 +2381,7 @@ export function App() {
 
   const closeTab = (id: string) => {
     if (uiPrefsRef.current.perTabDrafts) draftsRef.current.delete(id);
+    if (!sessionsRef.current.get(id)?.running) sessionsRef.current.delete(id);
     setOpenTabs((tabs) => {
       const next = tabs.filter((t) => t !== id);
       // If we closed the active tab, switch to another or start fresh
@@ -2315,8 +2408,6 @@ export function App() {
   const onRetryResponse = useStableCallback((index: number) => retryResponse(index));
   const onDecideApproval = useStableCallback((id: string, approved: boolean) => decideApproval(activeIdRef.current ?? "", id, approved));
   const onPreviewImage = React.useCallback((images: Attachment[], id: string) => setImagePreview({ images, activeId: id }), []);
-
-  const turnGroups = React.useMemo(() => groupTurns(turns), [turns]);
 
   return (
     <div className={"app" + (uiPrefs.chatTextSize !== "default" ? ` text-${uiPrefs.chatTextSize}` : "")}>
@@ -2617,10 +2708,28 @@ export function App() {
           </div>
         ) : (
           // Keep each user message and its assistant response in one scroll group.
-          turnGroups.map((group, gi, all) => (
-            // Pin-to-top space only on the last group when it isn't the first one.
-            <div className="chat-turn-group" key={gi} ref={gi === all.length - 1 && all.length > 1 ? lastGroupRef : undefined}>
-              {group.map(({ turn, index }) =>
+          // Only the band around the viewport is mounted; spacers above and below stand
+          // in for the rest, sized from measured heights so the scrollbar stays honest.
+          (() => {
+            const count = turnGroups.length;
+            const metrics = buildMetrics(count, measuredHeights.current);
+            const current = windowRangeRef.current;
+            // Before the first measurement pass, mount the tail (where a chat opens)
+            // rather than the whole transcript, which is what windowing exists to avoid.
+            const resolved = current.end > current.start ? current : initialWindow(count);
+            const start = Math.max(0, Math.min(resolved.start, count));
+            const end = Math.min(count, Math.max(resolved.end, start));
+            const { before, after } = spacerHeights(metrics, { start, end });
+            return (
+              <>
+                {before > 0 && <div className="turn-spacer" style={{ height: before }} aria-hidden="true" />}
+                {turnGroups.slice(start, end).map((group, offset) => {
+                  const gi = start + offset;
+                  return (
+                    // Pin-to-top space only on the last group when it isn't the first one.
+                    <div className="chat-turn-group" key={gi} data-group-index={gi} data-live={gi === count - 1 ? "true" : undefined}
+                      ref={gi === count - 1 && count > 1 ? lastGroupRef : undefined}>
+                      {group.map(({ turn, index }) =>
                 turn.role === "user" ? (
                   editingIndex === index ? (
                     <div className="msg user editing" key={index}>
@@ -2673,8 +2782,13 @@ export function App() {
                 )
               )}
 
-            </div>
-          ))
+                    </div>
+                  );
+                })}
+                {after > 0 && <div className="turn-spacer" style={{ height: after }} aria-hidden="true" />}
+              </>
+            );
+          })()
         )}
         </TaskActivityContext.Provider>
       </div>

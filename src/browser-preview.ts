@@ -10,6 +10,10 @@ export class BrowserPreviewPanel {
   private lastDataUrl: string | null = null;
   private lastCursor: { x: number; y: number } | undefined;
 
+  get visible(): boolean {
+    return this.panel?.visible ?? false;
+  }
+
   update(dataUrl: string | null, cursor?: { x: number; y: number }): void {
     this.lastDataUrl = dataUrl;
     this.lastCursor = cursor;

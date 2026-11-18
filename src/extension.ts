@@ -15,8 +15,15 @@ export function activate(context: vscode.ExtensionContext) {
   const provider = new AgentViewProvider(context);
   context.subscriptions.push(
     provider,
+    // NOT retained while hidden, deliberately. With `true` VS Code keeps the whole
+    // webview alive when the sidebar is collapsed: its DOM, React tree, markdown
+    // cache and decoded images all stay resident for a chat nobody is looking at.
+    // Everything needed to rebuild is already durable — the host republishes the
+    // transcript on `ready`, drafts and open tabs are persisted per workspace, and
+    // in-flight runs are host-side — so hiding the view frees the renderer instead
+    // of charging RAM for it.
     vscode.window.registerWebviewViewProvider('sleepycode.chat', provider, {
-      webviewOptions: { retainContextWhenHidden: true },
+      webviewOptions: { retainContextWhenHidden: false },
     }),
     vscode.window.registerUriHandler({ handleUri: uri => provider.handleUri(uri) }),
     vscode.commands.registerCommand('sleepycode.openChat', () => revealChat()),

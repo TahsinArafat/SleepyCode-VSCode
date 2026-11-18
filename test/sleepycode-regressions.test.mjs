@@ -416,7 +416,10 @@ test('compaction and rollbacks keep structured history in sync with the transcri
   const projectionStart = agent.indexOf('private applyCliProjection');
   const projectionEnd = agent.indexOf('private findConversation');
   assert.ok(projectionStart > 0 && projectionEnd > projectionStart, 'expected the CLI projection method');
-  const outsideCliProjection = agent.slice(0, projectionStart) + agent.slice(projectionEnd);
+  const offloadStart = agent.indexOf('private async offloadColdConversations');
+  const offloadEnd = agent.indexOf('private async unloadInactiveProjects', offloadStart);
+  assert.ok(offloadStart > projectionEnd && offloadEnd > offloadStart, 'expected the cold-offload method');
+  const outsideCliProjection = agent.slice(0, projectionStart) + agent.slice(projectionEnd, offloadStart) + agent.slice(offloadEnd);
   assert.doesNotMatch(outsideCliProjection, /conversation\.messages = undefined;/);
   assert.match(sessionCore, /export function branchConversationState/);
   assert.match(agent, /this\.createConversation\(slicedItems, sliced\.messages\)/);
@@ -449,7 +452,7 @@ test('an interrupted run keeps its partial work instead of losing it', () => {
   // A reload/crash recovers the pending turn into structured history on load. The rules
   // moved into session-core (restoreLoadedConversation) so they are testable without a
   // host; the provider must route every stored conversation through it.
-  assert.match(agent, /restoreLoadedConversation\(conversation as Conversation, \{/);
+  assert.match(agent, /restoreLoadedConversation\(conversation, \{/);
   assert.match(agent, /maxStoredMessages: this\.storedMessageLimitFor\(conversation\)/);
   assert.match(sessionCore, /recoverPendingHistory\(conversation\.messages, pending, options\.maxStoredMessages\)/);
   // Exactly one declaration, in the outer run scope so catch/finally can reach it.
@@ -633,9 +636,9 @@ test('opening a CLI conversation attaches its stream instead of showing a stale 
   // would ever stream this conversation again and the sidebar would show a
   // persisted mirror that drifts from sleepy.db the moment the CLI does anything.
   const start = agent.indexOf("message.type === 'openConversation'");
-  // Wide enough to cover the handler's comments and the model pre-flight that
-  // precede the attach, so a later comment edit cannot hide the `.catch` again.
-  const body = agent.slice(start, start + 1600);
+  // Wide enough to cover attachment cleanup plus the handler's comments/model pre-flight,
+  // so a later comment edit cannot hide the `.catch` again.
+  const body = agent.slice(start, start + 2400);
   assert.match(body, /this\.cliOwns\(opened, this\.engineStatus\)/);
   assert.match(body, /this\.cliChatFor\(message\.id/);
   // A failure to attach is logged, not thrown into the message handler.
@@ -761,7 +764,8 @@ test('the CLI server is discovered or started on loopback and owned carefully', 
   assert.match(cliServer, /export function parseListeningUrl/);
   assert.match(cliServer, /serve', '--port', '0', '--hostname', '127\.0\.0\.1'/);
   // Only a server this extension started may be killed on deactivate.
-  assert.match(agent, /if \(this\.cliServer\?\.owned\) this\.cliServer\.child\?\.kill\(\)/);
+  assert.match(agent, /stopOwnedCliServer\(this\.cliServer\)/);
+  assert.match(cliServer, /if \(server\?\.owned && server\.child\) terminateProcessTree\(server\.child\)/);
   // A server this extension started is flagged owned; an attached one is not.
   assert.match(cliServer, /return \{ url, child, owned: true, stderrLines \};/);
   // Stderr is captured so crash reasons are not lost when the server exits before printing a URL.
@@ -1031,8 +1035,12 @@ test('the Indexing page controls the index it describes', () => {
   // the button looks inert.
   assert.match(read('src/project-index.ts'), /async clear\(rootPath: string\): Promise<void> \{/);
   assert.match(agent, /await this\.projectIndex\.clear\(root\.fsPath\)/);
-  // Off means the cached copy must not answer the next question.
-  assert.match(agent, /if \(!enabled\) this\.projectIndex\.invalidate\(\);/);
+  // Off means neither cache may answer the next question, and the repository index
+  // must be released: switching indexing off is a memory decision as much as a
+  // behaviour one, so leaving the tree resident would defeat it.
+  assert.match(agent, /if \(!enabled\) \{[\s\S]{0,300}this\.projectIndex\.invalidate\(\);[\s\S]{0,120}this\.releaseRepoIndex\(\);/);
+  // Turning it on is the request to build it, rather than an empty panel until Rebuild.
+  assert.match(agent, /if \(!enabled\) \{[\s\S]{0,400}\} else \{[\s\S]{0,200}await this\.ensureProjectIntelligence\(true\);/);
   // And the readout says which of those two states it is in.
   assert.match(read('src/index-report.ts'), /enabled: boolean;/);
 });

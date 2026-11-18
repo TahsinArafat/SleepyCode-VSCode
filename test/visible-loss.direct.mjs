@@ -51,11 +51,13 @@ test('a stopped turn still offers retry so its partial work is recoverable', () 
   assert.match(agent, /stoppedItem\.errorInfo = \{ code: 'interrupted', retryable: true/);
 });
 
-test('memory trimming keeps a whole turn so the kept answer still shows', () => {
-  // The webview pairs a user item with the assistant item after it. A trim that lands mid-pair
-  // leaves a headless answer that renderConversation never draws, so the turn reads as lost.
+test('memory trimming summarizes instead of cutting a visible turn in half', () => {
+  // The webview pairs a user item with the assistant item after it, so slicing the item
+  // array mid-pair leaves a headless answer that never draws. The guard now only reports
+  // the limit and lets compaction be the sole reducer of visible history.
   const start = agent.indexOf('private boundConversationItems');
   const body = agent.slice(start, start + 900);
-  assert.match(body, /role !== 'user'\) first\+\+/, 'the kept window must start on a user turn');
-  assert.match(body, /conversation\.items = conversation\.items\.slice\(first\)/);
+  assert.doesNotMatch(body, /conversation\.items = conversation\.items\.slice\(/, 'visible history is never sliced to fit a count');
+  assert.match(body, /reached the \$\{MAX_STORED_ITEMS\.toLocaleString\(\)\}-item memory guard/, 'the limit is reported to the user');
+  assert.match(body, /visible history is not being discarded/);
 });

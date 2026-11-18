@@ -45,7 +45,7 @@ function sameHistoryMessages(left: readonly HistoryMessage[] | undefined, right:
 export function recoverPendingHistory<T extends HistoryMessage>(
   messages: T[] | undefined,
   pending: { userText?: string; messages?: T[]; partialText?: string } | undefined,
-  maxStored: number,
+  _maxStored: number,
 ): T[] | undefined {
   const pendingTail = pending?.messages ?? [];
   const partial = pending?.partialText?.trim() ?? '';
@@ -67,7 +67,7 @@ export function recoverPendingHistory<T extends HistoryMessage>(
   const carried: T[] = alreadyHasUser
     ? [...existing, ...tail]
     : [...existing, { role: 'user', content: pending?.userText ?? '' } as T, ...tail];
-  return carried.length > maxStored ? carried.slice(-maxStored) : carried;
+  return carried;
 }
 
 /**
@@ -224,7 +224,7 @@ export function appendConversationMessages<T extends HistoryMessage>(
   existing: readonly T[] | undefined,
   userText: string,
   produced: readonly T[],
-  maxStored: number,
+  _maxStored: number,
   reuseUser = false,
 ): { messages: T[]; dropped: number } {
   // Repaired on the way IN as well as on the way out: a turn stopped between a
@@ -234,13 +234,9 @@ export function appendConversationMessages<T extends HistoryMessage>(
   const lastUser = lastUserStart(prior);
   const alreadyHasUser = reuseUser && prior.length > 0 && prior[lastUser]?.role === 'user' && prior[lastUser]?.content === userText;
   const next = alreadyHasUser ? [...prior, ...produced] : [...prior, { role: 'user', content: userText } as T, ...produced];
-  // Only the count bound discards anything here; a repair that collapses an orphaned
-  // call is not a drop, so it must not be reported as one.
-  const dropped = Math.max(0, next.length - maxStored);
-  // The slice can also orphan the first turn's results, so repair once more
-  // after trimming rather than assuming the cut landed cleanly.
-  const bounded = dropped ? next.slice(-maxStored) : next;
-  return { messages: dropOrphanedToolCalls(bounded), dropped };
+  // Count guards are handled by compaction in the provider. Slicing here silently
+  // discarded context and could also orphan the first turn's tool results.
+  return { messages: dropOrphanedToolCalls(next), dropped: 0 };
 }
 
 /**

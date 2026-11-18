@@ -63,6 +63,13 @@ test('an oversized snapshot reports why it cannot be restored', () => {
   assert.match(unrestorableReason(snap), /toobig\.ts/);
 });
 
+test('pressure-evicted content is unrestorable and explains the budget release', () => {
+  const snap = { path: 'large.ts', existed: true, content: '', pressureEvicted: true };
+  assert.equal(isRestorable(snap), false);
+  assert.match(unrestorableReason(snap), /released to stay within memory limits/);
+  assert.match(unrestorableReason(snap), /cannot be restored/);
+});
+
 test('a missing file is recorded as not having existed', () => {
   const snap = captureFileSnapshot(root, 'nope.ts');
   assert.equal(snap.existed, false);

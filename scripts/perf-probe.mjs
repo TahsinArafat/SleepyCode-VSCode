@@ -111,7 +111,12 @@ async function measureOnce() {
     const at = performance.now();
     window.postMessage({ type: 'loadConversation', activeId: 'c1', turns: expected.items, usedTokens: 0, running: false, workspaceRoot: '/tmp/workspace' }, '*');
     const check = () => {
-      if (document.querySelectorAll('.chat-turn-group').length >= expected.turns) {
+      // The transcript is windowed: only the band around the viewport mounts, so
+      // "all turns present" is no longer the ready signal. The live tail group is
+      // always mounted (the view lands at the bottom), so its arrival means the
+      // conversation painted. Mounted count is reported alongside for the gate.
+      const mounted = document.querySelectorAll('.chat-turn-group').length;
+      if (document.querySelector('.chat-turn-group[data-live]') || mounted >= expected.turns) {
         void document.body.offsetHeight; // flush style + layout so the number includes paint prep
         resolve({ totalMs: performance.now() - at, nodes: document.getElementsByTagName('*').length });
         return;

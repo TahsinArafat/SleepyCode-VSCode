@@ -58,8 +58,18 @@ export interface Attachment {
   id: string;
   name: string;
   mime: string;
-  /** Data URL for images, or raw text for text files. */
+  /** Thumbnail/resource URI for images, or raw text for text files. */
   data: string;
+  /** Original image data, carried only by the initial send and released on acceptance. */
+  sourceData?: string;
+  /** Original model-input file; retained for edit/resend without base64. */
+  tempPath?: string;
+  /** Bounded preview file used by the webview. */
+  previewPath?: string;
+  /** Original byte size used by attachment budget checks. */
+  size?: number;
+  /** True when a thumbnail could not be produced; render a generic icon. */
+  previewFailed?: boolean;
   kind: "image" | "text";
 }
 
@@ -150,6 +160,8 @@ export interface UserTurn {
   model?: string;
   /** Mode this message was sent in. */
   mode?: string;
+  /** Correlates the optimistic turn with its accepted attachment metadata. */
+  requestId?: string;
 }
 
 // Mentions live IN the message text as full self-describing tags:

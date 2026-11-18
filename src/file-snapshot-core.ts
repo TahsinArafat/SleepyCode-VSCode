@@ -34,6 +34,8 @@ export type { FileSnapshot };
  * asserts the two stay equal, so the duplication cannot drift silently.
  */
 export const MAX_SNAPSHOT_BYTES = 250_000;
+/** Total original content retained for one assistant turn before restore is disabled. */
+export const MAX_TURN_SNAPSHOT_BYTES = 4_000_000;
 
 /**
  * Capture a file's pre-edit content so undo can restore it outside Git.
@@ -82,10 +84,11 @@ export function captureRedoSnapshot(rootPath: string, relative: string, maxBytes
 
 /** Whether a snapshot can be written back. False means the restore must be reported, not attempted. */
 export function isRestorable(snapshot: FileSnapshot): boolean {
-  return snapshot.oversized !== true;
+  return snapshot.oversized !== true && snapshot.pressureEvicted !== true;
 }
 
 /** The message shown when a snapshot cannot be restored. */
 export function unrestorableReason(snapshot: FileSnapshot): string {
+  if (snapshot.pressureEvicted) return `${snapshot.path}: snapshot content was released to stay within memory limits, so this turn cannot be restored`;
   return `${snapshot.path}: too large to snapshot (${Math.round(MAX_SNAPSHOT_BYTES / 1024)} KB limit), so it cannot be restored`;
 }

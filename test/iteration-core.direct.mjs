@@ -51,14 +51,14 @@ test('recoverPendingHistory folds a crash checkpoint onto existing history', () 
   assert.deepEqual(recoverPendingHistory([], { userText: 'x', messages: [] }, 400), []);
 });
 
-test('recoverPendingHistory trims from the front when the checkpoint exceeds the bound', () => {
+test('recoverPendingHistory preserves the complete checkpoint above the old count bound', () => {
   const pending = {
     userText: 'go',
     messages: Array.from({ length: 5 }, (_, index) => ({ role: 'assistant', content: String(index) })),
   };
   const recovered = recoverPendingHistory(undefined, pending, 3);
-  assert.equal(recovered?.length, 3);
-  assert.deepEqual(recovered?.map(message => message.content), ['2', '3', '4']);
+  assert.equal(recovered?.length, 6);
+  assert.deepEqual(recovered?.map(message => message.content), ['go', '0', '1', '2', '3', '4']);
 });
 
 test('recoverPendingHistory folds a mid-stream partial answer that never reached the step list', () => {
@@ -111,7 +111,7 @@ test('safeHistoryStart only cuts at user-owned boundaries', () => {
   assert.equal(safeHistoryStart(messages, 0), 0);
 });
 
-test('appendConversationMessages keeps the newest context under the hard bound', () => {
+test('appendConversationMessages preserves full history above the old hard bound', () => {
   const existing = [
     { role: 'user', content: 'old' },
     { role: 'assistant', content: 'old-answer' },
@@ -121,12 +121,11 @@ test('appendConversationMessages keeps the newest context under the hard bound',
   ];
   const { messages, dropped } = appendConversationMessages(existing, 'new', produced, 3);
   assert.deepEqual(messages, [
-    { role: 'assistant', content: 'old-answer' },
+    ...existing,
     { role: 'user', content: 'new' },
     { role: 'assistant', content: 'new-answer' },
   ]);
-  // The cut is reported, because it is context the model loses.
-  assert.equal(dropped, 1);
+  assert.equal(dropped, 0);
 });
 
 test('a turn that fits the bound reports no drop', () => {

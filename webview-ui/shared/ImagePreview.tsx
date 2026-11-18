@@ -48,7 +48,7 @@ function PreviewDialog({ images, activeId, open, exiting, onClose }: {
   const [failed, setFailed] = React.useState<string | null>(null);
   const [zoomed, setZoomed] = React.useState(false);
   const stage = React.useRef<HTMLDivElement>(null);
-  const safeSource = /^data:image\/[a-z\d.+-]+(?:;[^,]*)?,/i.test(image?.data ?? "");
+  const safeSource = /^(?:data:image\/[a-z\d.+-]+(?:;[^,]*)?,|vscode-webview:)/i.test(image?.data ?? "");
   const error = !safeSource || failed === image?.data;
   const ready = !error && loaded?.data === image?.data;
 

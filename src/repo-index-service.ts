@@ -22,15 +22,25 @@ import { MAX_FILE_BYTES } from './types.ts';
  */
 export class RepoIndexService {
   private cache?: { root: string; index: RepoIndex };
+  private building?: { root: string; promise: Promise<RepoIndex> };
+  private loadTicket = 0;
 
-  /** The index for `root`, building it on first use and reusing it afterwards. */
+  /** The index for `root`, building it once even when several runs request it together. */
   async load(root: vscode.Uri): Promise<RepoIndex> {
     if (this.cache?.root === root.fsPath) return this.cache.index;
+    if (this.building?.root === root.fsPath) return this.building.promise;
     // A different root means the cached tree is for a workspace we are no longer in.
     this.cache = undefined;
-    const index = new RepoIndex(await scanWorkspace(root.fsPath));
-    this.cache = { root: root.fsPath, index };
-    return index;
+    const ticket = ++this.loadTicket;
+    const promise = (async () => new RepoIndex(await scanWorkspace(root.fsPath)))();
+    this.building = { root: root.fsPath, promise };
+    try {
+      const index = await promise;
+      if (ticket === this.loadTicket) this.cache = { root: root.fsPath, index };
+      return index;
+    } finally {
+      if (this.building?.promise === promise) this.building = undefined;
+    }
   }
 
   /**
@@ -75,5 +85,7 @@ export class RepoIndexService {
   /** Drop the workspace index. Called on workspace change, on hide, and on dispose. */
   dispose(): void {
     this.cache = undefined;
+    this.building = undefined;
+    this.loadTicket += 1;
   }
 }

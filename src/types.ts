@@ -166,6 +166,8 @@ export type FileSnapshot = {
    * restore" instead of blanking a file it has no copy of.
    */
   oversized?: boolean;
+  /** Content was released by the per-turn or active-conversation memory budget. */
+  pressureEvicted?: boolean;
 };
 
 
@@ -314,6 +316,19 @@ export type Conversation = {
   mode?: 'agent' | 'ask' | 'plan';
   /** The conversation's goal: objective, optional token budget, and status. */
   goal?: import('./goal-core').ConversationGoal;
+  /** True when only lightweight metadata is resident; heavy state is loaded on demand. */
+  cold?: boolean;
+  /** Revision of the immutable turn-snapshot record used by storage v2. */
+  turnSnapshotRevision?: string;
+  /** LRU bookkeeping, never persisted. */
+  lastUsed?: number;
+  /** Last measured serialized size, never persisted. */
+  estimatedBytes?: number;
+  /** Lightweight history-list metadata retained while cold. */
+  messageCount?: number;
+  changeCount?: number;
+  lastStatus?: 'stopped' | 'failed' | 'paused' | 'done' | 'empty';
+  excerpt?: string;
 };
 
 /** User-defined agent that extends the built-in roster with its own model, tool policy, and skills. */
@@ -341,6 +356,8 @@ export type Project = {
   activeConversationId: string;
   createdAt: number;
   updatedAt: number;
+  /** Storage layout used by this project; absent/1 is the legacy whole-project blob. */
+  storageVersion?: 1 | 2;
 };
 
 export type ProviderModelItem = { id: string; name: string; contextWindow?: number; maxOutputLimit?: number; recommended?: boolean; isAuto?: boolean };
@@ -429,6 +446,11 @@ export type ImageAttachment = {
   size: number;
   mimeType: string;
   tempPath?: string;
+  /** Bounded thumbnail file for the webview; the original stays in tempPath for the model. */
+  previewPath?: string;
+  /** Avoid rendering the original when a bounded preview could not be created. */
+  previewFailed?: boolean;
+  /** Rendering-only resource URI. Never persisted. Legacy data URLs are replaced on load. */
   previewDataUrl?: string;
 };
 

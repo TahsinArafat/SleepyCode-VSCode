@@ -125,6 +125,7 @@ export type InMessage =
   | { type: "shortcut"; action: string }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
+  | { type: "attachmentsResolved"; requestId: string; convId: string; attachments: Attachment[] }
   | { type: "steeringAccepted"; convId: string }
   | { type: "queueDraft"; convId: string; draft: { text: string; attachments: Attachment[] } }
   | { type: "conversationSearchResults"; requestId: number; list: ConversationSummary[] }

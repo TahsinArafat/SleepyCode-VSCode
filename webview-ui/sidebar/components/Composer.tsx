@@ -183,36 +183,65 @@ function newAttachId() {
 
 const TEXT_EXT = /\.(txt|md|json|ya?ml|toml|csv|log|js|jsx|ts|tsx|py|java|c|cpp|h|hpp|cs|go|rs|rb|php|html|css|scss|sh|xml|sql|swift|kt|kts|m|mm|scala|lua|pl|pm|hs|ex|exs|erl|vue|svelte|dart|zig|r|R|jl|clj|cljs|fs|fsx|v|sv|vhd|vhdl|ml|mli|nim|cr|groovy|gradle|ps1|psm1|bat|cmd|fish|zsh|bash|conf|ini|cfg|env|dockerfile|makefile|cmake|proto|graphql|gql|tf|hcl|pug|jade|ejs|hbs|mustache|liquid|twig|astro|mdx|rst|tex|bib|sty|cls|dtd|xsd|xsl|wasm|wat|s|asm)$/i;
 
-const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20 MB
+const MAX_IMAGE_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_SIZE = 20 * 1024 * 1024;
+const MAX_IMAGE_ATTACHMENTS = 8;
+const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+const MAX_PREVIEW_DIMENSION = 1600;
+
+async function imagePreview(file: File): Promise<{ data: string; previewFailed?: boolean }> {
+  try {
+    if (typeof createImageBitmap !== "function") return { data: "", previewFailed: true };
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, MAX_PREVIEW_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return { data: "", previewFailed: true };
+    }
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    return { data: canvas.toDataURL("image/jpeg", 0.82) };
+  } catch {
+    return { data: "", previewFailed: true };
+  }
+}
 
 function fileToAttachment(file: File): Promise<Attachment | null> {
   return new Promise((resolve) => {
-    if (file.size > MAX_ATTACHMENT_SIZE) {
+    const isImage = file.type.startsWith("image/");
+    if (file.size > (isImage ? MAX_IMAGE_ATTACHMENT_SIZE : MAX_TEXT_ATTACHMENT_SIZE)) {
       resolve(null);
       return;
     }
-    const isImage = file.type.startsWith("image/");
     const isText = !isImage && (file.type.startsWith("text/") || TEXT_EXT.test(file.name));
     if (!isImage && !isText) {
       resolve(null);
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
+      const original = typeof reader.result === "string" ? reader.result : "";
+      const preview = isImage ? await imagePreview(file) : { data: original };
       resolve({
         id: newAttachId(),
         name: file.name || (isImage ? "pasted-image.png" : "file.txt"),
         mime: file.type || (isImage ? "image/png" : "text/plain"),
-        data: typeof reader.result === "string" ? reader.result : "",
+        data: preview.data,
+        ...(isImage ? { sourceData: original, size: file.size, ...(preview.previewFailed ? { previewFailed: true } : {}) } : {}),
         kind: isImage ? "image" : "text",
       });
     };
     reader.onerror = () => resolve(null);
-    if (isImage) {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsText(file);
-    }
+    if (isImage) reader.readAsDataURL(file);
+    else reader.readAsText(file);
   });
 }
 
@@ -1631,10 +1660,25 @@ export const Composer = React.memo(function Composer({
     const arr = Array.from(files);
     const results = await Promise.all(arr.map(fileToAttachment));
     const valid = results.filter((a): a is Attachment => a !== null);
-    if (valid.length) {
-      setAttachments((prev) => [...prev, ...valid]);
+    let imageCount = attachmentsRef.current.filter(item => item.kind === "image").length;
+    let imageBytes = attachmentsRef.current.reduce((total, item) => total + (item.kind === "image" ? item.size ?? 0 : 0), 0);
+    const accepted: Attachment[] = [];
+    let refused = 0;
+    for (const attachment of valid) {
+      if (attachment.kind === "image") {
+        const size = attachment.size ?? 0;
+        if (imageCount >= MAX_IMAGE_ATTACHMENTS || imageBytes + size > MAX_IMAGE_BYTES) {
+          refused += 1;
+          continue;
+        }
+        imageCount += 1;
+        imageBytes += size;
+      }
+      accepted.push(attachment);
     }
-  }, []);
+    if (accepted.length) setAttachments((prev) => [...prev, ...accepted]);
+    if (refused > 0 || valid.length < arr.length) onNotice?.("Some attachments were skipped (image limit: 8 files / 32 MB total / 10 MB each).");
+  }, [onNotice]);
 
   // Build an inline, non-editable mention pill with a keyboard-reachable
   // removal button after its label. Delegated events survive undo restoration.
@@ -1996,7 +2040,7 @@ export const Composer = React.memo(function Composer({
                 {a.kind === "image" ? (
                   <button type="button" className="image-attachment-trigger" aria-label={`Preview image ${a.name}`}
                     aria-haspopup="dialog" onClick={() => setPreviewImageId(a.id)}>
-                    <img className="attach-thumb" src={a.data} alt="" />
+                    {a.data ? <img className="attach-thumb" src={a.data} alt="" /> : <span className="attach-file"><Icon name="file" size={16} /></span>}
                   </button>
                 ) : (
                   <div className="attach-file">

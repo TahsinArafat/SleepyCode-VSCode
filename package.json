@@ -2,7 +2,7 @@
   "name": "sleepycode-agent",
   "displayName": "SleepyCode",
   "description": "SleepyAI's coding agent for Visual Studio Code.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "TahsinArafat",
   "license": "MIT",
   "engines": {
@@ -238,8 +238,8 @@
         },
         "sleepycode.repoIndex": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable the in-memory repository index for symbol and semantic search."
+          "default": false,
+          "description": "Build a local repository index (file paths, symbols, imports) for semantic and symbol search. Off by default: without it the agent still gets the workspace folder, OS, and git context, and reads files on demand with its normal tools. Turn it on in Settings → Indexing for large repositories."
         },
         "sleepycode.hooks": {
           "type": "boolean",

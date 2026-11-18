@@ -32,7 +32,7 @@ export function IndexPanel({ features, setFeatures }: { features: FeatureConfig;
       // quietly report "none read" for an index that is fine. The snapshot itself
       // never crosses the boundary: it carries every indexed file.
       const status = message.status;
-      setReport(status && typeof status.files === "string" ? (status as IndexReport) : indexReport(undefined, Date.now(), { enabled: features.indexingEnabled !== false }));
+      setReport(status && typeof status.files === "string" ? (status as IndexReport) : indexReport(undefined, Date.now(), { enabled: features.indexingEnabled === true }));
       setBusy(false);
     };
     window.addEventListener("message", handler);
@@ -72,7 +72,7 @@ export function IndexPanel({ features, setFeatures }: { features: FeatureConfig;
             <span>Index this workspace</span>
           </div>
           <Toggle
-            checked={features.indexingEnabled !== false}
+            checked={features.indexingEnabled === true}
             onChange={(value) => setFeatures({ indexingEnabled: value })}
             label="Enable indexing"
           />

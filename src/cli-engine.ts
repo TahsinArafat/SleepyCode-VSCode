@@ -154,8 +154,10 @@ export type CliLiveEvent =
 
 /** Live bridge between one CLI session and the sidebar projection. */
 export class CliChatSession {
-  private readonly controller = new AbortController();
+  private controller = new AbortController();
   private stream: Promise<void> | undefined;
+  private idleTimer?: ReturnType<typeof setTimeout>;
+  private detached = false;
   private readonly client: CliClient;
   readonly id: string;
   private readonly label: ToolLabel;
@@ -192,10 +194,34 @@ export class CliChatSession {
 
   /** Load current history and start following server events. */
   async open(): Promise<void> {
+    if (this.detached) {
+      this.controller = new AbortController();
+      this.detached = false;
+    }
+    this.touch();
     await this.refresh();
     if (!this.stream) {
       this.stream = this.client.events(event => this.handle(event), this.controller.signal);
     }
+  }
+
+  private touch(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.detach(), 10 * 60_000);
+    this.idleTimer.unref?.();
+  }
+
+  /** Release SSE and history mirrors but retain the registry binding and durable CLI rows. */
+  detach(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+    this.controller.abort();
+    this.stream = undefined;
+    this.lastMessages = [];
+    this.projectedByMessage.clear();
+    this.refreshTicket += 1;
+    this.busy = false;
+    this.detached = true;
   }
 
   /**
@@ -213,6 +239,7 @@ export class CliChatSession {
    * out a turn that the CLI is still handling.
    */
   async refresh(): Promise<void> {
+    this.touch();
     const ticket = ++this.refreshTicket;
     try {
       const messages = await this.client.messages(this.id);
@@ -273,6 +300,7 @@ export class CliChatSession {
   }
 
   private handle(event: { type: string; properties?: Record<string, unknown> }): void {
+    this.touch();
     const properties = event.properties ?? {};
     const sessionID = properties.sessionID as string | undefined;
     // Only this session's events move this sidebar.
@@ -435,8 +463,6 @@ export class CliChatSession {
   }
 
   dispose(): void {
-    this.controller.abort();
-    this.stream = undefined;
-    this.busy = false;
+    this.detach();
   }
 }
