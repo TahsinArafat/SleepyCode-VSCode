@@ -24,7 +24,7 @@ import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MA
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
-import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
+import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
 import { durationMs, toolArgsText, toolResultText } from './tool-payload-core.ts';
 import { createThinkSplitter } from './think-strip';
@@ -1066,6 +1066,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private onWorkspaceFoldersChanged(): void {
     this.projectIndex.invalidate();
     invalidateGitTrackedCache();
+    // A root's resolved path is a property of the folder set, so a new set must
+    // re-resolve rather than compare against the previous root's realpath.
+    invalidateRealRoots();
     // The cached repo index belongs to the folder set that produced it. It was previously
     // left in place here, so switching workspaces kept the whole previous tree resident
     // (~150 MB on a 4,000-file repo) and served its paths to searches in the new one.
@@ -8606,7 +8609,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const root = this.workspaceRoot();
     const editor = vscode.window.activeTextEditor;
     const editorPath = editor?.document.uri.fsPath ?? '';
-    const inside = Boolean(root && editor && pathInside(root.fsPath, editorPath));
+    // Lexical on purpose. This only decides which file the composer's context chip
+    // names — it authorizes nothing — and it runs on every debounced cursor move and
+    // every editor switch, where two `realpathSync` calls are 5-20 ms each on a
+    // network home or a cloud File Provider path. The editor's own path is already
+    // the resolved one, so the symlink case this would otherwise catch cannot arise.
+    const inside = Boolean(root && editor && pathInsideLexical(root.fsPath, editorPath));
     const selection = inside && editor && !editor.selection.isEmpty ? editor.selection : undefined;
     this.post({
       type: 'editorContext',

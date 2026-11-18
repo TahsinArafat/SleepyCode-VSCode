@@ -4,11 +4,40 @@ import type { Provider } from './providers';
 import type { TranscriptItem, WorkItem, ApprovalMode, AgentErrorPresentation } from './types';
 import { AUTH_ERROR_TITLE } from './retry-core.ts';
 
+/**
+ * Cached `realpathSync` of a workspace root.
+ *
+ * Every `pathInside` call resolved the root afresh, and the root is the one half of
+ * that comparison which does not change between two keystrokes. It is reached from
+ * twelve call sites including the editor-context sender (on every debounced cursor
+ * move) and the file-watcher handler (once per saved file), where a warm local disk
+ * costs ~0.01 ms but a network home or a cloud File Provider path costs 5-20 ms —
+ * per event, on the extension host's single thread.
+ *
+ * Caching is keyed by the root string and cleared through `invalidateRealRoots`. The
+ * candidate is still resolved on every call: that is the half a symlink attack
+ * targets, and it is deliberately not cached.
+ */
+const realRoots = new Map<string, string>();
+
+function realRootOf(root: string): string {
+  const cached = realRoots.get(root);
+  if (cached !== undefined) return cached;
+  const resolved = realpathSync(root);
+  realRoots.set(root, resolved);
+  return resolved;
+}
+
+/** Drop the memoized roots. Called when the workspace folders change. */
+export function invalidateRealRoots(): void {
+  realRoots.clear();
+}
+
 export function pathInside(root: string, candidate: string): boolean {
   const lexical = path.relative(root, candidate);
   if (lexical === '' || lexical === '..' || lexical.startsWith('..' + path.sep) || path.isAbsolute(lexical)) return false;
   try {
-    const realRoot = realpathSync(root);
+    const realRoot = realRootOf(root);
     const realCandidate = realpathSync(candidate);
     const resolved = path.relative(realRoot, realCandidate);
     return resolved !== '' && resolved !== '..' && !resolved.startsWith('..' + path.sep) && !path.isAbsolute(resolved);
@@ -18,13 +47,26 @@ export function pathInside(root: string, candidate: string): boolean {
   }
 }
 
+/**
+ * Lexical containment test with no filesystem access.
+ *
+ * For display decisions only — "which file should the composer's context chip name" —
+ * where the path came from VS Code and the answer cannot grant access to anything.
+ * `pathInside` remains the predicate for anything that authorizes a read or a write,
+ * because this one cannot see a symlink that escapes the root.
+ */
+export function pathInsideLexical(root: string, candidate: string): boolean {
+  const lexical = path.relative(root, candidate);
+  return lexical !== '' && lexical !== '..' && !lexical.startsWith('..' + path.sep) && !path.isAbsolute(lexical);
+}
+
 export function resolvePathSafe(root: string, relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
   if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..')) {
     throw new Error('Path must stay inside the workspace.');
   }
 
-  const realRoot = realpathSync(root);
+  const realRoot = realRootOf(root);
   const candidate = path.join(realRoot, normalized);
   let checkPath = candidate;
 
