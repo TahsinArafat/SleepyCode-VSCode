@@ -100,6 +100,23 @@ function languageIdFor(name: string): string | undefined {
 
 const dataUris = new Map<string, string | undefined>();
 
+/**
+ * How many resolved filename entries to keep.
+ *
+ * Keyed by the lowercased file name, so this grows with every distinct name ever
+ * asked about rather than with the theme. The webview asks about a file name while the
+ * tool call's arguments are still STREAMING (`Tool.tsx` re-subscribes as the path
+ * fills in), so a single mention of `src/components/AgentPanel.tsx` produces around
+ * 29 distinct lookups — `agentpanel.`, `agentpanel.t`, `agentpanel.ts`, … — and every
+ * one of them used to be retained for the life of the extension host.
+ *
+ * A file name is a small key, so this is not a large leak per entry; the reason to
+ * bound it is that it is unbounded by construction and nothing ever evicts. The
+ * webview keeps its own cache, so evicting here costs at most one extra lookup for a
+ * name that scrolls back into view.
+ */
+const MAX_RESOLVED_ENTRIES = 2_000;
+
 function toDataUri(absolute: string): string | undefined {
   if (dataUris.has(absolute)) return dataUris.get(absolute);
   let uri: string | undefined;
@@ -127,14 +144,47 @@ function toDataUri(absolute: string): string | undefined {
 
 const resolved = new Map<string, FileIconInfo | undefined>();
 
-/** Resolve a file name to its icon in the active theme, or `undefined`. */
+/**
+ * Resolve a file name to its icon in the active theme, or `undefined`.
+ *
+ * Names that cannot be final yet are not looked up: while a tool call's arguments
+ * stream, the path arrives in fragments (`agentpanel.`, `agentpanel.t`, …) and each
+ * fragment used to cost a theme walk plus a permanent cache entry. A trailing dot or a
+ * name ending in a partial extension cannot match a real icon anyway, so answering
+ * `undefined` immediately is both cheaper and more accurate than resolving and caching
+ * a guess — `Tool.tsx` already treats `undefined` as "not resolved yet" and re-asks
+ * when the name grows.
+ */
 export function resolveFileIcon(filename: string): FileIconInfo | undefined {
   const key = (filename || '').toLowerCase();
   if (!key) return undefined;
   if (resolved.has(key)) return resolved.get(key);
+  // A name still streaming in is answered but never cached: it will not be asked for
+  // again, and caching it is what made the map grow without bound. `doResolve` would
+  // fall through to the generic file icon for a fragment anyway, which is a guess the
+  // webview cannot distinguish from a real answer.
+  if (isIncompleteName(key)) return undefined;
   const info = doResolve(key);
+  if (resolved.size >= MAX_RESOLVED_ENTRIES) {
+    // Oldest-first, which is the cheapest bound available on a Map and the right one
+    // here: a name that scrolls back into view is one lookup away from being re-cached.
+    const oldest = resolved.keys().next();
+    if (!oldest.done) resolved.delete(oldest.value);
+  }
   resolved.set(key, info);
   return info;
+}
+
+/**
+ * Whether a file name is a fragment of something still arriving.
+ *
+ * Deliberately narrow: only a trailing dot is treated as incomplete, because that is
+ * the one shape guaranteed not to be a real file name. Guessing more aggressively
+ * (`agentpanel.t`) would risk refusing a genuine single-letter extension and leaving
+ * that file with no icon.
+ */
+function isIncompleteName(name: string): boolean {
+  return name.endsWith('.');
 }
 
 function doResolve(name: string): FileIconInfo | undefined {

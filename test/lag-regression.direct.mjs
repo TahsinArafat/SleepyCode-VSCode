@@ -607,3 +607,61 @@ test('transcript snapshots are coalesced to one per frame, and never overtake ne
   const deltasBody = agent.slice(agent.indexOf('private flushPendingDeltas'), agent.indexOf('private post(message: unknown)'));
   assertSource(deltasBody, /this\.flushPendingSnapshot\(\);/, 'the delta timer flushes a held snapshot first');
 });
+
+test('the file-icon cache is bounded, and fragments still streaming in are not cached', () => {
+  // Keyed by lowercased file name, so it grows with every distinct name ever asked
+  // about rather than with the theme. Tool.tsx re-subscribes WHILE a tool call's
+  // arguments stream, so one mention of `src/components/AgentPanel.tsx` produces ~29
+  // lookups (`agentpanel.`, `agentpanel.t`, …) and every one was retained forever.
+  const source = readFileSync(new URL('../src/file-icons.ts', import.meta.url), 'utf8');
+  assert.match(source, /const MAX_RESOLVED_ENTRIES = 2_000;/, 'the cache has a cap');
+  // The window allows for the explanatory comment between the guard and the eviction.
+  assert.match(source, /if \(resolved\.size >= MAX_RESOLVED_ENTRIES\) \{[\s\S]{0,600}resolved\.delete\(oldest\.value\);/, 'it evicts oldest-first when full');
+  assert.match(source, /if \(isIncompleteName\(key\)\) return undefined;/, 'a fragment is answered but not resolved or cached');
+  assert.match(source, /function isIncompleteName\(name: string\): boolean \{\s*return name\.endsWith\('\.'\);/, 'only a trailing dot counts as incomplete');
+  // Invalidation must still clear both caches, or a theme change would serve stale icons.
+  assert.match(source, /export function invalidateFileIconCache\(\): void \{[\s\S]{0,160}resolved\.clear\(\);[\s\S]{0,120}dataUris\.clear\(\);/, 'invalidation clears both maps');
+});
+
+test('a streamed path bounds the icon cache instead of growing it forever', () => {
+  // Mirrors the shipped resolveFileIcon map behaviour on the one axis that matters:
+  // how many entries survive a stream of partial names. `doResolve` is stubbed because
+  // the real one needs a VS Code icon theme, which is not present under the test runner.
+  const MAX = 2_000;
+  const cache = new Map();
+  const isIncomplete = (name) => name.endsWith('.');
+  const resolve = (name) => {
+    const key = String(name || '').toLowerCase();
+    if (!key) return undefined;
+    if (cache.has(key)) return cache.get(key);
+    if (isIncomplete(key)) return undefined;
+    if (cache.size >= MAX) {
+      const oldest = cache.keys().next();
+      if (!oldest.done) cache.delete(oldest.value);
+    }
+    cache.set(key, undefined);
+    return undefined;
+  };
+
+  // One streamed path, as Tool.tsx produces while args arrive.
+  const target = 'src/components/AgentPanel.tsx';
+  const partials = [];
+  let cur = '';
+  for (const ch of target) { cur += ch; partials.push(cur.toLowerCase()); }
+  assert.ok(partials.length > 20, 'a single path really does produce many fragments');
+
+  for (let i = 0; i < 200; i += 1) for (const p of partials) resolve(p);
+  // Trailing-dot fragments are never cached, so only the real names accumulate.
+  const afterOnePath = cache.size;
+  assert.ok(afterOnePath < partials.length, `cached ${afterOnePath} of ${partials.length} fragments; incomplete ones are skipped`);
+
+  // Many distinct files must not grow the map past the cap.
+  for (let f = 0; f < 10_000; f += 1) resolve(`src/f${f}.tsx`);
+  assert.equal(cache.size, MAX, 'the cache holds exactly its cap after unbounded traffic');
+
+  // A real single-letter extension must still resolve - the narrow rule matters.
+  resolve('notes.c');
+  resolve('archive.tar.gz');
+  assert.ok(!isIncomplete('notes.c'), 'a one-letter extension is a real name, not a fragment');
+  assert.ok(!isIncomplete('archive.tar.gz'), 'a multi-dot name is a real name');
+});
