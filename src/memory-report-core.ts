@@ -183,8 +183,9 @@ export function formatMemoryReport(report: MemoryReport, extra: { at?: number; n
   lines.push(`  compiled code  ${megabytes(snapshot.codeSpace)} MB   (bundled dependencies)`);
   if (snapshot.heapAfterGc === undefined) {
     lines.push('');
-    lines.push('  (heap after GC is unavailable: the extension host is not started with --expose-gc,');
-    lines.push('   so the reported totals include unreclaimed space. Compare repeated reports instead.)');
+    lines.push('  (no collection was forced for this report, so the totals above include unreclaimed');
+    lines.push('   space. The manual report forces one; a heartbeat cannot, because it would stall');
+    lines.push('   the extension host over an idle window.)');
   } else {
     lines.push(`  after GC       ${megabytes(snapshot.heapAfterGc)} MB   (reclaimed ${megabytes(Math.max(0, snapshot.heapUsed - snapshot.heapAfterGc))} MB)`);
   }

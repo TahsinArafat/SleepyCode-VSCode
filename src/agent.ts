@@ -26,6 +26,7 @@ import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, m
 import * as memoryReportCore from './memory-report-core';
 import * as v8 from 'node:v8';
 import * as objectCensusCore from './object-census-core';
+import * as heapProbeCore from './heap-probe-core';
 import { formatMemoryReport } from './memory-report-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
@@ -2674,7 +2675,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * on-demand command, and the copyable text — a second implementation would drift and
    * then two people would be reading different figures for the same process.
    */
-  private memoryReport(): memoryReportCore.MemoryReport {
+  private memoryReport(forceCollect = false): memoryReportCore.MemoryReport {
     let conversations = 0;
     let coldConversations = 0;
     let items = 0;
@@ -2752,18 +2753,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // The breakdown is a diagnostic, never a requirement: a host without it still gets
       // the totals, which are what the eviction logic actually uses.
     }
-    // Only present when the process was started with --expose-gc, which an extension host
-    // is not. When it is, the delta is the most direct evidence of garbage vs retention.
-    const gc = (globalThis as { gc?: () => void }).gc;
-    let heapAfterGc: number | undefined;
-    if (typeof gc === 'function') {
-      try {
-        gc();
-        heapAfterGc = process.memoryUsage().heapUsed;
-      } catch {
-        heapAfterGc = undefined;
-      }
-    }
+    // A forced collection, so the report can separate retained from unreclaimed without
+    // the user having to restart the editor with --expose-gc. `global.gc` is normally
+    // absent, but the flag can be applied at runtime and a fresh vm context exposes it;
+    // see heap-probe-core. Only the manual report pays for this -- a heartbeat measuring
+    // an idle window must not stall the event loop to satisfy curiosity.
+    const heapAfterGc = forceCollect
+      ? heapProbeCore.heapAfterCollection(this.gcAccess(), () => process.memoryUsage().heapUsed)
+      : undefined;
     const root = this.workspaceRoot();
     const index = root ? this.repoIndex.indexFor(root) : undefined;
     const terminals = this.terminals.list();
@@ -2889,7 +2886,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * process from a busy one.
    */
   public memoryReportText(): string {
-    const report = this.memoryReport();
+    // The manual report forces a collection: its whole purpose is to answer "how much of
+    // this is actually retained", and an uncollected total cannot.
+    const report = this.memoryReport(true);
     return formatMemoryReport(report, {
       at: Date.now(),
       note: `Editor: ${vscode.version} · platform ${process.platform} · pid ${process.pid}`,
@@ -2930,6 +2929,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Show the report in the chat and copy it, so one action gets the user the data. */
+  /** A collector for this engine, resolved once and reused. */
+  private gcProbe?: heapProbeCore.GcAccess | null;
+
+  /**
+   * A working garbage collector, or undefined when this engine will not give one.
+   *
+   * Resolved lazily and cached: applying the flag is cheap but pointless to repeat, and
+   * a failure must not be retried on every report.
+   */
+  private gcAccess(): heapProbeCore.GcAccess | undefined {
+    if (this.gcProbe === undefined) {
+      this.gcProbe = heapProbeCore.acquireGc({
+        setFlagsFromString: flags => v8.setFlagsFromString(flags),
+        runInNewContext: code => {
+          // `vm` is imported lazily: it exists in every Node build, but this is a
+          // diagnostic path and should not be part of startup.
+          const vm = require('node:vm') as typeof import('node:vm');
+          return vm.runInNewContext(code);
+        },
+      }) ?? null;
+    }
+    return this.gcProbe ?? undefined;
+  }
+
   /**
    * Count live object instances, or undefined when the engine cannot answer.
    *
@@ -2974,7 +2997,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.outputChannel().appendLine(text);
       this.outputChannel().show(true);
     }
-    this.log('info', 'perf.memory.manual', memoryReportCore.formatMemoryLine(this.memoryReport()));
+    this.log('info', 'perf.memory.manual', memoryReportCore.formatMemoryLine(this.memoryReport(true)));
   }
 
   /**

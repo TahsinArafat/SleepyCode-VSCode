@@ -154,8 +154,9 @@ test('a post-GC figure is used when the engine exposes one, and explains itself 
   // --expose-gc is not used by an extension host, so the honest report says the totals
   // include unreclaimed space rather than implying they are a live set.
   const withoutGc = m.formatMemoryReport(report(), {});
-  assert.match(withoutGc, /heap after GC is unavailable/, 'says the measurement is missing');
-  assert.match(withoutGc, /Compare repeated reports instead/, 'gives the reader the next step');
+  assert.match(withoutGc, /no collection was forced/, 'says why the figure is missing');
+  assert.match(withoutGc, /manual report forces one/, 'and that a way to get it exists');
+  assert.match(withoutGc, /stall/, 'and why the heartbeat cannot provide it');
 
   const withGc = report({ snapshot: { heapUsed: 400 * 1048576, heapAfterGc: 120 * 1048576 } });
   const text = m.formatMemoryReport(withGc, {});
