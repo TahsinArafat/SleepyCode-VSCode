@@ -8805,7 +8805,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     ].filter(Boolean).join('\n');
   }
 
+  /**
+   * The context block built from the composer's attachments plus the editor.
+   *
+   * This runs on the send path, between the `editor-context` and `engine` stages, so
+   * every await here delays the first token. Editing it previously awaited a `stat`
+   * and then a `readFile` per attachment in sequence — up to 32 round trips, each of
+   * which is milliseconds locally and seconds on a network home or a cloud File
+   * Provider path. The user-visible symptom was a send that paused before anything
+   * appeared.
+   *
+   * The reads are now all started before the first one is awaited, so they overlap.
+   * Ordering and de-duplication stay sequential and unchanged: what a section SAYS is
+   * decided by one synchronous pass at the end, because the emitted order and the
+   * "first mention of a path wins" rule are part of the prompt the model reads.
+   *
+   * A duplicate path between the active file and an attachment is read once extra in
+   * the worst case (at most one redundant read, bounded by the 16-attachment cap)
+   * rather than dropping the attachment: the active file only claims its path in
+   * `seen` if its own read succeeded, and skipping an attachment whose content could
+   * not be fetched is worse than fetching it twice.
+   */
   private async composerContextBlock(root: vscode.Uri, context?: ComposerContext): Promise<string> {
+    const MAX_CONTEXT_ATTACHMENTS = 16;
     const sections: string[] = [];
     const seen = new Set<string>();
     const editor = vscode.window.activeTextEditor;
@@ -8819,53 +8841,101 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const selected = editor.document.getText(editor.selection).slice(0, 12_000);
       sections.push(`Selected code from ${relative}:${editor.selection.start.line + 1}-${editor.selection.end.line + 1}:\n\`\`\`\n${selected}\n\`\`\``);
     }
-    if (context?.includeActiveFile !== false && (requestedFile || editorRelative)) {
-      const relative = requestedFile || editorRelative;
-      if (!isSecret(relative)) {
-        try {
-          const content = editor && editorMatchesRequest
-            ? editor.document.getText()
-            : new TextDecoder().decode(await vscode.workspace.fs.readFile(this.resolveWorkspacePath(relative)));
-          sections.push(`Active file ${relative} (included via the active-file context control):\n\`\`\`\n${content.slice(0, 30_000)}\n\`\`\``);
-          seen.add(relative);
-        } catch { }
+
+    // Start the active-file read now; it overlaps with the attachment reads below.
+    // Usually this costs nothing at all: when the editor holds the requested file the
+    // content comes straight from the document, with no I/O.
+    const activeRelative = context?.includeActiveFile !== false ? (requestedFile || editorRelative) : '';
+    const activeRead: Promise<string | undefined> = (async () => {
+      if (!activeRelative || isSecret(activeRelative)) return undefined;
+      try {
+        const content = editor && editorMatchesRequest
+          ? editor.document.getText()
+          : new TextDecoder().decode(await vscode.workspace.fs.readFile(this.resolveWorkspacePath(activeRelative)));
+        return `Active file ${activeRelative} (included via the active-file context control):\n\`\`\`\n${content.slice(0, 30_000)}\n\`\`\``;
+      } catch {
+        return undefined;
       }
-    }
-    for (const attachment of (context?.attachments ?? []).slice(0, 16)) {
+    })();
+
+    type AttachmentSection =
+      | { kind: 'ready'; text: string }
+      /** Needs bytes from disk; `read` was started during classification. */
+      | { kind: 'read'; relative: string; path: string; fallbackText?: string; read: Promise<{ text?: string; notFound?: true }> }
+      | { kind: 'none' };
+
+    const classify = (attachment: Attachment): AttachmentSection => {
       if (attachment.kind === 'image') {
-        sections.push(`Attached image ${attachment.name} (${attachment.mimeType}, ${attachment.size} bytes).`);
-        continue;
+        return { kind: 'ready', text: `Attached image ${attachment.name} (${attachment.mimeType}, ${attachment.size} bytes).` };
       }
       if ((attachment as { kind: string }).kind === 'link') {
-        sections.push(`Referenced link: ${attachment.path}`);
-        continue;
+        return { kind: 'ready', text: `Referenced link: ${attachment.path}` };
       }
       const inlineText = (attachment as { text?: string; name?: string }).text;
       if (typeof inlineText === 'string' && inlineText.length > 0 && !attachment.path) {
         const label = (attachment as { name?: string }).name || 'snippet';
-        sections.push(`Attached text ${label}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\``);
-        continue;
+        return { kind: 'ready', text: `Attached text ${label}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\`` };
       }
       const relative = (attachment.path || '').replace(/\\/g, '/').replace(/^\.\//, '');
-      if (!relative || seen.has(relative) || isSecret(relative)) continue;
-      try {
-        const uri = this.resolveWorkspacePath(relative);
-        const stat = await vscode.workspace.fs.stat(uri);
-        if (attachment.kind === 'folder' || (stat.type & vscode.FileType.Directory) !== 0) {
-          sections.push(`Attached folder: ${relative}. Inspect only the relevant files inside it.`);
-        } else if (stat.size <= MAX_FILE_BYTES) {
-          const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).slice(0, 30_000);
-          sections.push(`Attached file ${relative}:\n\`\`\`\n${content}\n\`\`\``);
-        } else {
-          sections.push(`Attached file: ${relative} (${stat.size} bytes; use read/search tools selectively).`);
-        }
-        seen.add(relative);
-      } catch {
-        if (typeof inlineText === 'string' && inlineText.length > 0) {
-          sections.push(`Attached text ${relative}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\``);
-          seen.add(relative);
-        }
+      // `seen` is consulted here as a cheap pre-filter and again at emit time. It is
+      // only authoritative at emit time, because the active-file read has not settled
+      // yet — so this pass may start a read that is later discarded. That is the
+      // deliberate trade described above.
+      if (!relative || seen.has(relative) || isSecret(relative)) return { kind: 'none' };
+      const uri = (() => { try { return this.resolveWorkspacePath(relative); } catch { return undefined; } })();
+      if (!uri) {
+        return typeof inlineText === 'string' && inlineText.length > 0
+          ? { kind: 'ready', text: `Attached text ${relative}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\`` }
+          : { kind: 'none' };
       }
+      const fallbackText = typeof inlineText === 'string' && inlineText.length > 0
+        ? `Attached text ${relative}:\n\`\`\`\n${inlineText.slice(0, 30_000)}\n\`\`\``
+        : undefined;
+      const read = (async (): Promise<{ text?: string; notFound?: true }> => {
+        try {
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (attachment.kind === 'folder' || (stat.type & vscode.FileType.Directory) !== 0) {
+            return { text: `Attached folder: ${relative}. Inspect only the relevant files inside it.` };
+          }
+          if (stat.size > MAX_FILE_BYTES) {
+            return { text: `Attached file: ${relative} (${stat.size} bytes; use read/search tools selectively).` };
+          }
+          const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).slice(0, 30_000);
+          return { text: `Attached file ${relative}:\n\`\`\`\n${content}\n\`\`\`` };
+        } catch {
+          return { notFound: true };
+        }
+      })();
+      return { kind: 'read', relative, path: relative, fallbackText, read };
+    };
+
+    const classified = (context?.attachments ?? []).slice(0, MAX_CONTEXT_ATTACHMENTS).map(classify);
+
+    // Everything above has already started its I/O; this is the join point.
+    const [activeSection, ...resolved] = await Promise.all([
+      activeRead,
+      ...classified.map(entry => (entry.kind === 'read' ? entry.read : Promise.resolve(undefined))),
+    ]);
+
+    if (activeSection) {
+      sections.push(activeSection);
+      seen.add(activeRelative);
+    }
+    for (let index = 0; index < classified.length; index += 1) {
+      const entry = classified[index]!;
+      if (entry.kind === 'ready') {
+        sections.push(entry.text);
+        continue;
+      }
+      if (entry.kind !== 'read') continue;
+      // De-duplicated here, not during classification, so the active-file section
+      // above has already claimed its path when its read succeeded.
+      if (seen.has(entry.relative)) continue;
+      const result = resolved[index];
+      if (result?.text) sections.push(result.text);
+      else if (entry.fallbackText) sections.push(entry.fallbackText);
+      else continue;
+      seen.add(entry.relative);
     }
     return sections.length ? `\n\nEditor context explicitly included by the user:\n\n${sections.join('\n\n')}` : '';
   }

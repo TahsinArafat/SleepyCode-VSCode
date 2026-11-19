@@ -396,3 +396,29 @@ test('a stall inside run() is reported, and streaming is not mistaken for one', 
   assertSource(stageBody, /elapsed >= 20_000 && !streaming\(\)/, 'the user-facing stall message excludes streaming');
   assertSource(stageBody, /this\.log\('warn', 'message\.send\.stalled'/, 'but the log line still names the stage');
 });
+
+// ---------------------------------------------------------------------------
+// The send-path context block: ordering, de-duplication, and that the reads overlap.
+//
+// `test/composer-context.test.mjs` mirrors this logic over an injectable fs so the
+// prompt the model receives can be compared against the pre-parallel implementation
+// without importing `vscode`. See that file for the equivalence matrix.
+
+test('composerContextBlock starts every attachment read before awaiting any of them', async () => {
+  const source = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('private async composerContextBlock');
+  const body = source.slice(start, source.indexOf('private customPersonas', start));
+
+  // The reads must be started during classification, then joined once.
+  assert.match(body, /const read = \(async \(\)/, 'each attachment read is created eagerly');
+  assert.match(body, /await Promise\.all\(\[\s*activeRead,/, 'every read is joined in one pass');
+  // The old shape: an await inside the per-attachment loop, which serialized the I/O.
+  assert.doesNotMatch(
+    body,
+    /for \(const attachment of [\s\S]{0,2000}?await vscode\.workspace\.fs\.(stat|readFile)/,
+    'no attachment I/O is awaited inside the per-attachment loop',
+  );
+  // Ordering and de-duplication stay sequential, because they decide the prompt text.
+  assert.match(body, /if \(seen\.has\(entry\.relative\)\) continue;/, 'de-duplication happens at emit time');
+  assert.match(body, /const \[activeSection, \.\.\.resolved\] = await Promise\.all/, 'the active file read overlaps the attachments');
+});
