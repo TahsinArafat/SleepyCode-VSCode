@@ -23,6 +23,8 @@ import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_PROJECT_BYTES, MAX_STORED_ITEMS, MAX_TURN_UNDO } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, measureSerializedBytes, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
+import * as memoryReportCore from './memory-report-core';
+import { formatMemoryReport } from './memory-report-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
@@ -451,6 +453,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * the run that is using it.
    */
   private static readonly MCP_IDLE_CLOSE_MS = 10 * 60_000;
+  /**
+   * How often an idle window reports its own footprint.
+   *
+   * Once a minute is frequent enough to catch a climb and rare enough to cost nothing:
+   * the measurement is one `process.memoryUsage()` call plus object sizes. An idle
+   * extension otherwise logs nothing at all, which is why a report of "opening it eats
+   * 6 GB" arrived with no evidence attached.
+   */
+  private static readonly MEMORY_HEARTBEAT_MS = 60_000;
   private view?: vscode.WebviewView;
   private webviewVisible = true;
   // The classic webview was removed; the React chat is the only UI, so this is
@@ -592,6 +603,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private mcpIdleTimer?: ReturnType<typeof setTimeout>;
   /** Pending background MCP reconnect attempt (see `warmMcpConnections`). */
   private mcpWarmTimer?: ReturnType<typeof setTimeout>;
+  /** Idle memory heartbeat. Reports the footprint so a large window leaves evidence. */
+  private memoryTimer?: ReturnType<typeof setInterval>;
   /**
    * Set once the background warm-up has finished a pass and something is still
    * down, so a later probe (Reconnect, a settings save) restarts the heartbeat
@@ -1376,6 +1389,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'error', conversationId: '', text: `SleepyCode could not load your conversations: ${errorMessage(error)}` });
     }
     this.syncConversations();
+    // Report the footprint at open, and keep reporting it once a minute while idle.
+    // An idle extension previously logged nothing, so a user reporting a large window
+    // had no numbers to attach and neither did anyone reading the log afterwards.
+    this.reportMemory('open');
+    this.armMemoryHeartbeat();
     // Connect the saved MCP servers as the window opens — ONCE per session. Without
     // this every configured server read as unknown after a restart until someone
     // pressed Sync. It must not repeat on every reopen: each pass spawns a login
@@ -2273,6 +2291,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.flushLogs();
         return this.logRingEntries();
       },
+      // The settings window's copy button. Every figure comes from the host, which is
+      // the only side that can read `process.memoryUsage()` and the retained state.
+      copyMemoryReport: async () => { await this.copyMemoryReport(); },
       clearLogs: async () => {
         this.logRing = [];
         await this.flushLogs();
@@ -2644,17 +2665,20 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * instead of guessed at. This measures the extension host only; the webview has its own process.
    * The per-retainer numbers are the point: heap alone says "big", not "big because of what".
    */
-  private reportMemory(): void {
-    const mb = (bytes: number): string => (bytes / 1048576).toFixed(1);
+  /**
+   * Assemble the memory report.
+   *
+   * Kept separate from `reportMemory` so the same numbers back the log line, the
+   * on-demand command, and the copyable text — a second implementation would drift and
+   * then two people would be reading different figures for the same process.
+   */
+  private memoryReport(): memoryReportCore.MemoryReport {
     let conversations = 0;
     let coldConversations = 0;
     let items = 0;
-    let snapshotChars = 0;
-    let serializedState = 0;
-    // A saturated measurement is a floor, not a figure. Saying so in the log is the
-    // difference between "state is 32 MB" and "state is at least 32 MB", and the
-    // memory line is what a slow-climb investigation is read from.
-    let serializedStateSaturated = false;
+    let snapshotBytes = 0;
+    let stateBytes = 0;
+    let stateSaturated = false;
     for (const project of this.projects) {
       conversations += project.conversations.length;
       for (const conversation of project.conversations) {
@@ -2670,20 +2694,181 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           turnUndo: conversation.turnUndo,
           turnRedo: conversation.turnRedo,
         });
-        serializedState += measured.bytes;
-        if (measured.truncated) serializedStateSaturated = true;
+        stateBytes += measured.bytes;
+        if (measured.truncated) stateSaturated = true;
         for (const item of conversation.items) {
-          for (const snapshot of item.fileSnapshot ?? []) snapshotChars += snapshot.content.length;
+          for (const snapshot of item.fileSnapshot ?? []) snapshotBytes += snapshot.content.length;
         }
       }
     }
-    const memory = process.memoryUsage();
+    const usage = process.memoryUsage();
     const root = this.workspaceRoot();
     const index = root ? this.repoIndex.indexFor(root) : undefined;
-    this.log('info', 'perf.memory',
-      `heap ${mb(memory.heapUsed)}MB rss ${mb(memory.rss)}MB · ${this.projects.length} projects · ` +
-      `${conversations} conversations (${coldConversations} cold) · ${items} items · state ${serializedStateSaturated ? '>' : ''}${mb(serializedState)}MB · ` +
-      `snapshots ${mb(snapshotChars)}MB · index ${index?.files.length ?? 0} files/${mb(index?.contentBytes ?? 0)}MB`);
+    const terminals = this.terminals.list();
+    return {
+      snapshot: {
+        heapUsed: usage.heapUsed,
+        heapTotal: usage.heapTotal,
+        rss: usage.rss,
+        external: usage.external,
+        arrayBuffers: usage.arrayBuffers ?? 0,
+      },
+      retainers: {
+        projects: this.projects.length,
+        conversations,
+        coldConversations,
+        items,
+        stateBytes,
+        stateSaturated,
+        snapshotBytes,
+        indexFiles: index?.files.length ?? 0,
+        indexBytes: index?.contentBytes ?? 0,
+        terminals: terminals.length,
+        runningTerminals: terminals.filter(terminal => terminal.running).length,
+        cliServerOwned: Boolean(this.cliServer?.owned),
+        mcpCached: Boolean(this.mcpCache),
+        activeRuns: this.runs.size,
+        queuedPrompts: this.queue.length,
+      },
+      // One entry per long-lived map. A container that grows by conversation id is
+      // invisible in `heapUsed` until it is enormous, and by then it looks exactly
+      // like "the conversations are big".
+      containers: {
+        reactItems: this.reactItems.size,
+        reactChangeTarget: this.reactChangeTarget.size,
+        reactPendingPaths: this.reactPendingPaths.size,
+        reactLastToolCall: this.reactLastToolCall.size,
+        pendingDeltas: this.pendingDeltas.size,
+        pendingCliPermissions: this.pendingCliPermissions.size,
+        pendingQuestions: this.pendingQuestions.size,
+        runs: this.runs.size,
+        compactionUndoStacks: this.compactionUndoStacks.size,
+        compactionRedoStacks: this.compactionRedoStacks.size,
+        checkpointAtByConversation: this.checkpointAtByConversation.size,
+        historyBoundNoticed: this.historyBoundNoticed.size,
+        agentPromptCache: this.agentPromptCache.size,
+        sendingConversations: this.sendingConversations.size,
+        pressureNoticeAt: this.pressureNoticeAt.size,
+        logRing: this.logRingEntries().length,
+        subscriptions: this.context.subscriptions.length,
+      },
+    };
+  }
+
+  /**
+   * Log the footprint, and say so loudly when it is large.
+   *
+   * Called after a run (as before) AND on an idle heartbeat, because the case that
+   * matters — "opening it eats 6 GB and I did nothing" — produced no evidence at all
+   * while this only fired after a turn completed.
+   */
+  private reportMemory(reason: 'run' | 'open' | 'heartbeat' | 'manual' = 'run'): void {
+    let report: memoryReportCore.MemoryReport;
+    try {
+      report = this.memoryReport();
+    } catch (error) {
+      // Measurement must never be the thing that breaks a run.
+      this.log('warn', 'perf.memory.failed', errorMessage(error));
+      return;
+    }
+    const line = memoryReportCore.formatMemoryLine(report);
+    this.log(memoryReportCore.isConcerning(report.snapshot) ? 'warn' : 'info', 'perf.memory', `${reason}: ${line}`);
+  }
+
+  /**
+   * Arm the idle memory heartbeat.
+   *
+   * Deliberately cheap: a `process.memoryUsage()` read plus container sizes, once a
+   * minute, and nothing is retained. It is the only way a user's report of a large
+   * idle window arrives with numbers attached, because an idle extension otherwise
+   * logs nothing.
+   */
+  private armMemoryHeartbeat(): void {
+    if (this.memoryTimer) return;
+    this.memoryTimer = setInterval(() => {
+      // Nothing is cached between disasters; measuring an idle process is the point.
+      this.reportMemory('heartbeat');
+      this.pruneUnboundedCaches();
+    }, AgentViewProvider.MEMORY_HEARTBEAT_MS);
+    this.memoryTimer.unref?.();
+  }
+
+  /**
+   * Release caches that can grow without anything freeing them.
+   *
+   * Every entry here was added because it was found holding memory after its reason to
+   * exist had passed. Kept in one place so a new cache has an obvious home, and so the
+   * heartbeat stays the single point where "is anything still growing" is asked.
+   */
+  private pruneUnboundedCaches(): void {
+    // The log ring is trimmed on write; this catches the case where logging stopped
+    // and the array kept its last high-water size.
+    const ring = this.logRing;
+    if (ring && ring.length > AgentViewProvider.LOG_LIMIT) {
+      ring.splice(0, ring.length - AgentViewProvider.LOG_LIMIT);
+    }
+  }
+
+  /**
+   * A copyable memory report, for the user to paste into a bug report.
+   *
+   * Distinct from the log: the log holds recent events, this holds the current state
+   * with the run and conversation counts beside it, so a reader can tell an idle
+   * process from a busy one.
+   */
+  public memoryReportText(): string {
+    const report = this.memoryReport();
+    return formatMemoryReport(report, {
+      at: Date.now(),
+      note: `Editor: ${vscode.version} · platform ${process.platform} · pid ${process.pid}`,
+    });
+  }
+
+  /**
+   * Copy the extension log, header included.
+   *
+   * The header matters for a bug report: without the version and platform a log cannot
+   * be matched to a build, and the log itself has no version line of its own.
+   */
+  public async copyLogs(): Promise<void> {
+    await this.flushLogs().catch(() => undefined);
+    const header = [
+      `SleepyCode ${this.context.extension?.packageJSON?.version ?? this.version()}`,
+      `VS Code ${vscode.version}`,
+      `platform ${process.platform} ${process.arch}`,
+      `node ${process.versions.node}`,
+      `exported ${new Date().toISOString()}`,
+    ].join(' · ');
+    const body = this.logRingEntries().map(entry =>
+      `[${new Date(entry.timestamp).toISOString()}] ${entry.level.toUpperCase()} ${entry.event}${entry.detail ? `: ${entry.detail}` : ''}`).join('\n');
+    const text = `${header}\n${'-'.repeat(header.length)}\n${body}\n`;
+    try {
+      await vscode.env.clipboard.writeText(text);
+      void vscode.window.showInformationMessage(`Copied ${this.logRingEntries().length} log lines to the clipboard.`);
+    } catch {
+      this.outputChannel().appendLine(text);
+      this.outputChannel().show(true);
+      void vscode.window.showWarningMessage('Could not copy the log. It is shown in the output panel instead.');
+    }
+  }
+
+  /** This build's version, for the log header. */
+  private version(): string {
+    try { return String(this.context.extension?.packageJSON?.version ?? 'unknown'); } catch { return 'unknown'; }
+  }
+
+  /** Show the report in the chat and copy it, so one action gets the user the data. */
+  public async copyMemoryReport(): Promise<void> {
+    const text = this.memoryReportText();
+    try {
+      await vscode.env.clipboard.writeText(text);
+      void vscode.window.showInformationMessage('SleepyCode memory report copied to the clipboard.');
+    } catch {
+      void vscode.window.showWarningMessage('Could not copy the memory report. It is shown in the output panel instead.');
+      this.outputChannel().appendLine(text);
+      this.outputChannel().show(true);
+    }
+    this.log('info', 'perf.memory.manual', memoryReportCore.formatMemoryLine(this.memoryReport()));
   }
 
   private sendExtensionLogs(): void {
@@ -3194,6 +3379,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.editorContextTimer) clearTimeout(this.editorContextTimer);
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    if (this.memoryTimer) clearInterval(this.memoryTimer);
+    this.memoryTimer = undefined;
     if (this.deltaFlushTimer) clearTimeout(this.deltaFlushTimer);
     this.deltaFlushTimer = undefined;
     this.pendingDeltas.clear();

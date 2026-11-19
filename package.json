@@ -164,6 +164,14 @@
       {
         "command": "sleepycode.openLogs",
         "title": "SleepyCode: Show Logs"
+      },
+      {
+        "command": "sleepycode.copyLogs",
+        "title": "SleepyCode: Copy Logs to Clipboard"
+      },
+      {
+        "command": "sleepycode.copyMemoryReport",
+        "title": "SleepyCode: Copy Memory Report"
       }
     ],
     "menus": {

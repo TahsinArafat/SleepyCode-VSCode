@@ -125,6 +125,8 @@ export interface SettingsPanelHost {
   setActiveProvider(id: string): Promise<void>;
   /** Recent extension log entries, newest last. */
   readLogs(): Promise<unknown[]>;
+  /** Copy the memory report to the clipboard. The host owns every figure in it. */
+  copyMemoryReport(): Promise<void>;
   /** Clear the recorded extension log. */
   clearLogs(): Promise<void>;
   /** Return every setting to its default. Irreversible. */
@@ -522,6 +524,14 @@ export class SettingsPanel {
       case 'getLogs':
         // The host has always kept these; nothing could read them from the window.
         this.post({ type: 'logs', entries: await this.host.readLogs().catch(() => []) });
+        return;
+      case 'copyMemoryReport':
+        try {
+          await this.host.copyMemoryReport();
+          this.post({ type: 'panelNotice', text: 'Memory report copied to the clipboard.', error: false });
+        } catch (error) {
+          this.post({ type: 'panelNotice', text: error instanceof Error ? error.message : String(error), error: true });
+        }
         return;
       case 'clearLogs':
         await this.host.clearLogs();

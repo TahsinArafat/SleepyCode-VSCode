@@ -31,6 +31,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('sleepycode.settings', () => provider.openSettings()),
     vscode.commands.registerCommand('sleepycode.settingsWindow', () => provider.openSettingsWindow()),
     vscode.commands.registerCommand('sleepycode.openLogs', () => provider.showLogs()),
+    // Copy the memory report in one action. "Open it, find the line, select it" is
+    // three steps too many when the thing being reported is that the editor is slow.
+    vscode.commands.registerCommand('sleepycode.copyMemoryReport', () => provider.copyMemoryReport()),
+    // The whole extension log, copied for a bug report.
+    vscode.commands.registerCommand('sleepycode.copyLogs', () => provider.copyLogs()),
     vscode.commands.registerCommand('sleepycode.signIn', () => provider.signIn()),
     vscode.commands.registerCommand('sleepycode.usage', () => provider.openUsage()),
     vscode.commands.registerCommand('sleepycode.memory', () => provider.openMemory()),

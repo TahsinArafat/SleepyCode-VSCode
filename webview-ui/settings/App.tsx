@@ -11,6 +11,7 @@ import * as React from "react";
 import { Select } from "../shared/Select";
 import { Icon, IconName } from "../shared/icons";
 import { vscode } from "../shared/vscode";
+import { copyText } from "../shared/clipboard";
 import { ApprovalActionType, ApprovalMode, ApprovalPolicy, DEFAULT_APPROVAL, EMPTY_FEATURES, FeatureConfig, LlamacppStatus, McpStatus, ModelDef, ModelUsage, OAUTH_LABEL, OAuthStatus, OllamaModel, OllamaStatus, Persona, RuleInfo, SkillInfo, uid } from "./features";
 import { HooksPanel, LlamacppPanel, McpPanel, OAuthAccountCard, OllamaPanel, RulesPanel, SubagentsPanel } from "./FeaturePanels";
 import { ModelSelect } from "../shared/ModelSelect";
@@ -34,6 +35,7 @@ import {
   RESET_CONSEQUENCE,
   RESET_ARM_TIMEOUT_MS,
   isResetArmed,
+  logClipboardText,
   logEmptyText,
   logLines,
   logTally,
@@ -454,6 +456,14 @@ export function App() {
   // Derived, not tracked: two sources for "is it armed" is how they disagree.
   const resetArmed = isResetArmed(resetClicks);
   const [logs, setLogs] = React.useState<unknown[]>([]);
+  // Which copy button last succeeded, so the label confirms the action instead of
+  // looking like nothing happened.
+  const [copied, setCopied] = React.useState<"log" | "memory" | null>(null);
+  React.useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
   const tally = React.useMemo(() => logTally(logs), [logs]);
   const renderedLogLines = React.useMemo(() => logLines(logs), [logs]);
   // Provider rows from the host. Keys are never included: only whether one is set
@@ -863,6 +873,24 @@ export function App() {
               </p>
               <div className="log-actions">
                 <button className="btn-secondary" onClick={() => vscode.postMessage({ type: "getLogs" })}>Refresh</button>
+                {/* Copying the log is the whole point of reading it here: the log is
+                    what gets pasted into a bug report, and selecting 400 <pre> lines
+                    by hand is not something to ask of anyone. */}
+                <button
+                  className="btn-secondary"
+                  disabled={renderedLogLines.length === 0}
+                  title="Copy every log line, with the version and platform header"
+                  onClick={() => { void copyText(logClipboardText(renderedLogLines, version)).then(ok => setCopied(ok ? "log" : null)); }}
+                >
+                  {copied === "log" ? "Copied" : "Copy log"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  title="Copy the current memory footprint: heap, rss, retained state, and container counts"
+                  onClick={() => { void vscode.postMessage({ type: "copyMemoryReport" }); setCopied("memory"); }}
+                >
+                  {copied === "memory" ? "Copied" : "Copy memory report"}
+                </button>
                 <button className="btn-ghost" onClick={() => vscode.postMessage({ type: "clearLogs" })}>Clear</button>
               </div>
               {renderedLogLines.length > 0 && (

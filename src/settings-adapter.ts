@@ -393,6 +393,9 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // window had no route, so an endpoint whose model ids the user did not already
   // know could not be configured.
   'fetchProviderModels',
+  // Copies the memory report to the clipboard. The host owns `process.memoryUsage()`
+  // and the retained-state breakdown, so the button must ask rather than assemble.
+  'copyMemoryReport',
   // The three settings surfaces the window gained alongside the classic ones.
   'getLogs',
   'clearLogs',

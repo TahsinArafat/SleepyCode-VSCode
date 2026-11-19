@@ -102,6 +102,19 @@ export function logEmptyText(): string {
   return 'No entries yet. Run something and come back.';
 }
 
+/**
+ * The log as clipboard text, with a header naming the build it came from.
+ *
+ * A pasted log with no version in it cannot be matched to a release, and that is the
+ * first question anyone asks of a report. The header is also where the platform lives,
+ * which decides whether the reported numbers are even comparable.
+ */
+export function logClipboardText(lines: readonly string[] | undefined, version: string | undefined): string {
+  const header = `SleepyCode ${version || 'unknown'}`;
+  const body = (lines ?? []).join('\n');
+  return `${header}\n${'-'.repeat(header.length)}\n${body}${body ? '\n' : ''}`;
+}
+
 // ---------------------------------------------------------------- first run
 
 export const FIRST_RUN_TITLE = 'Set up SleepyCode';
