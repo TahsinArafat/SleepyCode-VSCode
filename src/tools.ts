@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { runCommand } from './git';
@@ -7,6 +8,7 @@ import { installSkillFromRepository, listInstalledSkills, listRepositorySkills, 
 import { MAX_FILE_BYTES } from './types';
 import type { AppConfig } from './types';
 import { assertNotSecret, isDestructiveCommand, isSecret, pathInside } from './util';
+import { capSearchOutput, isSecretPath, ripgrepCandidates, searchArgs } from './search-core';
 import { capObservation, readObservationPage } from './observations';
 import type { TerminalManager } from './terminal';
 import { compareWorktrees, createWorktree, listWorktrees, mergeWorktree, removeWorktree, runInWorktree, statusOfWorktree } from './worktrees';
@@ -55,6 +57,63 @@ export interface ToolContext {
   browser?: BrowserController;
   /** Directory where oversized tool output is archived (non-destructive). */
   observationsDir(): string;
+}
+
+/**
+ * The bundled ripgrep, resolved once.
+ *
+ * VS Code ships ripgrep for its own search, so the binary is normally already on disk.
+ * Its path moves between builds, and a build may ship none at all, so this probes the
+ * candidates and caches the answer — including the negative, or every search would
+ * re-stat four paths that are not there.
+ */
+let ripgrepPath: string | undefined | null = null;
+
+async function findRipgrep(): Promise<string | undefined> {
+  if (ripgrepPath !== null) return ripgrepPath ?? undefined;
+  ripgrepPath = undefined;
+  for (const candidate of ripgrepCandidates(vscode.env.appRoot)) {
+    try {
+      const stat = await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
+      if (stat.type & vscode.FileType.File) {
+        ripgrepPath = candidate;
+        break;
+      }
+    } catch {
+      // Not this layout; try the next.
+    }
+  }
+  return ripgrepPath ?? undefined;
+}
+
+/**
+ * Run ripgrep and return its stdout.
+ *
+ * Exit code 1 is ripgrep's "no matches", which is a normal answer and not a failure.
+ * Anything else is reported, because a search that silently returns nothing is
+ * indistinguishable from a workspace with no hits.
+ */
+function runRipgrep(binary: string, cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { cwd, windowsHide: true });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let bytes = 0;
+    const MAX_OUTPUT = 4 * 1024 * 1024;
+    child.stdout.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+      // A pathological pattern can match everything; stop rather than hold it all.
+      if (bytes > MAX_OUTPUT) { child.kill(); return; }
+      out.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => err.push(chunk));
+    child.on('error', error => reject(new Error(`Could not run ripgrep: ${error.message}`)));
+    child.on('close', code => {
+      if (code === 0 || code === 1) { resolve(Buffer.concat(out).toString('utf8')); return; }
+      const detail = Buffer.concat(err).toString('utf8').trim().slice(0, 300);
+      reject(new Error(detail || `ripgrep exited with code ${code ?? 'unknown'}.`));
+    });
+  });
 }
 
 export function buildTools(ctx: ToolContext): Record<string, any> {
@@ -157,11 +216,39 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
       },
     }),
     search_files: tool({
-      description: 'Search text across workspace files using a plain text query.',
-      inputSchema: z.object({ query: z.string().min(1), glob: z.string().default('**/*'), limit: z.number().int().min(1).max(200).default(80) }),
-      execute: async ({ query, glob, limit }) => {
-        const files = await vscode.workspace.findFiles(glob, '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**}', 500);
+      description: 'Search the workspace with ripgrep: fast, and pattern-shaped. Supports regular expressions (regex: true), case sensitivity, and context lines. Prefer project_search or this over reading files one by one.',
+      inputSchema: z.object({
+        query: z.string().min(1).describe('Text to find. A literal string unless regex is true.'),
+        glob: z.string().optional().describe('Glob limiting which files are searched, e.g. "src/**/*.ts". Defaults to everything not ignored.'),
+        regex: z.boolean().optional().describe('Treat query as a regular expression.'),
+        caseSensitive: z.boolean().optional().describe('Match case exactly. Defaults to case-insensitive.'),
+        contextLines: z.number().int().min(0).max(5).optional().describe('Lines of context around each match.'),
+        limit: z.number().int().min(1).max(400).default(80),
+      }),
+      execute: async ({ query, glob, regex, caseSensitive, contextLines, limit }) => {
+        const relativePath = (absolute: string): string =>
+          path.relative(ctx.root.fsPath, absolute).replace(/\\/g, '/');
+        const rg = await findRipgrep();
+        if (rg) {
+          const output = await runRipgrep(rg, ctx.root.fsPath, searchArgs(
+            { pattern: query, glob, regex, caseSensitive, contextLines, limit },
+            ctx.root.fsPath,
+          ));
+          // Secrets are filtered here rather than in the arguments: the glob list is
+          // about build output, and a .env the user asked about directly must still be
+          // withheld.
+          const kept = output.split('\n').filter((line: string) => {
+            const file = line.split(':', 1)[0];
+            return !file || !isSecretPath(relativePath(path.isAbsolute(file) ? file : path.join(ctx.root.fsPath, file)));
+          }).join('\n');
+          const capped = capSearchOutput(kept, limit);
+          return capped.text || '(no matches)';
+        }
+        // No bundled ripgrep: fall back to the in-process scan. Slower and
+        // substring-only, but a search that works beats a search that refuses.
+        const files = await vscode.workspace.findFiles(glob ?? '**/*', '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**}', 500);
         const hits: string[] = [];
+        const needle = caseSensitive === true ? query : query.toLowerCase();
         for (const uri of files) {
           if (hits.length >= limit) break;
           if (isSecret(path.relative(ctx.root.fsPath, uri.fsPath))) continue;
@@ -170,7 +257,9 @@ export function buildTools(ctx: ToolContext): Record<string, any> {
             if (stat.size > MAX_FILE_BYTES) continue;
             const lines = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)).split(/\r?\n/);
             lines.forEach((line, index) => {
-              if (hits.length < limit && line.toLowerCase().includes(query.toLowerCase())) {
+              if (hits.length >= limit) return;
+              const target = caseSensitive === true ? line : line.toLowerCase();
+              if (target.includes(needle)) {
                 hits.push(`${path.relative(ctx.root.fsPath, uri.fsPath)}:${index + 1}: ${line.trim().slice(0, 300)}`);
               }
             });
