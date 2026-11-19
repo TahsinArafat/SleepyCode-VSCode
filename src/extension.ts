@@ -34,6 +34,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Copy the memory report in one action. "Open it, find the line, select it" is
     // three steps too many when the thing being reported is that the editor is slow.
     vscode.commands.registerCommand('sleepycode.copyMemoryReport', () => provider.copyMemoryReport()),
+    // A heap snapshot names the exact retaining path. Separate from the report because it
+    // is the size of the heap and pauses the host while it is written.
+    vscode.commands.registerCommand('sleepycode.saveHeapSnapshot', () => provider.saveHeapSnapshot()),
     // The whole extension log, copied for a bug report.
     vscode.commands.registerCommand('sleepycode.copyLogs', () => provider.copyLogs()),
     vscode.commands.registerCommand('sleepycode.signIn', () => provider.signIn()),

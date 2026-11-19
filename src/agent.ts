@@ -25,6 +25,7 @@ import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectRe
 import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, measureSerializedBytes, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
 import * as memoryReportCore from './memory-report-core';
 import * as v8 from 'node:v8';
+import * as objectCensusCore from './object-census-core';
 import { formatMemoryReport } from './memory-report-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
@@ -2896,8 +2897,40 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Show the report in the chat and copy it, so one action gets the user the data. */
+  /**
+   * Count live object instances, or undefined when the engine cannot answer.
+   *
+   * `v8.queryObjects` is experimental and only present under --expose-gc, so this is
+   * strictly best-effort: every failure path returns undefined and the caller falls
+   * back to the totals-only report.
+   */
+  private async objectCensus(): Promise<objectCensusCore.ObjectCensus | undefined> {
+    const query = (globalThis as { gc?: unknown }).gc === undefined
+      ? undefined
+      : (ctor: unknown) => v8.queryObjects(ctor as never) as unknown as Promise<number>;
+    if (!query) return undefined;
+    try {
+      const census = await objectCensusCore.objectCensus(query);
+      return census.available ? census : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The memory report, plus an object census when the engine can provide one.
+   *
+   * The census is what turns "226 MB is live objects" into a named holder: it counts
+   * instances of the constructors a leak would accumulate (buffers, promises, maps).
+   * It needs --expose-gc, so an extension host reports the section as unavailable
+   * rather than omitting it -- a missing section reads as "not measured", which is
+   * different from "measured and empty".
+   */
   public async copyMemoryReport(): Promise<void> {
-    const text = this.memoryReportText();
+    const census = await this.objectCensus();
+    const text = census
+      ? `${this.memoryReportText()}\n\n${objectCensusCore.formatObjectCensus(census)}`
+      : this.memoryReportText();
     try {
       await vscode.env.clipboard.writeText(text);
       void vscode.window.showInformationMessage('SleepyCode memory report copied to the clipboard.');
@@ -2907,6 +2940,47 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.outputChannel().show(true);
     }
     this.log('info', 'perf.memory.manual', memoryReportCore.formatMemoryLine(this.memoryReport()));
+  }
+
+  /**
+   * Write a V8 heap snapshot to a file the user can open in Chrome DevTools.
+   *
+   * The snapshot is what identifies the exact retaining path: the census narrows the
+   * search to a constructor, and the snapshot's dominator tree names the object that
+   * holds it. It is expensive by nature -- the file is roughly the size of the heap, so
+   * several hundred MB here -- which is why it is a separate command rather than part of
+   * the report, and why the size is stated before writing.
+   */
+  public async saveHeapSnapshot(): Promise<void> {
+    const before = process.memoryUsage().heapUsed;
+    const choice = await vscode.window.showWarningMessage(
+      `A heap snapshot is about ${Math.round(before / 1048576)} MB and pauses the extension host while it is written. Continue?`,
+      { modal: true },
+      'Write snapshot',
+    );
+    if (choice !== 'Write snapshot') return;
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(os.tmpdir(), `sleepycode-heap-${Date.now()}.heapsnapshot`)),
+      filters: { 'Heap snapshot': ['heapsnapshot'] },
+      saveLabel: 'Write snapshot',
+      title: 'Save a SleepyCode heap snapshot',
+    });
+    if (!target) return;
+    try {
+      // The file is written synchronously by V8; the await only yields so the dialog
+      // closes before the host stalls.
+      await new Promise(resolve => setImmediate(resolve));
+      v8.writeHeapSnapshot(target.fsPath);
+      this.log('info', 'perf.heap.snapshot', target.fsPath);
+      const open = await vscode.window.showInformationMessage(
+        `Heap snapshot written to ${path.basename(target.fsPath)}. Open it in Chrome DevTools (chrome://inspect) to see what holds the memory.`,
+        'Reveal',
+      );
+      if (open === 'Reveal') void vscode.commands.executeCommand('revealFileInOS', target);
+    } catch (error) {
+      this.log('error', 'perf.heap.snapshot.failed', errorMessage(error));
+      void vscode.window.showErrorMessage(`Could not write the heap snapshot: ${errorMessage(error)}`);
+    }
   }
 
   private sendExtensionLogs(): void {
