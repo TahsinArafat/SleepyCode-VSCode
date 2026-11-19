@@ -1348,6 +1348,25 @@ test('the pre-turn git baseline is captured before the run can edit anything', (
   assert.doesNotMatch(body, /void captureGitTree\(/);
 });
 
+test('the user turn and Thinking indicator are posted before the git baseline is captured', () => {
+  // Capturing the baseline is a real `git add -A` over the whole worktree — seconds on
+  // a large repository. It used to run before the user's own turn was posted, so on a
+  // slow repository pressing send produced NOTHING: no message, no "Thinking", no
+  // evidence the input had been received. The capture still completes before the model
+  // stream starts, because it has to record the pre-turn state.
+  const start = agent.indexOf('private async runWithStages');
+  assert.ok(start > 0, 'runWithStages exists');
+  const body = agent.slice(start, agent.indexOf('const work: WorkItem[]', start));
+  const userTurn = body.indexOf("this.post({ type: 'user', conversationId, item: userItem })");
+  const thinking = body.indexOf("running: true, label: 'Thinking'");
+  const capture = body.indexOf('await captureGitTree');
+  assert.ok(userTurn >= 0, 'the user turn is posted');
+  assert.ok(thinking >= 0, 'the running state is posted');
+  assert.ok(capture >= 0, 'the baseline is captured');
+  assert.ok(userTurn < capture, 'the user turn is visible before the slow capture');
+  assert.ok(thinking < capture, 'the Thinking indicator appears before the slow capture');
+});
+
 test('a finished run never starts another conversation\'s queued prompt', () => {
   // Falling back to `this.queue[0]` ran a different chat's prompt from this
   // chat's finally block — before that chat's own turn had finished.

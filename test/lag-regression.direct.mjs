@@ -517,3 +517,93 @@ test('the MCP idle close behaves correctly across a long run, simulated on a fak
   before.closes = 1;
   assert.equal(before.closes, 1, 'the bug this replaces: closed while a run was using it');
 });
+
+test('transcript snapshots are coalesced to one per frame, and never overtake newer messages', () => {
+  // `syncConversations` is called from 34 sites and several fire per tool call. Each
+  // call serializes the WHOLE active transcript and posts it as a structured clone —
+  // megabytes on a long conversation, for a snapshot the next one supersedes within
+  // milliseconds. Coalescing is only safe if ordering is preserved, because
+  // `loadConversation` REPLACES the renderer's turns wholesale: a snapshot landing
+  // after a `done` event, a `user` turn, or a delta the renderer applied incrementally
+  // would roll that newer state back to an older copy. This mirrors the shipped
+  // post/flush logic and asserts both properties.
+  const makePoster = () => {
+    const out = [];
+    let pendingSnapshot;
+    let snapTimer;
+    let deltaTimer;
+    const pendingDeltas = new Map();
+    const postImmediate = (m) => out.push(m);
+    const flushPendingSnapshot = () => {
+      if (snapTimer) { clearTimeout(snapTimer); snapTimer = undefined; }
+      if (!pendingSnapshot) return;
+      const p = pendingSnapshot;
+      pendingSnapshot = undefined;
+      postImmediate(p);
+    };
+    const flushPendingDeltas = () => {
+      if (deltaTimer) { clearTimeout(deltaTimer); deltaTimer = undefined; }
+      flushPendingSnapshot();
+      if (!pendingDeltas.size) return;
+      const batch = [...pendingDeltas.entries()];
+      pendingDeltas.clear();
+      for (const [id, e] of batch) {
+        if (e.reasoning) postImmediate({ type: 'reasoningDelta', conversationId: id, text: e.reasoning });
+        if (e.text) postImmediate({ type: 'delta', conversationId: id, text: e.text });
+      }
+    };
+    const post = (msg) => {
+      if (msg.type === 'delta' || msg.type === 'reasoningDelta') {
+        flushPendingSnapshot();
+        const e = pendingDeltas.get(msg.conversationId) ?? { text: '', reasoning: '' };
+        if (msg.type === 'delta') e.text += msg.text; else e.reasoning += msg.text;
+        pendingDeltas.set(msg.conversationId, e);
+        if (!deltaTimer) deltaTimer = setTimeout(() => { deltaTimer = undefined; flushPendingDeltas(); }, 16);
+        return;
+      }
+      if (msg.type === 'conversation') {
+        pendingSnapshot = msg;
+        if (!snapTimer) snapTimer = setTimeout(() => { snapTimer = undefined; flushPendingSnapshot(); }, 16);
+        return;
+      }
+      flushPendingSnapshot();
+      if (pendingDeltas.size) flushPendingDeltas();
+      postImmediate(msg);
+    };
+    return { post, out, flushAll: flushPendingDeltas };
+  };
+
+  const coalesced = makePoster();
+  for (let i = 0; i < 20; i += 1) coalesced.post({ type: 'conversation', id: 'c1', n: i });
+  coalesced.flushAll();
+  const snaps = coalesced.out.filter(m => m.type === 'conversation');
+  assert.equal(snaps.length, 1, '20 snapshots collapse into one');
+  assert.equal(snaps[0].n, 19, 'the newest snapshot is the one that survives');
+
+  const beforeDone = makePoster();
+  beforeDone.post({ type: 'conversation', id: 'c1', n: 1 });
+  beforeDone.post({ type: 'done', conversationId: 'c1' });
+  assert.deepEqual(beforeDone.out.map(m => m.type), ['conversation', 'done'], 'a held snapshot flushes before `done`');
+
+  const beforeDelta = makePoster();
+  beforeDelta.post({ type: 'conversation', id: 'c1', n: 1 });
+  beforeDelta.post({ type: 'delta', conversationId: 'c1', text: 'hello' });
+  beforeDelta.flushAll();
+  assert.deepEqual(beforeDelta.out.map(m => m.type), ['conversation', 'delta'], 'a snapshot lands before a delta streamed after it');
+
+  const timerOrder = makePoster();
+  timerOrder.post({ type: 'delta', conversationId: 'c1', text: 'a' });
+  timerOrder.post({ type: 'conversation', id: 'c1', n: 7 });
+  timerOrder.flushAll();
+  assert.deepEqual(timerOrder.out.map(m => m.type), ['conversation', 'delta'], 'the delta timer cannot flush a delta ahead of a held snapshot');
+
+  // And the shipped source must still flush on both paths, or the ordering above is a
+  // property of this test rather than of the extension.
+  // The helper is declared before `post`, so the slice starts at the helper.
+  const postBody = agent.slice(agent.indexOf('private flushPendingSnapshot(): void {'), agent.indexOf('private postImmediate'));
+  assertSource(postBody, /private flushPendingSnapshot\(\): void \{/, 'the flush helper exists');
+  assertSource(postBody, /if \(msg\.type === 'conversation' && typeof msg\.id === 'string'\)/, 'snapshots are the held type');
+  assertSource(postBody, /this\.postImmediate\(pending\.message\);/, 'the held snapshot is posted by the helper');
+  const deltasBody = agent.slice(agent.indexOf('private flushPendingDeltas'), agent.indexOf('private post(message: unknown)'));
+  assertSource(deltasBody, /this\.flushPendingSnapshot\(\);/, 'the delta timer flushes a held snapshot first');
+});

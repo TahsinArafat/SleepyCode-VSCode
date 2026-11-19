@@ -490,6 +490,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly sendingConversations = new Set<string>();
   private readonly pendingDeltas = new Map<string, { text: string; reasoning: string }>();
   private deltaFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * One pending transcript snapshot, held for a frame instead of being sent at once.
+   *
+   * `syncConversations` is called from 34 sites and several of them fire per tool call.
+   * Each one serializes the WHOLE active transcript (`itemsToTurns`) and posts it as a
+   * structured clone, which on a long conversation is megabytes crossing into the
+   * renderer — for a snapshot the next one supersedes a few milliseconds later.
+   *
+   * Holding the newest is safe because `loadConversation` is a full replacement: the
+   * renderer's `seedSession` overwrites `turns` wholesale, so dropping an intermediate
+   * snapshot loses nothing that the last one does not carry.
+   *
+   * Ordering is what makes it safe rather than lossy: `flushPendingSnapshot` runs
+   * BEFORE any other message is posted. A snapshot arriving after the `done` event, or
+   * after a `user` turn or a delta that the renderer applied incrementally, would
+   * overwrite that newer state with an older copy. Flushing first keeps the transcript
+   * monotonic.
+   */
+  private pendingSnapshot: { message: unknown; conversationId: string } | undefined;
+  private snapshotFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private activeProjectId = '';
   private loaded = false;
   /** Projects are loaded once per host session; a reopened view republishes instead. */
@@ -3146,6 +3166,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (this.deltaFlushTimer) clearTimeout(this.deltaFlushTimer);
     this.deltaFlushTimer = undefined;
     this.pendingDeltas.clear();
+    // Dropped rather than flushed: the webview is going away, so posting a snapshot to
+    // it would be work for nothing. Only the timer and the reference must not outlive
+    // the provider.
+    if (this.snapshotFlushTimer) clearTimeout(this.snapshotFlushTimer);
+    this.snapshotFlushTimer = undefined;
+    this.pendingSnapshot = undefined;
     this.pendingCliPermissions.clear();
     this.sendingConversations.clear();
     // Flush the log ring before the debounce would have fired. Without this, the last
@@ -5876,9 +5902,37 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const run: ActiveRun = { conversationId, controller: new AbortController() };
     this.runs.set(conversationId, run);
     this.log('info', 'run.registered', conversationId);
-    // A pre-turn Git tree captures every workspace mutation, including files
-    // changed by shell commands that do not emit the edit tools' `changed`
-    // event. This is the authoritative undo checkpoint for tracked projects.
+    if (resume) {
+      this.post({ type: 'resume', conversationId, partialText: resume.partialText ?? '' });
+    } else if (!userAlreadyPersisted) {
+      clearForwardStacks(conversation);
+      const userItem = createTranscriptItem('user', userText);
+      userItem.attachments = composerContext?.attachments;
+      conversation.items.push(userItem);
+      if (conversation.items.length === 1) conversation.title = conversationTitle(userText);
+      this.post({ type: 'user', conversationId, item: userItem });
+      this.notifyHooks('onMessage', { text: userText });
+    } else {
+      this.notifyHooks('onMessage', { text: userText });
+    }
+    conversation.updatedAt = Date.now();
+    project.updatedAt = Date.now();
+    // Fire-and-forget: the user message is already in-memory and visible in the webview.
+    // Awaiting the persist chain here blocked every send on the previous turn's write
+    // (often several seconds of globalState I/O for a large conversation).
+    void this.persistProject(project);
+    this.syncConversations(false);
+    this.post({ type: 'state', conversationId, running: true, label: 'Thinking' });
+    // A pre-turn Git tree captures every workspace mutation, including files changed
+    // by shell commands that do not emit the edit tools' `changed` event. This is the
+    // authoritative undo checkpoint for tracked projects.
+    //
+    // Captured AFTER the user's turn and the "Thinking" indicator are posted, which is
+    // why this block sits below rather than above them. It is a real `git add -A` over
+    // the whole worktree — seconds on a large repository — and it used to run first, so
+    // pressing send produced nothing at all: no message, no indicator, no evidence the
+    // input had been received. It still completes before the model stream starts,
+    // because it must record the pre-turn state.
     let runGitTree = gitTracked ? carryTree : undefined;
     if (gitTracked && !runGitTree) {
       const versionAtSend = this.fsVersion;
@@ -5904,27 +5958,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
     }
-    if (resume) {
-      this.post({ type: 'resume', conversationId, partialText: resume.partialText ?? '' });
-    } else if (!userAlreadyPersisted) {
-      clearForwardStacks(conversation);
-      const userItem = createTranscriptItem('user', userText);
-      userItem.attachments = composerContext?.attachments;
-      conversation.items.push(userItem);
-      if (conversation.items.length === 1) conversation.title = conversationTitle(userText);
-      this.post({ type: 'user', conversationId, item: userItem });
-      this.notifyHooks('onMessage', { text: userText });
-    } else {
-      this.notifyHooks('onMessage', { text: userText });
-    }
-    conversation.updatedAt = Date.now();
-    project.updatedAt = Date.now();
-    // Fire-and-forget: the user message is already in-memory and visible in the webview.
-    // Awaiting the persist chain here blocked every send on the previous turn's write
-    // (often several seconds of globalState I/O for a large conversation).
-    void this.persistProject(project);
-    this.syncConversations(false);
-    this.post({ type: 'state', conversationId, running: true, label: 'Thinking' });
 
     const work: WorkItem[] = resume ? [...(resume.work ?? [])] : [];
     const runChanges = new Map<string, FileChange>((resume?.changes ?? []).map(change => [change.path, change]));
@@ -9131,6 +9164,10 @@ ${cached}`);
       clearTimeout(this.deltaFlushTimer);
       this.deltaFlushTimer = undefined;
     }
+    // The snapshot describes the transcript as of when it was built, so it must land
+    // before any delta that was streamed after it — otherwise the delta is applied and
+    // then overwritten by the older snapshot text.
+    this.flushPendingSnapshot();
     if (!this.pendingDeltas.size) return;
     const batch = [...this.pendingDeltas.entries()];
     this.pendingDeltas.clear();
@@ -9140,10 +9177,26 @@ ${cached}`);
     }
   }
 
+  /** Send the held transcript snapshot now. Called before anything else is posted. */
+  private flushPendingSnapshot(): void {
+    if (this.snapshotFlushTimer) {
+      clearTimeout(this.snapshotFlushTimer);
+      this.snapshotFlushTimer = undefined;
+    }
+    const pending = this.pendingSnapshot;
+    if (!pending) return;
+    this.pendingSnapshot = undefined;
+    this.postImmediate(pending.message);
+  }
+
   private post(message: unknown): void {
     if (this.reactMode && message && typeof message === 'object') {
-      const msg = message as { type?: unknown; conversationId?: unknown; text?: unknown };
+      const msg = message as { type?: unknown; conversationId?: unknown; text?: unknown; id?: unknown };
       if ((msg.type === 'delta' || msg.type === 'reasoningDelta') && typeof msg.conversationId === 'string' && typeof msg.text === 'string') {
+        // A snapshot held for the frame describes the transcript as of when it was
+        // built. Applying a delta first and then that snapshot would roll the new text
+        // back, so the snapshot goes out first and the delta lands on top of it.
+        this.flushPendingSnapshot();
         const entry = this.pendingDeltas.get(msg.conversationId) ?? { text: '', reasoning: '' };
         if (msg.type === 'delta') entry.text += msg.text;
         else entry.reasoning += msg.text;
@@ -9157,7 +9210,22 @@ ${cached}`);
         }
         return;
       }
+      // A transcript snapshot is held for one frame and superseded by a later one.
+      // `id` carries the conversation for this message type.
+      if (msg.type === 'conversation' && typeof msg.id === 'string') {
+        this.pendingSnapshot = { message, conversationId: msg.id };
+        if (!this.snapshotFlushTimer) {
+          this.snapshotFlushTimer = setTimeout(() => {
+            this.snapshotFlushTimer = undefined;
+            this.flushPendingSnapshot();
+          }, 16);
+          this.snapshotFlushTimer.unref?.();
+        }
+        return;
+      }
     }
+    // Anything else must not overtake a held snapshot, or it would be overwritten by it.
+    this.flushPendingSnapshot();
     if (this.pendingDeltas.size) this.flushPendingDeltas();
     this.postImmediate(message);
   }
