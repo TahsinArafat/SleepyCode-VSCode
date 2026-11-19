@@ -694,6 +694,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   constructor(private readonly context: vscode.ExtensionContext) {
+    // FIRST, before anything is allocated or read from disk: the extension host is one
+    // process shared with every other activated extension, so without this baseline a
+    // report cannot say which part of its heap is ours. See heap-probe-core.
+    this.heapBaseline = heapProbeCore.captureBaseline(process.memoryUsage());
     this.conversationStore = new ConversationStore(context.globalState);
     this.projectIndex = new ProjectIndexService(context, message => this.post(message));
     // The workspace watcher is started by `resolveWebviewView`, not here.
@@ -2798,6 +2802,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         compactionSaturated,
         reactItemsBytes,
         reactItemsSaturated,
+        baselineHeapUsed: this.heapBaseline?.heapUsedAtActivation,
+        attributableBytes: heapProbeCore.attributableBytes(this.heapBaseline, usage.heapUsed),
       },
       // One entry per long-lived map. A container that grows by conversation id is
       // invisible in `heapUsed` until it is enormous, and by then it looks exactly
@@ -2929,6 +2935,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Show the report in the chat and copy it, so one action gets the user the data. */
+  /** Heap at activation, so the report can separate this extension from its co-tenants. */
+  private readonly heapBaseline: heapProbeCore.HeapBaseline | undefined;
   /** A collector for this engine, resolved once and reused. */
   private gcProbe?: heapProbeCore.GcAccess | null;
 

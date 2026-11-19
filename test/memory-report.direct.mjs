@@ -28,6 +28,7 @@ const report = (over = {}) => ({
     cliServerOwned: false, mcpCached: false, activeRuns: 0, queuedPrompts: 0,
     compactionBytes: 0, compactionSnapshots: 0, compactionSaturated: false,
     reactItemsBytes: 0, reactItemsSaturated: false,
+    baselineHeapUsed: undefined, attributableBytes: undefined,
     ...over.retainers,
   },
   containers: { reactItems: 1, logRing: 400, subscriptions: 30, ...over.containers },
@@ -212,4 +213,54 @@ test('a saturated copy measurement reads as a floor like every other figure', ()
   assert.match(text, /compaction +>32\.0 MB/);
   assert.match(text, /webview copy +>32\.0 MB/);
   assert.match(m.formatMemoryLine(saturated), /compaction >32\.0MB/);
+});
+
+// ---------------------------------------------------------------------------
+// Attribution: the host is one process shared with every other extension.
+//
+// The reporter's log showed eight built-in extensions activated in the SAME process as
+// this one, including vscode.git, which walks every repository in the workspace. A report
+// that presents the host total as "SleepyCode's memory" is not a measurement of
+// SleepyCode at all -- and that misreading is what kept a shared-process figure looking
+// like a 6 GB leak.
+
+test('the report separates this extension from its co-tenants in the host', () => {
+  const withBaseline = report({ retainers: { baselineHeapUsed: 128 * 1048576, attributableBytes: 23 * 1048576 } });
+  const text = m.formatMemoryReport(withBaseline, {});
+  assert.match(text, /before us +128\.0 MB/, 'what was already resident');
+  assert.match(text, /from us +23\.0 MB/, 'what this extension added');
+  assert.match(text, /other exts +77\.0 MB/, 'and everything else, derived not guessed');
+  assert.match(m.formatMemoryLine(withBaseline), /fromUs 23\.0MB/);
+});
+
+test('without a baseline the report says nothing rather than implying the total is ours', () => {
+  const text = m.formatMemoryReport(report(), {});
+  assert.doesNotMatch(text, /Attribution/, 'no section when the baseline is unknown');
+  assert.doesNotMatch(text, /from us/, 'and no invented figure');
+});
+
+test('a collection that reclaims nothing, with small growth, is reported as no leak', () => {
+  // The reporter's final numbers: 151 MB heap, 0.1 MB reclaimed, 1.3 MB of accounted
+  // state. That combination has one honest reading and the report should give it.
+  const settled = report({
+    snapshot: { heapUsed: 151 * 1048576, heapAfterGc: 151 * 1048576 },
+    retainers: { baselineHeapUsed: 128 * 1048576, attributableBytes: 23 * 1048576 },
+  });
+  const verdict = m.memoryVerdict(settled);
+  assert.match(verdict, /^no leak:/, 'says there is no leak');
+  assert.match(verdict, /reclaimed 0\.0MB/, 'backs it with the collection result');
+  assert.match(verdict, /accounts for 23\.0MB/, 'and with the attributable growth');
+  assert.match(verdict, /belongs to the host and its other extensions/, 'names where the rest is');
+});
+
+test('large attributable growth is NOT excused as co-tenancy', () => {
+  // The attribution must not become a way to explain away a real leak: if this extension
+  // grew the heap by hundreds of megabytes, the verdict says so.
+  const leaky = report({
+    snapshot: { heapUsed: 600 * 1048576, heapAfterGc: 600 * 1048576, oldSpace: 500 * 1048576 },
+    retainers: { baselineHeapUsed: 100 * 1048576, attributableBytes: 500 * 1048576 },
+  });
+  const verdict = m.memoryVerdict(leaky);
+  assert.doesNotMatch(verdict, /^no leak:/);
+  assert.match(verdict, /live JS objects/, 'still reports retention when it is ours');
 });

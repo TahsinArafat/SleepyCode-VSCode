@@ -87,6 +87,17 @@ export type RetainerBreakdown = {
   /** Bytes held by the per-conversation transcript copies the webview reads. */
   reactItemsBytes: number;
   reactItemsSaturated: boolean;
+  /**
+   * `heapUsed` before this extension allocated anything.
+   *
+   * The extension host is a single process shared with every activated extension. On the
+   * reporter's machine eight built-ins shared it, including `vscode.git`. Without a
+   * baseline every report reads as "SleepyCode uses 151 MB", which is not a measurement
+   * of SleepyCode at all.
+   */
+  baselineHeapUsed?: number;
+  /** `heapUsed` above the baseline: the part that is actually this extension's growth. */
+  attributableBytes?: number;
 };
 
 export type MemoryReport = {
@@ -147,6 +158,9 @@ export function formatMemoryLine(report: MemoryReport): string {
     `runs ${r.activeRuns}`,
     `queued ${r.queuedPrompts}`,
   );
+  if (r.attributableBytes !== undefined && r.baselineHeapUsed !== undefined) {
+    parts.push(`fromUs ${megabytes(r.attributableBytes)}MB`, `before_us ${megabytes(r.baselineHeapUsed)}MB`);
+  }
   const containerText = Object.entries(containers)
     .filter(([, count]) => count > 0)
     .map(([name, count]) => `${name}=${count}`)
@@ -188,6 +202,14 @@ export function formatMemoryReport(report: MemoryReport, extra: { at?: number; n
     lines.push('   the extension host over an idle window.)');
   } else {
     lines.push(`  after GC       ${megabytes(snapshot.heapAfterGc)} MB   (reclaimed ${megabytes(Math.max(0, snapshot.heapUsed - snapshot.heapAfterGc))} MB)`);
+  }
+  if (r.attributableBytes !== undefined && r.baselineHeapUsed !== undefined) {
+    lines.push('');
+    lines.push('Attribution (the host is one process shared by every activated extension)');
+    lines.push(`  before us      ${megabytes(r.baselineHeapUsed)} MB   (already resident when this extension activated)`);
+    lines.push(`  from us        ${megabytes(r.attributableBytes)} MB   (heap growth since activation)`);
+    const others = Math.max(0, snapshot.heapUsed - (r.attributableBytes ?? 0));
+    lines.push(`  other exts     ${megabytes(others)} MB   (everything else in this process, including VS Code itself)`);
   }
   lines.push('');
   lines.push('Conversation state');
@@ -235,13 +257,26 @@ export function formatMemoryReport(report: MemoryReport, extra: { at?: number; n
 export function memoryVerdict(report: MemoryReport): string {
   const s = report.snapshot;
   const r = report.retainers;
-  if (s.heapAfterGc !== undefined && s.rss < 1_000 * MB) {
-    return 'heap normal after GC';
+  // A forced collection reclaimed (almost) nothing, which is the answer to the question
+  // that started all of this: there is no garbage to reclaim.
+  if (s.heapAfterGc !== undefined && r.attributableBytes !== undefined && r.attributableBytes < 40 * MB) {
+    return `no leak: a collection reclaimed ${megabytes(Math.max(0, s.heapUsed - s.heapAfterGc))}MB (nothing to collect), and this extension accounts for ${megabytes(r.attributableBytes)}MB of the ${megabytes(s.heapUsed)}MB heap — the rest belongs to the host and its other extensions`;
   }
-  // Live objects dominate: this is the leak case.
+  // Live objects dominate: this is the leak case, and it is checked BEFORE any
+  // "looks normal" shortcut. A small rss with a large old_space is exactly the shape of
+  // a leak inside one extension, and dismissing it because the process is not huge would
+  // hide the finding the report exists to surface.
   if (s.oldSpace > 250 * MB) {
     const explained = megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes + r.compactionBytes + r.reactItemsBytes);
     return `old_space ${megabytes(s.oldSpace)}MB is live JS objects, while known retainers account for ${explained}MB — the rest is held somewhere this report does not name yet`;
+  }
+  // Growth attributable to this extension is the other way a leak shows up: the host may
+  // be modest in total while this one extension is the reason it grew.
+  if (r.attributableBytes !== undefined && r.attributableBytes > 250 * MB) {
+    return `this extension added ${megabytes(r.attributableBytes)}MB to the host since activation, which is not accounted for by its retainers (${megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes + r.compactionBytes + r.reactItemsBytes)}MB)`;
+  }
+  if (s.heapAfterGc !== undefined && s.rss < 1_000 * MB) {
+    return `heap normal after GC: nothing significant was reclaimable (${megabytes(Math.max(0, s.heapUsed - s.heapAfterGc))}MB)`;
   }
   // Compiled JavaScript is checked before the garbage reading, because a code-heavy heap
   // ALSO has a small old_space and would otherwise be reported as unreclaimed garbage --

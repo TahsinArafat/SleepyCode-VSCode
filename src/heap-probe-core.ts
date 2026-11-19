@@ -65,3 +65,39 @@ export function heapAfterCollection(gc: GcAccess | undefined, heapUsed: () => nu
   if (!gc?.collect()) return undefined;
   return heapUsed();
 }
+
+/**
+ * What the extension host looked like before this extension allocated anything.
+ *
+ * The extension host is ONE process shared by every activated extension, so its total
+ * says nothing about any one of them. The user's own log showed eight built-ins in the
+ * same host as this one, including `vscode.git`, which walks every repository in the
+ * workspace.
+ *
+ * Capturing `heapUsed` at the top of `activate` is the only way to attribute the rest:
+ * whatever was already resident is somebody else's, and the difference is ours. Without
+ * it, "the extension host is 151 MB" and "SleepyCode is 151 MB" are indistinguishable
+ * from a report, which is how a shared-process figure kept looking like a leak.
+ */
+export type HeapBaseline = {
+  /** `heapUsed` before this extension's first allocation. */
+  heapUsedAtActivation: number;
+  /** `rss` at the same moment: the whole process, other extensions included. */
+  rssAtActivation: number;
+};
+
+export function captureBaseline(usage: { heapUsed: number; rss: number }): HeapBaseline {
+  return { heapUsedAtActivation: usage.heapUsed, rssAtActivation: usage.rss };
+}
+
+/**
+ * The part of the current heap this extension is responsible for.
+ *
+ * A negative difference is clamped to zero: the baseline was taken inside a process that
+ * keeps working, so the host can legitimately shrink below it after a collection. A
+ * negative "ours" figure would be an arithmetic artefact presented as evidence.
+ */
+export function attributableBytes(baseline: HeapBaseline | undefined, currentHeapUsed: number): number | undefined {
+  if (!baseline) return undefined;
+  return Math.max(0, currentHeapUsed - baseline.heapUsedAtActivation);
+}
