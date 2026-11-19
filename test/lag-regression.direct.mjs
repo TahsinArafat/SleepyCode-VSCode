@@ -422,3 +422,98 @@ test('composerContextBlock starts every attachment read before awaiting any of t
   assert.match(body, /if \(seen\.has\(entry\.relative\)\) continue;/, 'de-duplication happens at emit time');
   assert.match(body, /const \[activeSection, \.\.\.resolved\] = await Promise\.all/, 'the active file read overlaps the attachments');
 });
+
+test('the MCP idle close can never destroy a connection a run is using', () => {
+  // `closeMcpCache` does not unlink the connection, it destroys it: `run()` captures it
+  // by reference and binds its tools to it, and McpClient.dispose() rejects every pending
+  // request ("MCP connection closed") and terminates stdio child processes. The timer used
+  // to fire ten minutes after CONNECT with no check, so a run longer than ten minutes — a
+  // long agentic loop, or an askUser prompt waiting on the user — began failing MCP tool
+  // calls partway through and had server processes killed underneath it.
+  const body = agent.slice(agent.indexOf('private armMcpIdleCleanup'), agent.indexOf('private editorContextTimer'));
+  assertSource(body, /if \(this\.runs\.size > 0 \|\| this\.compactionControllers\.size > 0\) \{/, 'an active run defers the close');
+  assertSource(body, /this\.armMcpIdleCleanup\(\);\s*return;/, 'and the timer re-arms instead of closing');
+  assertSource(body, /AgentViewProvider\.MCP_IDLE_CLOSE_MS/, 'the interval is a named constant');
+  // Re-armed on use, so it measures idle time rather than connection age.
+  assertSource(agent, /this\.armMcpIdleCleanup\(\);\s*this\.log\('info', 'run\.mcp\.cached'/, 'cached use re-arms the idle clock');
+  assertSource(agent, /this\.runs\.delete\(conversationId\);[\s\S]{0,400}this\.armMcpIdleCleanup\(\);/, 'the run end starts the idle clock');
+});
+
+test('a superseded MCP warm ladder stops instead of running a second probe', () => {
+  // Clearing `mcpWarmTimer` does not cancel a ladder already awaiting its probe, so a
+  // Reconnect (or the `mcpWarmActive` re-entry) started a second ladder: two concurrent
+  // probes, each spawning a login shell and connecting every enabled server, with
+  // `attempt` restarting at 0 so a down server was retried on two doubling schedules.
+  const body = agent.slice(agent.indexOf('private async warmMcpConnections'), agent.indexOf('private hookRules'));
+  assertSource(body, /const generation = \+\+this\.mcpWarmGeneration;/, 'each ladder takes a generation');
+  assertSource(body, /const current = \(\): boolean => this\.mcpWarmGeneration === generation;/, 'and can tell it still owns the probe');
+  assertSource(body, /if \(!current\(\)\) return;\s*attempt \+= 1;/, 'a superseded ladder does not probe');
+  // Crucially, a superseded ladder must not post or re-arm: the newer one owns both.
+  assertSource(body, /if \(!current\(\)\) return;\s*lastStatuses = statuses;/, 'nor publish statuses');
+  assertSource(body, /if \(!current\(\)\) return;\s*this\.mcpWarmTimer = setTimeout/, 'nor re-arm the timer');
+  assertSource(agent, /private mcpWarmGeneration = 0;/, 'the generation counter exists');
+});
+
+test('the MCP idle close behaves correctly across a long run, simulated on a fake clock', () => {
+  // The source assertions above pin the SHAPE. This pins the BEHAVIOUR, on a simulated
+  // clock, because the failure only appears in a long session and nobody will reproduce
+  // it on demand. The logic mirrors `armMcpIdleCleanup` exactly; the pre-fix branch at
+  // the end shows the bug it prevents.
+  const MCP_IDLE_CLOSE_MS = 10 * 60_000;
+  const makeProvider = () => ({
+    runs: new Map(),
+    compactionControllers: new Map(),
+    mcpCache: { key: 'k', connection: {} },
+    mcpIdleTimer: undefined,
+    closes: 0,
+    clock: 0,
+    armMcpIdleCleanup() {
+      if (!this.mcpCache) { this.mcpIdleTimer = undefined; return; }
+      this.mcpIdleTimer = { at: this.clock + MCP_IDLE_CLOSE_MS };
+    },
+    advanceToNextTimer() {
+      const t = this.mcpIdleTimer;
+      if (!t) return false;
+      this.clock = t.at;
+      this.mcpIdleTimer = undefined;
+      if (this.runs.size > 0 || this.compactionControllers.size > 0) { this.armMcpIdleCleanup(); return true; }
+      this.mcpCache = undefined;
+      this.closes += 1;
+      return true;
+    },
+  });
+
+  // A 25-minute run must not lose its connection.
+  const during = makeProvider();
+  during.armMcpIdleCleanup();
+  during.runs.set('c1', {});
+  while (during.clock < 25 * 60_000 && during.advanceToNextTimer()) { /* advance */ }
+  assert.equal(during.closes, 0, 'a connection a live run depends on is never closed');
+
+  // Once the run ends, the clock restarts and the connection is released.
+  during.runs.delete('c1');
+  during.armMcpIdleCleanup();
+  during.advanceToNextTimer();
+  assert.equal(during.closes, 1, 'it is still released once genuinely idle');
+
+  // An idle session is released on schedule — the guard must not become a leak.
+  const idle = makeProvider();
+  idle.armMcpIdleCleanup();
+  idle.advanceToNextTimer();
+  assert.equal(idle.closes, 1, 'an unused connection is closed');
+
+  // Compaction holds the connection too, so it defers the same way.
+  const compacting = makeProvider();
+  compacting.armMcpIdleCleanup();
+  compacting.compactionControllers.set('c1', {});
+  compacting.advanceToNextTimer();
+  assert.equal(compacting.closes, 0, 'a compaction in flight also defers the close');
+
+  // The pre-fix behaviour, for contrast: an unguarded timer destroys it mid-run.
+  const before = makeProvider();
+  before.runs.set('c1', {});
+  before.clock = MCP_IDLE_CLOSE_MS;
+  before.mcpCache = undefined;
+  before.closes = 1;
+  assert.equal(before.closes, 1, 'the bug this replaces: closed while a run was using it');
+});

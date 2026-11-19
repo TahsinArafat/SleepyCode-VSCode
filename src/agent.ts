@@ -443,6 +443,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * background, so the chat never waits on it.
    */
   private static readonly MODEL_CACHE_TTL_MS = 5 * 60_000;
+  /**
+   * How long a cached MCP connection survives without being used.
+   *
+   * Measures idle time, not connection age: `armMcpIdleCleanup` re-arms on use and
+   * defers while a run is live, so this can never close a connection out from under
+   * the run that is using it.
+   */
+  private static readonly MCP_IDLE_CLOSE_MS = 10 * 60_000;
   private view?: vscode.WebviewView;
   private webviewVisible = true;
   // The classic webview was removed; the React chat is the only UI, so this is
@@ -570,6 +578,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * instead of leaving the dead server to be noticed by hand next time.
    */
   private mcpWarmActive = false;
+  /** Which warm ladder owns the probe; a newer one supersedes an older in-flight pass. */
+  private mcpWarmGeneration = 0;
 
   /**
    * Which engine owns the run loop. The Sleepy CLI owns it whenever it is
@@ -599,10 +609,42 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (cached) void cached.close().catch(() => { });
   }
 
+  /**
+   * Arm the idle close for the cached MCP connection.
+   *
+   * The timer measures time since the connection was last USED, so it must be re-armed
+   * at each use and must never fire while a run holds the connection.
+   *
+   * It previously fired unconditionally ten minutes after connect, and `closeMcpCache`
+   * destroys the connection rather than unlinking it: `run()` captures it by reference
+   * when it starts and its tools are bound to it, so a close mid-run does not retarget
+   * those tools — it kills them. `McpClient.dispose()` rejects every pending request
+   * with "MCP connection closed" and terminates stdio child processes, so a run longer
+   * than ten minutes started failing MCP tool calls partway through, with stdio servers
+   * having their processes killed underneath it.
+   *
+   * A run legitimately exceeds ten minutes: a long agentic loop, or an `askUser` prompt
+   * waiting on the user. So while any run is live this re-arms instead of closing, and
+   * the connection is released shortly after the last run ends.
+   */
   private armMcpIdleCleanup(): void {
-    if (!this.mcpCache) return;
+    if (!this.mcpCache) {
+      if (this.mcpIdleTimer) clearTimeout(this.mcpIdleTimer);
+      this.mcpIdleTimer = undefined;
+      return;
+    }
     if (this.mcpIdleTimer) clearTimeout(this.mcpIdleTimer);
-    this.mcpIdleTimer = setTimeout(() => this.closeMcpCache(), 10 * 60_000);
+    this.mcpIdleTimer = setTimeout(() => {
+      this.mcpIdleTimer = undefined;
+      // A run in flight owns this connection. Check again on the next tick rather
+      // than closing, so the check is "is anything using it right now" and not "has
+      // it existed for ten minutes".
+      if (this.runs.size > 0 || this.compactionControllers.size > 0) {
+        this.armMcpIdleCleanup();
+        return;
+      }
+      this.closeMcpCache();
+    }, AgentViewProvider.MCP_IDLE_CLOSE_MS);
     this.mcpIdleTimer.unref?.();
   }
 
@@ -6196,6 +6238,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (this.mcpCache?.key === mcpKey) {
         mcpConnection = this.mcpCache.connection;
         mcpCached = true;
+        // Re-arm on use: the idle timer must measure time since the connection was
+        // last needed, not time since it was created.
+        this.armMcpIdleCleanup();
         this.log('info', 'run.mcp.cached', 'reusing cached MCP connection');
       } else {
         this.log('info', 'run.mcp.legacy.start', rawMcpServers.trim() && rawMcpServers.trim() !== '{}' ? 'configured' : 'none');
@@ -7169,6 +7214,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (!mcpCached) await mcpConnection?.close();
       this.post({ type: 'liveUsage', conversationId, model: '', provider: '', inputTokens: 0, outputTokens: 0 });
       this.runs.delete(conversationId);
+      // The idle close was deferred for this run; start its clock now that the run is
+      // over. Without this the connection would stay open until the next send, because
+      // the timer that would have closed it re-armed itself instead.
+      this.armMcpIdleCleanup();
       this.log('info', 'run.finally.done', conversationId);
       this.post({ type: 'state', conversationId, running: false, label: '' });
       this.syncConversations(false);
@@ -8004,21 +8053,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private async warmMcpConnections(): Promise<void> {
     if (!this.reactMode) return;
     if (this.mcpWarmTimer) clearTimeout(this.mcpWarmTimer);
+    this.mcpWarmTimer = undefined;
+    // A ladder already awaiting its probe is not cancelled by clearing the timer, so
+    // a second call (Reconnect, or the old `mcpWarmActive` re-entry) used to start a
+    // SECOND ladder: two concurrent probes — each spawning a login shell and
+    // connecting every enabled server — with `attempt` restarting at 0, so a
+    // permanently-down server was retried on two doubling schedules at once. The
+    // generation makes the newer ladder win and tells the older one to stop.
+    const generation = ++this.mcpWarmGeneration;
     let attempt = 0;
     let lastStatuses: settingsAdapter.PanelMcpStatus[] | undefined;
     let retryNames: ReadonlySet<string> | undefined;
+    const current = (): boolean => this.mcpWarmGeneration === generation;
     const run = async (): Promise<void> => {
+      if (!current()) return;
       attempt += 1;
       let statuses: settingsAdapter.PanelMcpStatus[];
       try {
         statuses = await this.probeMcpConnections(retryNames, lastStatuses);
       } catch (error) {
+        if (!current()) return;
         this.log('warn', 'mcp.warm.failed', errorMessage(error));
         // A probe that threw is not evidence the servers are fine: keep trying.
         this.mcpWarmActive = true;
         schedule();
         return;
       }
+      // A superseded ladder must not post statuses or re-arm: the newer one owns both.
+      if (!current()) return;
       lastStatuses = statuses;
       if (!statuses.length) {
         this.mcpWarmActive = false;
@@ -8038,6 +8100,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       if (verdict.retry) schedule();
     };
     const schedule = (): void => {
+      if (!current()) return;
       this.mcpWarmTimer = setTimeout(() => { void run(); }, warmDelayMs(attempt, {
         backoffMs: MCP_WARM_BACKOFF_MS,
         heartbeatMs: MCP_WARM_HEARTBEAT_MS,
