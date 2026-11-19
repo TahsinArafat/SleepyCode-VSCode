@@ -24,6 +24,7 @@ import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MA
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
 import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, measureSerializedBytes, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
 import * as memoryReportCore from './memory-report-core';
+import * as v8 from 'node:v8';
 import { formatMemoryReport } from './memory-report-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
@@ -2702,6 +2703,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       }
     }
     const usage = process.memoryUsage();
+    // Heap SPACES, not just the totals. A 400 MB heap says nothing on its own: V8 grows
+    // the heap with allocation rate, so that number is routinely dominated by space it has
+    // not reclaimed. `old_space` is live long-lived objects, which is what actually tells
+    // a leak from a busy window.
+    let oldSpace = 0;
+    let largeObjectSpace = 0;
+    let codeSpace = 0;
+    let newSpace = 0;
+    try {
+      const spaces = v8.getHeapSpaceStatistics();
+      for (const space of spaces) {
+        if (space.space_name === 'old_space') oldSpace = space.space_used_size;
+        else if (space.space_name === 'large_object_space') largeObjectSpace = space.space_used_size;
+        else if (space.space_name === 'code_space') codeSpace = space.space_used_size;
+        else if (space.space_name === 'new_space') newSpace = space.space_used_size;
+      }
+    } catch {
+      // The breakdown is a diagnostic, never a requirement: a host without it still gets
+      // the totals, which are what the eviction logic actually uses.
+    }
+    // Only present when the process was started with --expose-gc, which an extension host
+    // is not. When it is, the delta is the most direct evidence of garbage vs retention.
+    const gc = (globalThis as { gc?: () => void }).gc;
+    let heapAfterGc: number | undefined;
+    if (typeof gc === 'function') {
+      try {
+        gc();
+        heapAfterGc = process.memoryUsage().heapUsed;
+      } catch {
+        heapAfterGc = undefined;
+      }
+    }
     const root = this.workspaceRoot();
     const index = root ? this.repoIndex.indexFor(root) : undefined;
     const terminals = this.terminals.list();
@@ -2712,6 +2745,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         rss: usage.rss,
         external: usage.external,
         arrayBuffers: usage.arrayBuffers ?? 0,
+        oldSpace,
+        largeObjectSpace,
+        codeSpace,
+        newSpace,
+        ...(heapAfterGc === undefined ? {} : { heapAfterGc }),
       },
       retainers: {
         projects: this.projects.length,
