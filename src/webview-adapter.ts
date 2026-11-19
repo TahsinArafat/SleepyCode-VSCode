@@ -351,6 +351,12 @@ export function toSleepyMessage(message: ReactMsg): SleepyMsg | null {
       // support report can actually be diagnosed.
       return { type: 'logError', message: message.message ?? '', info: message.info };
 
+    case 'interactionPerf':
+      // The webview cannot read the extension host's process memory, and the host cannot
+      // see the renderer's frame timings. Interaction slowness lives entirely in the
+      // renderer, so it has to travel here to reach a report.
+      return { type: 'interactionPerf', text: String(message.text ?? '') };
+
     case 'openBrowserTab':
       return { type: 'openBrowserTab', url: message.url };
 

@@ -2895,10 +2895,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // The manual report forces a collection: its whole purpose is to answer "how much of
     // this is actually retained", and an uncollected total cannot.
     const report = this.memoryReport(true);
-    return formatMemoryReport(report, {
+    const text = formatMemoryReport(report, {
       at: Date.now(),
       note: `Editor: ${vscode.version} · platform ${process.platform} · pid ${process.pid}`,
     });
+    // Renderer timings live in the webview, which the host cannot inspect. When it is
+    // slow and the heap is not, this section is the only evidence there is.
+    return this.lastInteractionReport
+      ? `${text}\n\nRenderer interaction timing (measured in the webview)\n${this.lastInteractionReport}`
+      : `${text}\n\nRenderer interaction timing: the webview has not reported yet (it publishes 5 s after load).`;
   }
 
   /**
@@ -2935,6 +2940,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Show the report in the chat and copy it, so one action gets the user the data. */
+  /** Renderer-side interaction timings, as last reported. Included in the memory report. */
+  private lastInteractionReport = '';
   /** Heap at activation, so the report can separate this extension from its co-tenants. */
   private readonly heapBaseline: heapProbeCore.HeapBaseline | undefined;
   /** A collector for this engine, resolved once and reused. */
@@ -3738,6 +3745,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.activeProjectId = this.projects[0]?.id ?? '';
     }
     this.sortProjects();
+    // Release the conversations the user is not looking at, as soon as the project is
+    // loaded. This was the one entry point that never offloaded: every other path
+    // (opening a chat, a checkpoint, a workspace change) called it, so a session that
+    // only ever STARTED the editor kept every conversation fully resident. The reporter's
+    // 73-conversation project showed 0 cold, and 73 resident transcripts is 73 copies of
+    // everything each one holds.
+    for (const project of this.projects) void this.offloadColdConversations(project);
     void this.persistProjects();
   }
 
@@ -4568,6 +4582,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // A webview crash or render error is reported here; without this it was
       // invisible to anyone diagnosing a report.
       this.log('error', 'webview.error', [message.message, message.info].filter(Boolean).join(' | '));
+      return;
+    }
+    if (message.type === 'interactionPerf') {
+      // Renderer-side timings. Held so the next memory report can carry them: the host
+      // measures the wrong side of this problem, and asking the user to run a profiler is
+      // what has not worked so far.
+      this.lastInteractionReport = String(message.text ?? '').slice(0, 8_000);
+      this.log('warn', 'webview.interaction.slow', this.lastInteractionReport.split('\n').slice(0, 6).join(' | '));
       return;
     }
     if (message.type === 'openBrowserTab') {

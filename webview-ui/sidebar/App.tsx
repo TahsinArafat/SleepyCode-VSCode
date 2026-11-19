@@ -16,6 +16,7 @@ import { ImagePreview } from "../shared/ImagePreview";
 import { MarkdownView } from "../shared/MarkdownView";
 import { responseText } from "../../src/response-text.ts";
 import { copyText } from "../shared/clipboard";
+import { formatInteractionReport, recordLongTask, recordSample, type InteractionSample, type LongTaskSample } from "./interaction-perf-core";
 import { promptsFromTurns } from "../../src/prompt-history.ts";
 import { panelMenuEntries, openPanelMessage } from "../../src/panel-core.ts";
 import { changeActions, changeActionMessages } from "../../src/review-actions.ts";
@@ -1204,6 +1205,11 @@ export function App() {
   // callId of the subagent currently opened as its own tab (null = parent chat).
   const [subTab, setSubTab] = React.useState<string | null>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  // Interaction timings, so "clicks feel slow" can be answered with numbers from the
+  // machine where it happens instead of guesses from a headless browser. Bounded rings;
+  // see interaction-perf-core.
+  const slowSamples = React.useRef<InteractionSample[]>([]);
+  const longTasks = React.useRef<LongTaskSample[]>([]);
   // Single source of truth: one independent session per conversation id. The
   // visible chat just renders the active session. Avoids any snapshot races.
   const sessionsRef = React.useRef<Map<string, ChatSession>>(new Map());
@@ -1491,9 +1497,53 @@ export function App() {
     };
   }, [setStick]);
 
+  // Long tasks are the browser's own verdict that the main thread was blocked, which is
+  // exactly what a user feels as "the click did not register yet". A frame-rate probe
+  // runs alongside so a slow but unblocked render is distinguishable from a blocked one.
+  React.useEffect(() => {
+    const sessionStart = performance.now();
+    let observer: PerformanceObserver | undefined;
+    if (typeof PerformanceObserver !== "undefined") {
+      try {
+        observer = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            // The entry names where it started, which is the only attribution the
+            // browser offers without a profiler.
+            const attribution = (entry as PerformanceEntry & { attribution?: { name?: string }[] }).attribution;
+            const source = attribution?.map(a => a.name).filter(Boolean).join(" > ") || undefined;
+            longTasks.current = recordLongTask(longTasks.current, entry.duration, Math.round(entry.startTime - sessionStart), source);
+          }
+        });
+        observer.observe({ entryTypes: ["longtask"] });
+      } catch { /* longtask is not supported everywhere; the samples still work. */ }
+    }
+    let frames = 0;
+    let raf = 0;
+    const startedAt = performance.now();
+    const tick = () => { frames += 1; raf = requestAnimationFrame(tick); };
+    raf = requestAnimationFrame(tick);
+    // Publish once after settling, and again every 60 s so a session's worst moments are
+    // not lost. The host keeps the latest and puts it in the memory report.
+    let fps = 0;
+    const publish = () => {
+      post({
+        type: "interactionPerf",
+        text: formatInteractionReport(slowSamples.current, longTasks.current, { frameRate: fps }),
+      } as any);
+    };
+    const settle = window.setTimeout(() => {
+      cancelAnimationFrame(raf);
+      fps = frames / ((performance.now() - startedAt) / 1000);
+      publish();
+    }, 5000);
+    const repeat = window.setInterval(publish, 60_000);
+    return () => { observer?.disconnect(); cancelAnimationFrame(raf); window.clearTimeout(settle); window.clearInterval(repeat); };
+  }, []);
+
   const onScroll = React.useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const startedAt = performance.now();
     // Ignore scroll events we triggered ourselves (prevents feedback loops that
     // make the stick-to-bottom state flip-flop → visible back-and-forth jank).
     if (selfScrollRef.current) return;
@@ -1504,6 +1554,7 @@ export function App() {
     if (!draggingRef.current) return;
     userScrolledRef.current = true;
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 8);
+    slowSamples.current = recordSample(slowSamples.current, 'scroll (drag)', performance.now() - startedAt, Math.round(startedAt));
   }, [setStick]);
 
   // Jump-to-bottom button: scroll to the end and re-arm follow mode.

@@ -40,6 +40,8 @@ export type WebMessage =
   | { type: 'requestSettings'; section?: string }
   | { type: 'requestExtensionLogs' }
   | { type: 'logError'; message: string; info?: string }
+  /** Renderer-side interaction timings, for the memory report. */
+  | { type: 'interactionPerf'; text: string }
   | { type: 'openBrowserTab'; url?: string }
   | { type: 'exportConversation'; conversationId?: string }
   | { type: 'cancelSubagent'; callId: string; reason?: 'timeout' | 'user' }
