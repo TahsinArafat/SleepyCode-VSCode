@@ -360,3 +360,39 @@ test('a fresh renderer is re-sent the model list and account it no longer has', 
   const account = agent.slice(agent.indexOf('private postCachedAccount'), agent.indexOf('private postCachedAccount') + 900);
   assert.doesNotMatch(account, /if \(this\.lastSleepyAccountRefresh\) return;/, 'the account is re-posted to a fresh renderer');
 });
+
+test('the engine resolve is bounded, and a stalled resolve does not fail the send', () => {
+  // `cli-server.ts` allows the CLI 30 s to print a listening URL. Awaiting that
+  // inside a send is what produced a 30-second silence with no stream and no error.
+  const body = agent.slice(agent.indexOf('private async ensureEngine'), agent.indexOf('private async shutdownCli'));
+  assertSource(body, /deadlineMs = AgentViewProvider\.ENGINE_DEADLINE_MS/, 'the wait is bounded by default');
+  assertSource(body, /return this\.awaitEngine\(deadlineMs\);/, 'both the cached and fresh paths go through the deadline');
+  // On timeout the resolve must keep running: cancelling it would throw away the
+  // spawn that is still in progress and make the next send pay for it again.
+  assertSource(body, /const ready = this\.engineReady;/, 'the in-flight resolve is reused, not restarted');
+  assertSource(body, /return this\.engineStatus;/, 'a timeout degrades to the current engine instead of throwing');
+  assertSource(agent, /private static readonly ENGINE_DEADLINE_MS = 8_000;/);
+  // Falling back is only safe because a conversation with local history stays local
+  // for good, so one chat cannot end up split across two engines.
+  assertSource(agent, /hasLocalHistory: hasLocalHistory\(conversation\)/);
+});
+
+test('a stall inside run() is reported, and streaming is not mistaken for one', () => {
+  // The send watchdog stopped at `stage('done')`, which fired when the run was
+  // DISPATCHED — so the token refresh, model refresh, MCP connect and git snapshot
+  // were all invisible. A stall there produced no stream, no error, and no log line.
+  assertSource(agent, /private async runWithStages\(/, 'run is split so a stage reporter can wrap every exit');
+  const runBody = agent.slice(agent.indexOf('private async run(userText'), agent.indexOf('private async runWithStages'));
+  assertSource(runBody, /const stage = this\.beginSendStage\(conversationId\);/, 'run arms its own watchdog');
+  assertSource(runBody, /stage\('done'\);/, 'and stops it on every exit, including throw');
+  // Named stages for the awaits that can block on the network or on git.
+  for (const marker of ['run.context', 'run.git-checkpoint', 'run.preflight', 'run.auth', 'run.stream-pending', 'run.streaming']) {
+    assert.ok(agent.includes(`stage('${marker}')`), `run reports the ${marker} stage`);
+  }
+  // A single model step can legitimately take minutes. Once tokens flow, the
+  // transcript is the progress indicator and the timer must stop claiming a hang.
+  const stageBody = agent.slice(agent.indexOf('private beginSendStage'), agent.indexOf('private async askUser'));
+  assertSource(stageBody, /const streaming = \(\): boolean => current === 'run\.streaming' \|\| current === 'run\.finalizing';/);
+  assertSource(stageBody, /elapsed >= 20_000 && !streaming\(\)/, 'the user-facing stall message excludes streaming');
+  assertSource(stageBody, /this\.log\('warn', 'message\.send\.stalled'/, 'but the log line still names the stage');
+});

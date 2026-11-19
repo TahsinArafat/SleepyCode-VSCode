@@ -716,8 +716,14 @@ test('the engine is chosen once and never swapped mid-conversation', () => {
   // Re-resolving per send would let a chat change engines while it is open.
   assert.match(agent, /private engineReady: Promise<void> \| undefined/);
   // The guard may also compare the setting it resolved under, so a useCli flip
-  // re-resolves instead of silently returning the previous engine.
-  assert.match(agent, /if \(this\.engineReady(?: &&[^{]*)?\) \{\s*await this\.engineReady;\s*return this\.engineStatus;/);
+  // re-resolves instead of silently returning the previous engine. Both paths now
+  // return through `awaitEngine`, which bounds the wait: `cli-server.ts` allows the
+  // CLI 30 s to start, and awaiting that unbounded inside a send is what produced
+  // "nothing happens" with no stream and no error.
+  assert.match(agent, /if \(this\.engineReady && this\.engineUseCli === useCli\) return this\.awaitEngine\(deadlineMs\);/);
+  assert.match(agent, /private async awaitEngine\(deadlineMs: number\): Promise<EngineStatus>/);
+  // A timeout must reuse the resolve already in flight rather than restarting it.
+  assert.match(agent, /const ready = this\.engineReady;/);
   assert.match(agent, /private engineUseCli: boolean \| undefined/);
   assert.match(agent, /get<boolean>\('useCli'/);
 });

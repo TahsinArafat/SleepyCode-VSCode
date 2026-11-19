@@ -102,7 +102,10 @@ check(/subagentSequence/.test(agent) && /type: 'subagent'/.test(agent) && /paren
 check(/delete roleTools\.delegate_task/.test(agent) && /isolated context window/.test(agent) && /Subagents cannot recursively delegate/.test(read('src/tools.ts')), 'subagent context is isolated and recursive delegation is disabled');
 check(/classifySubagentStep/.test(agent) && /harvestSubagentText/.test(agent) && /rememberVisibleText/.test(agent) && /export function harvestSubagentText/.test(read('src/subagent-core.ts')), 'subagent results harvest leftover visible text instead of returning empty');
 check(/skillsmp_list_installed \/ skillsmp_read_installed/.test(agent) && /inspect the Installed skills inventory included in your instructions/.test(agent) && /Installed skills inventory \(metadata only/.test(read('src/skills.ts')), 'system prompt actively discovers and loads installed skills before use');
-check(/try \{\s*this\.log\('info', 'run\.preflight\.start'[\s\S]*?if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
+// The stage marker runs first (it names the stage a stall is stuck in), so the regex
+// allows one statement between `try {` and the preflight log. What must hold is that
+// the provider guard throws INSIDE the try, so run's cleanup still fires.
+check(/try \{\s*(?:stage\('[^']+'\);\s*)?this\.log\('info', 'run\.preflight\.start'[\s\S]*?if \(!providerConfig\) throw new Error/.test(agent), 'provider preflight failures flow through run cleanup instead of leaving a stuck running session');
 check(/await this\.refreshModels\(\);\s*configuredModel = this\.selectionFor\(conversation\)\.model/.test(agent), 'model refresh re-reads configuration before declaring that no model is selected');
 check(/if \(!sleepyToken\) throw new Error\('SleepyAI session is missing or expired/.test(agent), 'missing SleepyAI sessions persist through structured agent error handling');
 

@@ -428,6 +428,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   /** Minimum gap between coalesced mid-run checkpoint writes. */
   private static readonly CHECKPOINT_INTERVAL_MS = 3_000;
   /**
+   * How long a send waits for the engine before falling back to the local agent.
+   *
+   * `cli-server.ts` allows the CLI 30 s to print a listening URL. Waiting for that
+   * inside a send is what produced "nothing happens" with no error, so the wait is
+   * bounded well below it and the resolve keeps running in the background.
+   */
+  private static readonly ENGINE_DEADLINE_MS = 8_000;
+  /**
    * How long a fetched model catalog is trusted when the view is reopened.
    *
    * The sidebar is disposable, so resolving it is a frequent event. This bounds how
@@ -651,12 +659,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * Pick the engine once. Only the local loop writes VS Code globalState; in CLI
    * mode the CLI process owns `sleepy.db` and we never open it.
    */
-  private async ensureEngine(): Promise<EngineStatus> {
+  /**
+   * Resolve which engine owns this window, waiting at most `deadlineMs`.
+   *
+   * Resolving the CLI spawns a process and waits for it to print a listening URL,
+   * which `cli-server.ts` allows up to 30 seconds for. Awaiting that unbounded meant a
+   * send could sit for 30 s with no stream, no error and no explanation — the reported
+   * "nothing happens" failure.
+   *
+   * On timeout the resolve is NOT cancelled: it keeps running, and the next send picks
+   * up its result. The waiting send falls back to the local agent, which is safe
+   * because `usesCliEngine` keeps a conversation with local history local for good —
+   * so this cannot split one conversation across two engines.
+   */
+  private async ensureEngine(deadlineMs = AgentViewProvider.ENGINE_DEADLINE_MS): Promise<EngineStatus> {
     const useCli = vscode.workspace.getConfiguration('sleepycode').get<boolean>('useCli', false);
-    if (this.engineReady && this.engineUseCli === useCli) {
-      await this.engineReady;
-      return this.engineStatus;
-    }
+    if (this.engineReady && this.engineUseCli === useCli) return this.awaitEngine(deadlineMs);
     if (this.engineReady) await this.engineReady.catch(() => undefined);
     if (this.cliServer || this.cliSessions) await this.shutdownCli();
     this.engineUseCli = useCli;
@@ -704,8 +722,41 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         };
       }
     })();
-    await this.engineReady;
-    return this.engineStatus;
+    return this.awaitEngine(deadlineMs);
+  }
+
+  /**
+   * The resolved engine, or the current best answer once the deadline passes.
+   *
+   * Returning `engineStatus` on timeout is deliberate rather than throwing: it is the
+   * value the extension already treats as "what this window is running", so a stalled
+   * CLI resolve degrades to the local agent instead of failing the send.
+   */
+  private async awaitEngine(deadlineMs: number): Promise<EngineStatus> {
+    const ready = this.engineReady;
+    if (!ready) return this.engineStatus;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), deadlineMs);
+      timer.unref?.();
+    });
+    try {
+      const settled = await Promise.race([ready.then(() => true as const).catch(() => true as const), timedOut]);
+      if (!settled) {
+        this.log('warn', 'engine.resolve.deadline',
+          `the engine did not resolve within ${Math.round(deadlineMs / 1000)}s; continuing on ${this.engineStatus.mode}`);
+        this.post({
+          type: 'toast',
+          id: Date.now(),
+          title: 'Engine still starting',
+          message: `The engine has not finished starting after ${Math.round(deadlineMs / 1000)}s. This message is running in the meantime.`,
+          kind: 'info',
+        });
+      }
+      return this.engineStatus;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async shutdownCli(): Promise<void> {
@@ -1649,17 +1700,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * "message.send.received", which is indistinguishable from a dead extension.
    * Each call records the stage; a 20 s timer names the stage that never
    * finished.
+   *
+   * From `run.streaming` onward the silence is expected: a single model step can
+   * legitimately take minutes, and once tokens are arriving the transcript itself
+   * shows progress. So the timer keeps logging (the log line names the stage) but
+   * stops telling the user their message is stuck. Without that distinction, moving
+   * this watchdog inside `run()` would have reported every long generation as a hang.
    */
   private beginSendStage(conversationId: string): (stage: string) => void {
     let current = 'start';
     const started = Date.now();
     let reported = false;
+    const streaming = (): boolean => current === 'run.streaming' || current === 'run.finalizing';
     const timer = setInterval(() => {
       const elapsed = Date.now() - started;
       this.log('warn', 'message.send.stalled', `conversation=${conversationId}; stage=${current}; elapsed=${elapsed}ms`);
       // Say it in the chat too: a send that silently never starts is
       // indistinguishable from a broken extension.
-      if (!reported && elapsed >= 20_000) {
+      if (!reported && elapsed >= 20_000 && !streaming()) {
         reported = true;
         this.post({
           type: 'error',
@@ -5570,6 +5628,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           this.enqueue(sendText, conversationId, composerContext, promptContext);
         } else {
           this.log('info', 'message.send.starting', `conversation=${conversationId}; contextChars=${promptContext.length}`);
+          // `run()` arms its own stages, so this one stands down here rather than
+          // waiting for the outer `finally`: two watchdogs on one turn would both
+          // report the same stall.
+          stage('dispatched');
           void this.run(sendText, conversationId, undefined, undefined, composerContext, promptContext).catch(error => {
             const detail = errorMessage(error);
             this.log('error', 'run.unhandled', detail);
@@ -5725,6 +5787,22 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private async run(userText: string, conversationId: string, resume?: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string; originalUserText?: string }, carryTree?: string, composerContext?: ComposerContext, preparedPromptContext?: string, userAlreadyPersisted = false): Promise<void> {
     this.log('info', 'run.enter', `conversation=${conversationId}; chars=${userText.length}`);
+    // The send path's stage watchdog stops when the run is DISPATCHED, so everything
+    // before the first token was invisible: the token refresh, a model-catalog
+    // round trip, the MCP connect, git snapshots. A stall there produced no stream,
+    // no error and no log line past `run.enter` — the "it just sits there" report.
+    // Runs that have no send behind them at all (scheduled tasks, queue drains) had
+    // no watchdog anywhere.
+    const stage = this.beginSendStage(conversationId);
+    try {
+      return await this.runWithStages(userText, conversationId, resume, carryTree, composerContext, preparedPromptContext, userAlreadyPersisted, stage);
+    } finally {
+      stage('done');
+    }
+  }
+
+  /** The body of `run`, split out so the stage reporter can wrap every exit. */
+  private async runWithStages(userText: string, conversationId: string, resume: { work?: WorkItem[]; errorText?: string; changes?: FileChange[]; fileSnapshot?: FileSnapshot[]; partialText?: string; originalUserText?: string } | undefined, carryTree: string | undefined, composerContext: ComposerContext | undefined, preparedPromptContext: string | undefined, userAlreadyPersisted: boolean, stage: (stage: string) => void): Promise<void> {
     const root = this.workspaceRoot();
     if (!root) {
       this.post({ type: 'error', text: adapter.noWorkspaceMessage() });
@@ -5735,6 +5813,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'error', text: adapter.noWorkspaceMessage() });
       return;
     }
+    stage('run.context');
     const promptContext = resume ? '' : preparedPromptContext ?? await this.composerContextBlock(root, composerContext);
 
     let conversation = this.conversationForId(project, conversationId);
@@ -5768,6 +5847,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // checkpoint needs, and that checkpoint is written from inside the loop.
         // A bounded `git add -A` is worth this, and the capture is cached for the
         // next send when the workspace has not moved.
+        stage('run.git-checkpoint');
         try {
           runGitTree = await captureGitTree(root.fsPath, { signal: run.controller.signal, timeoutMs: 15_000 });
           this.lastGitTree = { root: root.fsPath, tree: runGitTree, version: versionAtSend };
@@ -6016,6 +6096,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let reconnectAttempt = 0;
     let model = selection.model;
     try {
+      stage('run.preflight');
       this.log('info', 'run.preflight.start', `conversation=${conversationId}; provider=${providerConfig?.id ?? '(none)'}`);
       if (!providerConfig) throw new Error('No active provider configured. Open Settings and select SleepyAI or an explicitly configured compatibility provider.');
       // Automatic Git snapshots used to run here. Even fire-and-forget filesystem
@@ -6058,6 +6139,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       const retryBudget = createRetryBudget();
       let sleepyToken: string | undefined;
       if (providerConfig.isSleepy) {
+        stage('run.auth');
         this.log('info', 'run.auth.start', providerConfig.id);
         sleepyToken = getSleepyTokenSync() ?? (await abortableTimeout(getSleepyToken(), 15_000, run.controller.signal, 'SleepyAI authentication')) ?? undefined;
         this.log('info', 'run.auth.done', providerConfig.id);
@@ -6205,6 +6287,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       // already exists (e.g. from the explicit Index panel), otherwise omit tools.
       const repoIndex = this.repoIndex.indexFor(root);
       const repoMemory = repoIndex ? this.loadRepoMemory(root) : undefined;
+      stage('run.stream-pending');
       this.log('info', 'run.preflight.ready', `conversation=${conversationId}; indexedFiles=${repoIndex?.files.length ?? 0}`);
 
       const delegate = async (role: 'explorer' | 'reviewer' | 'worker', task: string, context?: string, subagentName?: string): Promise<string> => {
@@ -6634,6 +6717,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
               for (const guidance of runGuidance) agentMessages.push({ role: 'user', content: steeringGuidance(guidance) } as ModelMessage);
             }
             this.notifyHooks('onAgentStart', { text: streamPrompt });
+            stage('run.streaming');
             this.log('info', 'run.stream.start', `conversation=${conversationId}; model=${model}`);
             const result = await agent.stream({
               ...(agentMessages ? { messages: agentMessages } : { prompt }),
