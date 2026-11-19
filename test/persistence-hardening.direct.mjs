@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { ConversationStore, conversationFingerprint, conversationV2Key, enqueuePersist, estimateSerializedBytes, loadEach, projectV2Key, splitProjectIndex, summarizeConversation, trimPersistedConversations } from '../src/persist-core.ts';
+import { ConversationStore, conversationFingerprint, conversationV2Key, enqueuePersist, estimateSerializedBytes, loadEach, measureSerializedBytes, projectV2Key, splitProjectIndex, summarizeConversation, trimPersistedConversations } from '../src/persist-core.ts';
 import { assertSource } from './source-assert.mjs';
 import { MAX_TURN_UNDO } from '../src/types.ts';
 
@@ -299,6 +299,43 @@ test('estimateSerializedBytes accurately estimates UTF-8 size and guards against
   cyclic.list = [cyclic];
   const bounded = estimateSerializedBytes(cyclic, 200);
   assert.ok(Number.isFinite(bounded) && bounded > 0);
+});
+
+test('a truncated measurement saturates upward instead of reporting a small number', () => {
+  // The bug this closes: a conversation with many dense tool-call objects is node-heavy
+  // but byte-light, so stopping the walk early used to report a SMALL size for a huge
+  // conversation. Every caller here uses the number to decide whether to release memory.
+  const denseConversation = (items, workPer) => ({
+    items: Array.from({ length: items }, () => ({
+      id: 'j', role: 'assistant', text: 'ok',
+      work: Array.from({ length: workPer }, () => ({ kind: 'tool', id: 'w', tool: 'r', done: true, input: { a: 1, b: 2, c: 3, d: 4, e: 5 } })),
+    })),
+    messages: [], turnUndo: [], turnRedo: [],
+  });
+
+  // Before the fix this object measured ~2.9 MB at the old 250k-node budget — under the
+  // 6 MB gate in `relieveConversationPressure`, so the ladder concluded there was
+  // nothing to do and the conversation could never be compacted.
+  const huge = denseConversation(8_000, 40);
+  const truth = measureSerializedBytes(huge, 50_000_000);
+  assert.ok(truth.truncated === false, 'the reference measurement completes');
+  assert.ok(truth.bytes > 30_000_000, `the fixture is genuinely large, got ${truth.bytes}`);
+
+  const capped = measureSerializedBytes(huge, 250_000);
+  assert.equal(capped.truncated, true, 'the walk reports that it did not finish');
+  assert.ok(capped.bytes >= 6_000_000, `a truncated measure must not read as small, got ${capped.bytes}`);
+  assert.ok(capped.bytes <= truth.bytes, 'and must not claim more than the real size');
+  // The decision the number feeds: relief must fire rather than skip.
+  assert.ok(estimateSerializedBytes(huge, 250_000) > 6_000_000, 'the pressure ladder is not bypassed');
+});
+
+test('an exact measurement is unchanged and reports itself as exact', () => {
+  const ordinary = { items: [{ role: 'user', text: 'hello' }], messages: [], turnUndo: [], turnRedo: [] };
+  const detailed = measureSerializedBytes(ordinary);
+  assert.equal(detailed.truncated, false);
+  assert.equal(detailed.bytes, estimateSerializedBytes(ordinary), 'the simple form agrees with the detailed one');
+  // The default budget is high enough that an ordinary conversation is exact.
+  assert.equal(measureSerializedBytes(ordinary, 1_000_000).bytes, detailed.bytes);
 });
 
 function countingStore() {

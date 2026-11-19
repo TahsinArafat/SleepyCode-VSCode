@@ -22,7 +22,7 @@ import type { AppConfig, Attachment, ComposerContext, Conversation, CustomAgentC
 import type { ModelMessage } from 'ai';
 import { MAX_FILE_BYTES, MAX_PERSISTED_CONVERSATIONS, MAX_PERSISTED_PROJECTS, MAX_PERSISTED_PROJECT_BYTES, MAX_STORED_ITEMS, MAX_TURN_UNDO } from './types';
 import { attachReasoningToLatestAssistant, backfillAssistantReasoning, collectReasoningText, DEFAULT_PERSISTED_REASONING, extractThinkBlocks, normalizePersistedReasoningLimit, persistedReasoningBody, reasoningTextsFromItems, rememberReasoningText } from './reasoning-core';
-import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
+import { ConversationStore, enqueuePersist, estimateSerializedBytes, loadEach, measureSerializedBytes, splitProjectIndex, summarizeConversation, trimPersistedConversations } from './persist-core';
 import { webviewTranscriptItems } from './webview-payload-core';
 import { classifyAgentError, conversationTitle, createTranscriptItem, errorMessage, friendlyError, humanToolName, invalidateRealRoots, isAuthRejection, isSecret, normalizeApprovalMode, normalizeTranscriptItem, pathInside, pathInsideLexical, providerErrorMessage, requiresApproval, resolvePathSafe, shouldAutoContinue, statusCodeOf, toolTask } from './util';
 import { createRetryBudget, retryKindForStatus, retryMessage, type RetryBudget, type RetryDecision } from './retry-core.ts';
@@ -2558,6 +2558,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     let items = 0;
     let snapshotChars = 0;
     let serializedState = 0;
+    // A saturated measurement is a floor, not a figure. Saying so in the log is the
+    // difference between "state is 32 MB" and "state is at least 32 MB", and the
+    // memory line is what a slow-climb investigation is read from.
+    let serializedStateSaturated = false;
     for (const project of this.projects) {
       conversations += project.conversations.length;
       for (const conversation of project.conversations) {
@@ -2566,13 +2570,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
           continue;
         }
         items += conversation.items.length;
-        serializedState += estimateSerializedBytes({
+        const measured = measureSerializedBytes({
           items: conversation.items,
           messages: conversation.messages,
           pending: conversation.pending,
           turnUndo: conversation.turnUndo,
           turnRedo: conversation.turnRedo,
         });
+        serializedState += measured.bytes;
+        if (measured.truncated) serializedStateSaturated = true;
         for (const item of conversation.items) {
           for (const snapshot of item.fileSnapshot ?? []) snapshotChars += snapshot.content.length;
         }
@@ -2583,7 +2589,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const index = root ? this.repoIndex.indexFor(root) : undefined;
     this.log('info', 'perf.memory',
       `heap ${mb(memory.heapUsed)}MB rss ${mb(memory.rss)}MB · ${this.projects.length} projects · ` +
-      `${conversations} conversations (${coldConversations} cold) · ${items} items · state ${mb(serializedState)}MB · ` +
+      `${conversations} conversations (${coldConversations} cold) · ${items} items · state ${serializedStateSaturated ? '>' : ''}${mb(serializedState)}MB · ` +
       `snapshots ${mb(snapshotChars)}MB · index ${index?.files.length ?? 0} files/${mb(index?.contentBytes ?? 0)}MB`);
   }
 

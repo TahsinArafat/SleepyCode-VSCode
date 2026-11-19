@@ -129,11 +129,55 @@ export function trimPersistedConversations<T extends { id: string; pinned?: bool
   return { kept, dropped, bytes: Math.max(0, total) };
 }
 
+/** Default traversal budget. Generous enough that ordinary conversations are exact. */
+const DEFAULT_MAX_NODES = 1_000_000;
+
+/**
+ * Bytes reported when the walk could not finish.
+ *
+ * A truncated walk has proved the value is large — it consumed a million nodes — but
+ * its partial total is worthless as an estimate: the pathological case this guards
+ * (dense tool-call objects) measured 2.88 MB of a real 41 MB. Returning that partial
+ * total is what let the pressure ladder conclude a 41 MB conversation was 3 MB and do
+ * nothing.
+ *
+ * So saturation reports a value above every budget this module's callers compare
+ * against (6 MB live limit, 8 MB persist budget, 16 MB offload target), because the
+ * only safe reading of "could not finish measuring" for a memory decision is "over
+ * budget". Callers that need to distinguish should use `measureSerializedBytes` and
+ * check `truncated` rather than reading a number.
+ */
+const TRUNCATED_SATURATION_BYTES = 32_000_000;
+
 /**
  * Estimate UTF-8 / JSON-like byte length without allocating serialized strings
  * or recursing unsafely across cycles or deeply nested objects.
+ *
+ * ## Truncation saturates upward, never downward
+ *
+ * The walk is bounded so a pathological graph cannot hang the extension host. The
+ * original bound returned the partial total, which silently UNDER-reports — and every
+ * caller uses this number to decide whether to release memory. A conversation of 8,000
+ * items with dense tool-call objects (41 MB real, ~1.16M nodes) measured 2.88 MB at the
+ * old 250k budget: below `relieveConversationPressure`'s 6 MB gate, so the ladder
+ * concluded there was nothing to do and the conversation could never be made smaller.
+ *
+ * Cycles are already handled by the `active` set and the walk is iterative, so the
+ * budget is only a time bound. It is now high enough that ordinary conversations are
+ * measured exactly; a walk that still hits it reports saturation instead of a partial.
  */
-export function estimateSerializedBytes(value: unknown, maxNodes = 250_000): number {
+export function estimateSerializedBytes(value: unknown, maxNodes = DEFAULT_MAX_NODES): number {
+  return measureSerializedBytes(value, maxNodes).bytes;
+}
+
+/**
+ * The full result, for callers that must tell an exact figure from a floor.
+ *
+ * `bytes` is never less than the true size, so comparing it against a budget is safe.
+ * `truncated` says the number is a saturation value rather than a measurement — worth
+ * saying out loud in a log or a UI figure, not just acting on.
+ */
+export function measureSerializedBytes(value: unknown, maxNodes = DEFAULT_MAX_NODES): { bytes: number; truncated: boolean } {
   let bytes = 0;
   let nodes = 0;
   const active = new Set<object>();
@@ -145,7 +189,9 @@ export function estimateSerializedBytes(value: unknown, maxNodes = 250_000): num
       active.delete(frame.exit);
       continue;
     }
-    if (++nodes > maxNodes) break;
+    if (++nodes > maxNodes) {
+      return { bytes: Math.max(bytes, TRUNCATED_SATURATION_BYTES), truncated: true };
+    }
 
     const current = frame.val;
     if (current === null || current === undefined) {
@@ -199,7 +245,7 @@ export function estimateSerializedBytes(value: unknown, maxNodes = 250_000): num
       }
     }
   }
-  return bytes;
+  return { bytes, truncated: false };
 }
 
 // ---------------------------------------------------------------------------
