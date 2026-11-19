@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, statSync, utimesSync } from 'node:fs';
+import * as path from 'node:path';
 
 const SLEEPY_DASHBOARD_URL = process.env.SLEEPY_DASHBOARD_URL || 'https://www.sleepyai.org';
 
@@ -222,5 +224,161 @@ describe('fetchSleepyAccountData', () => {
     assert.equal(prices[0].maxOutputLimit, 4096);
     assert.equal(prices[1].modelId, 'gpt-3.5');
     assert.equal(prices[1].inputPrice, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The gateway config reader, exercised against a real temporary SLEEPY_HOME.
+//
+// This file otherwise tests local copies of helpers, so the shipped
+// `readGatewayConfig` — the function every `config()` call reaches for the bearer
+// token — had no coverage. The memo added to it is exactly the kind of change that
+// can silently strand a user on an expired token, so it is pinned here.
+
+const gatewayHome = path.join('/tmp', `sleepycode-gateway-test-${Date.now()}`);
+const gatewayFile = path.join(gatewayHome, 'config', 'gateway.json');
+const savedSleepyHome = process.env.SLEEPY_HOME;
+const savedXdgHome = process.env.XDG_CONFIG_HOME;
+// HOME must move too: one candidate is built from `os.homedir()`, so leaving it
+// alone makes the test read the developer's real ~/.sleepy credentials and pass or
+// fail depending on whether they are signed in.
+const savedHome = process.env.HOME;
+
+// Monotonic, because two writes in the same millisecond would otherwise share an
+// mtime and the second would look like a cache hit. A coarse-resolution filesystem
+// can do the same to real writes; see the limitation pinned in the last test.
+let gatewayTick = 0;
+function writeGateway(value) {
+  writeFileSync(gatewayFile, JSON.stringify(value, null, 2), 'utf-8');
+  gatewayTick += 1;
+  const stamp = new Date(Date.now() + 2_000 + gatewayTick);
+  utimesSync(gatewayFile, stamp, stamp);
+}
+
+describe('readGatewayConfig', () => {
+  before(() => {
+    mkdirSync(path.dirname(gatewayFile), { recursive: true });
+    process.env.SLEEPY_HOME = gatewayHome;
+    // Pin every candidate into the sandbox so the host's real credentials can never
+    // satisfy a test.
+    process.env.XDG_CONFIG_HOME = path.join(gatewayHome, 'xdg');
+    process.env.HOME = path.join(gatewayHome, 'home');
+  });
+
+  after(() => {
+    if (savedSleepyHome === undefined) delete process.env.SLEEPY_HOME;
+    else process.env.SLEEPY_HOME = savedSleepyHome;
+    if (savedXdgHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdgHome;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    try { rmSync(gatewayHome, { recursive: true, force: true }); } catch { }
+  });
+
+  it('reads a token from the file the CLI writes', async () => {
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'token-one', refresh_token: 'r1', expires_at: 9999999999999 });
+    assert.equal(readGatewayConfig().access_token, 'token-one');
+  });
+
+  it('sees a token written outside the extension, with no invalidation', async () => {
+    // `sleepy login` writes this file directly. A plain in-memory memo would keep
+    // returning the old token, so the user would appear signed out until a reload.
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'cli-token', refresh_token: 'r2' });
+    assert.equal(readGatewayConfig().access_token, 'cli-token');
+    writeGateway({ access_token: 'rotated-by-cli', refresh_token: 'r3' });
+    assert.equal(readGatewayConfig().access_token, 'rotated-by-cli', 'an external rewrite must be observed');
+  });
+
+  it('notices a same-size rewrite, because the mtime is part of the key', async () => {
+    // Size alone would be a broken key: a token refresh keeps the file length.
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'aaaaaaaa', refresh_token: 'r5' });
+    assert.equal(readGatewayConfig().access_token, 'aaaaaaaa');
+    writeGateway({ access_token: 'bbbbbbbb', refresh_token: 'r6' });
+    assert.equal(readGatewayConfig().access_token, 'bbbbbbbb');
+  });
+
+  it('reading the config never touches the file', async () => {
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'stable', refresh_token: 'r4' });
+    const first = statSync(gatewayFile);
+    assert.equal(readGatewayConfig().access_token, 'stable');
+    for (let i = 0; i < 50; i += 1) assert.equal(readGatewayConfig().access_token, 'stable');
+    assert.equal(statSync(gatewayFile).mtimeMs, first.mtimeMs, 'reads must not modify the file');
+  });
+
+  it('reports no token for unusable JSON, and does not cache the failure over a fix', async () => {
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeFileSync(gatewayFile, '{ not json', 'utf-8');
+    assert.equal(readGatewayConfig(), null);
+    writeGateway({ access_token: 'fixed', refresh_token: 'r7' });
+    assert.equal(readGatewayConfig().access_token, 'fixed');
+  });
+
+  it('reports null when no candidate exists', async () => {
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    rmSync(gatewayFile, { force: true });
+    assert.equal(readGatewayConfig(), null);
+  });
+
+  it('invalidateGatewayConfig forces a fresh read even when mtime and size are unchanged', async () => {
+    // This is what the extension relies on after rotating the token itself: the
+    // rewrite is same-size and, on a coarse filesystem, same-mtime.
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'before-invalidate', refresh_token: 'r8' });
+    assert.equal(readGatewayConfig().access_token, 'before-invalidate');
+    const stamp = statSync(gatewayFile);
+    const sameSize = readFileSync(gatewayFile, 'utf-8').replace('before-invalidate', 'after-invalidate!');
+    writeFileSync(gatewayFile, sameSize, 'utf-8');
+    utimesSync(gatewayFile, stamp.atime, stamp.mtime);
+    assert.equal(readGatewayConfig().access_token, 'before-invalidate', 'the cache still serves the old read');
+    invalidateGatewayConfig();
+    assert.equal(readGatewayConfig().access_token, 'after-invalidate!');
+  });
+});
+
+// The known limit of the memo, stated rather than left implicit: a rewrite that keeps
+// BOTH the file size and the mtime is served from cache. In practice the extension
+// invalidates after its own writes, so this only concerns an external writer that
+// lands inside the filesystem's timestamp granularity with an identical-length token.
+// Pinned so the tradeoff is a decision on record, not an oversight discovered later.
+describe('readGatewayConfig cache limits', () => {
+  // Its own sandbox lifecycle: the block above removes its directory in `after`.
+  before(() => {
+    mkdirSync(path.dirname(gatewayFile), { recursive: true });
+    process.env.SLEEPY_HOME = gatewayHome;
+    process.env.XDG_CONFIG_HOME = path.join(gatewayHome, 'xdg');
+    process.env.HOME = path.join(gatewayHome, 'home');
+  });
+
+  after(() => {
+    if (savedSleepyHome === undefined) delete process.env.SLEEPY_HOME;
+    else process.env.SLEEPY_HOME = savedSleepyHome;
+    if (savedXdgHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdgHome;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  });
+
+  it('a same-size, same-mtime rewrite is NOT detected until the cache is dropped', async () => {
+    const { readGatewayConfig, invalidateGatewayConfig } = await import('../src/gateway-core.ts');
+    invalidateGatewayConfig();
+    writeGateway({ access_token: 'cccccccc', refresh_token: 'r9' });
+    assert.equal(readGatewayConfig().access_token, 'cccccccc');
+    const stamp = statSync(gatewayFile);
+    writeFileSync(gatewayFile, readFileSync(gatewayFile, 'utf-8').replace('cccccccc', 'dddddddd'), 'utf-8');
+    utimesSync(gatewayFile, stamp.atime, stamp.mtime);
+    assert.equal(readGatewayConfig().access_token, 'cccccccc', 'the memo cannot see this one');
+    invalidateGatewayConfig();
+    assert.equal(readGatewayConfig().access_token, 'dddddddd', 'but an invalidation resolves it');
   });
 });

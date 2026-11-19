@@ -1,40 +1,25 @@
 import * as http from 'node:http';
-import * as fs from 'node:fs';
-import * as fsp from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { isChatModel } from './model-filter';
+// Imported for local use AND re-exported: the definitions moved to `gateway-core.ts`
+// so that module has no `vscode` dependency, but every existing importer of these
+// names from `sleepyai` must keep resolving.
+import { readGatewayConfig, writeGatewayConfig, type GatewayConfig } from './gateway-core.ts';
 
 export const SLEEPY_WEBSITE_URL = process.env.SLEEPY_WEBSITE_URL || 'https://www.sleepyai.org';
 export const SLEEPY_DASHBOARD_URL = process.env.SLEEPY_DASHBOARD_URL || SLEEPY_WEBSITE_URL;
 export const SLEEPY_ACCOUNT_URL = process.env.SLEEPY_ACCOUNT_URL || `${SLEEPY_WEBSITE_URL}/dashboard`;
 export const LOGIN_PORT = 40822;
 
-export function gatewayCandidates(): string[] {
-  const home = os.homedir();
-  const list: string[] = [];
-  if (process.env.SLEEPY_HOME) {
-    list.push(path.join(process.env.SLEEPY_HOME, 'config', 'gateway.json'));
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
-  list.push(path.join(xdgConfig, 'sleepy', 'gateway.json'));
-  list.push(path.join(home, '.sleepy', 'gateway.json'));
-  return [...new Set(list)];
-}
-
-export const GATEWAY_FILE = gatewayCandidates()[0];
-
-export interface GatewayConfig {
-  access_token?: string;
-  token?: string;
-  refresh_token?: string;
-  expires_at?: number;
-  endpoint?: string;
-  tier?: string;
-  email?: string;
-  dashboard_url?: string;
-}
+/**
+ * The gateway credential file lives in `gateway-core.ts`.
+ *
+ * Re-exported rather than moved outright so every existing import of
+ * `sleepy`/`GATEWAY_FILE` keeps working; the module it lives in now has no `vscode`
+ * dependency, which is what makes it directly testable.
+ */
+export { GATEWAY_FILE, clearGatewayConfig, gatewayCandidates, invalidateGatewayConfig, readGatewayConfig, writeGatewayConfig } from './gateway-core.ts';
+export type { GatewayConfig } from './gateway-core.ts';
 
 export interface SleepyModel {
   modelId: string;
@@ -46,36 +31,6 @@ export interface SleepyModel {
 
 export function sleepyApiBase(dashboardUrl = SLEEPY_DASHBOARD_URL): string {
   return `${dashboardUrl}/api/v1`;
-}
-
-export function readGatewayConfig(): GatewayConfig | null {
-  for (const candidate of gatewayCandidates()) {
-    try {
-      const raw = fs.readFileSync(candidate, 'utf-8');
-      const parsed = JSON.parse(raw) as GatewayConfig;
-      if (parsed && typeof parsed === 'object' && (parsed.access_token || parsed.token)) {
-        return parsed;
-      }
-    } catch { }
-  }
-  return null;
-}
-
-export async function writeGatewayConfig(config: GatewayConfig): Promise<void> {
-  for (const file of gatewayCandidates()) {
-    try {
-      await fsp.mkdir(path.dirname(file), { recursive: true });
-      const tmpPath = `${file}.tmp`;
-      await fsp.writeFile(tmpPath, JSON.stringify(config, null, 2), 'utf-8');
-      await fsp.rename(tmpPath, file);
-    } catch { }
-  }
-}
-
-export async function clearGatewayConfig(): Promise<void> {
-  for (const file of gatewayCandidates()) {
-    await fsp.unlink(file).catch(() => { });
-  }
 }
 
 function dashboardUrlOf(config: GatewayConfig | null): string {
