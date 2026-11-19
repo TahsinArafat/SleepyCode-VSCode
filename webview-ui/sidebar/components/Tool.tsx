@@ -20,6 +20,7 @@ import { decodeFontChar, getCachedFileIcon, subscribeFileIcon } from "../../shar
 import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
 import { planPathFromResult } from "../../../src/webview-adapter";
 import { planBlockContent } from "../workPresentation";
+import { summarizeShellCommand } from "../../../src/tool-payload-core";
 
 function post(msg: OutMessage) {
   vscode.postMessage(msg);
@@ -613,9 +614,18 @@ function Diff({ diff }: { diff: string }) {
 }
 
 // +N / -M counts from a unified diff.
-function diffStats(diff: string): { add: number; del: number } {
+/**
+ * Added and removed line counts from a unified diff.
+ *
+ * `+++` / `---` are FILE HEADERS, not changed lines, and counting them inflated every
+ * edit by one add and one delete. `^@@` hunk headers were already skipped by the `+`
+ * test but are named here so the rule is explicit.
+ */
+export function diffStats(diff: string): { add: number; del: number } {
   let add = 0, del = 0;
   for (const l of diff.split("\n")) {
+    if (l.startsWith("@@")) continue;
+    if (l.startsWith("+++") || l.startsWith("---")) continue;
     if (l.startsWith("+")) add++;
     else if (l.startsWith("-")) del++;
   }
@@ -928,9 +938,13 @@ function ToolCardInner({ block, onImplement, onOpenSubagent, awaitingApproval }:
             {isEdit ? <FileIcon path={i.path || ""} fallback={meta.icon} /> : <Icon name={meta.icon} />}
           </span>
           {isShell ? (
+            // One line, always. A multi-line command rendered with `pre-wrap` turned the
+            // card header into a wall of text: the reporter's 12-line docker command
+            // filled the whole sidebar and pushed everything else off screen. The full
+            // command stays available in the tooltip and in the body.
             <span className="shell-prompt-line" title={shellCmd}>
               <span className="shell-prompt">$</span>
-              <span className="shell-cmd">{shellCmd || "…"}</span>
+              <span className="shell-cmd">{summarizeShellCommand(shellCmd)}</span>
             </span>
           ) : (
             <span className="label">{meta.label}</span>

@@ -878,13 +878,17 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	outline: 1px solid var(--accent, #4a9);
 	outline-offset: 1px;
 }
+/* One line, always. `pre-wrap` here let a multi-line command turn the card header into a
+   wall of text -- the reporter's 12-line docker invocation filled the whole sidebar. The
+   summary in the label is already a single line; this guarantees it even if a different
+   command arrives with an embedded newline. */
 .shell-cmd {
 	flex: 1 1 auto;
 	min-width: 0;
 	color: var(--fg);
-	white-space: pre-wrap;
-	word-break: break-word;
-	overflow-wrap: anywhere;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .shell-body {
 	display: flex;

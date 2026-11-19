@@ -119,3 +119,37 @@ export function durationMs(startedAt: number | undefined, endedAt: number = Date
   if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) return undefined;
   return Math.max(0, Math.round(endedAt - startedAt));
 }
+
+/**
+ * A one-line summary of a shell command, for a card header.
+ *
+ * A card header is one row, and a command is not: the reporter's `docker exec … cgi-fcgi
+ * …` invocation was twelve lines of environment assignments, so the header rendered as a
+ * wall of text that filled the sidebar and pushed the rest of the conversation off
+ * screen.
+ *
+ * The summary keeps the shape of the command rather than just its first N characters: for
+ * a multi-line command the first line is often only `cd`, which says nothing. Instead the
+ * leading `cd` is dropped (the working directory is shown elsewhere), continuations joined
+ * with ` && `, and the result truncated at a readable width. The full command is always
+ * still reachable — the header's title and the card body both carry it.
+ */
+export function summarizeShellCommand(command: string | undefined, maxChars = 120): string {
+  const raw = typeof command === 'string' ? command : '';
+  if (!raw.trim()) return '';
+  // Join continuations first so a multi-line command reads as the one command it is.
+  const joined = raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    // A bare `cd /path` prefix is noise: the card already knows its working directory.
+    .filter((line, index, all) => !(index === 0 && /^cd\s+\S+$/.test(line) && all.length > 1))
+    .join(' && ')
+    .replace(/\s+/g, ' ');
+  if (joined.length <= maxChars) return joined;
+  // Truncate on a word boundary where there is one, so the cut does not land mid-token.
+  const cut = joined.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(' ');
+  const kept = lastSpace > maxChars * 0.6 ? cut.slice(0, lastSpace) : cut;
+  return `${kept.trimEnd()}…`;
+}
