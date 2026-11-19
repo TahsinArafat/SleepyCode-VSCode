@@ -14,7 +14,7 @@
 import * as React from "react";
 import { Icon } from "../../shared/icons";
 import { vscode } from "../../shared/vscode";
-import { activateHint, canActivateProvider, validateProviderDraft, type ProviderDraft, type ProviderRow } from "../../../src/providers-core";
+import { activateHint, canActivateProvider, parseHeaderBlock, validateProviderDraft, type ProviderDraft, type ProviderRow } from "../../../src/providers-core";
 import { SettingsDialog } from "./SettingsDialog";
 
 export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
@@ -22,6 +22,27 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
   const [keyFor, setKeyFor] = React.useState<string | null>(null);
   const [keyValue, setKeyValue] = React.useState("");
   const [error, setError] = React.useState("");
+  const [discovering, setDiscovering] = React.useState(false);
+  const [discoverNote, setDiscoverNote] = React.useState<{ text: string; error?: boolean } | null>(null);
+
+  // The host answers discovery with a `providerModels` message. The settings App owns
+  // the single window listener, so it re-broadcasts that reply as a DOM event rather
+  // than this panel adding a second listener to the same channel.
+  React.useEffect(() => {
+    const onModels = (event: Event) => {
+      const detail = (event as CustomEvent).detail as { models?: string[]; ok?: boolean; text?: string } | undefined;
+      setDiscovering(false);
+      if (!detail) return;
+      if (detail.ok && detail.models?.length) {
+        setEditing((current) => (current ? { ...current, models: detail.models!.join(", ") } : current));
+        setDiscoverNote({ text: `Found ${detail.models.length} model${detail.models.length === 1 ? "" : "s"}.` });
+        return;
+      }
+      setDiscoverNote({ text: detail.text || (detail.ok ? "The endpoint returned no models." : "Could not reach the endpoint."), error: !detail.ok });
+    };
+    window.addEventListener("sleepycode:providerModels", onModels as EventListener);
+    return () => window.removeEventListener("sleepycode:providerModels", onModels as EventListener);
+  }, []);
   // Two-step remove: a misclick deleted the endpoint and its secret outright.
   // Disarmed on a timer, not on pointer-leave: the label changes on the first
   // press, which re-renders the button between mousedown and mouseup, so a leave
@@ -33,10 +54,48 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
     return () => window.clearTimeout(timer);
   }, [confirmRemove]);
 
-  const openNew = () => { setError(""); setEditing({ name: "", baseURL: "", models: "" }); };
+  const openNew = () => { setError(""); setDiscoverNote(null); setEditing({ name: "", baseURL: "", models: "", apiKey: "", headers: "" }); };
   const openEdit = (row: ProviderRow) => {
     setError("");
-    setEditing({ id: row.id, name: row.name, baseURL: row.baseUrl, models: row.models.join(", "), isSleepy: row.isSleepy });
+    setDiscoverNote(null);
+    setEditing({
+      id: row.id,
+      name: row.name,
+      baseURL: row.baseUrl,
+      models: row.models.join(", "),
+      isSleepy: row.isSleepy,
+      // Left empty on purpose: the host holds the key and never sends it back, so an
+      // edit that leaves this blank keeps whatever is already stored.
+      apiKey: "",
+      headers: row.customHeaders && Object.keys(row.customHeaders).length
+        ? JSON.stringify(row.customHeaders, null, 2)
+        : "",
+    });
+  };
+
+  /**
+   * Ask the host what models this endpoint serves.
+   *
+   * Uses whatever is currently typed, so it works before the endpoint is saved. The
+   * reply arrives as a `providerModels` message, which the settings App listens for
+   * and forwards here.
+   */
+  const discoverModels = () => {
+    if (!editing) return;
+    const problem = validateProviderDraft(editing);
+    if (problem) { setError(problem); return; }
+    setError("");
+    setDiscovering(true);
+    setDiscoverNote(null);
+    const headers = parseHeaderBlock(editing.headers).headers;
+    vscode.postMessage({
+      type: "fetchProviderModels",
+      id: editing.id,
+      name: editing.name,
+      baseURL: editing.baseURL,
+      apiKey: editing.apiKey,
+      ...(headers ? { customHeaders: headers } : {}),
+    });
   };
 
   const save = () => {
@@ -146,9 +205,42 @@ export function ProviderKeysPanel({ providers }: { providers: ProviderRow[] }) {
             <input className="field-input" data-dialog-autofocus value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="My endpoint" />
             <label className="field-label">Base URL</label>
             <input className="field-input" value={editing.baseURL ?? ""} onChange={(e) => setEditing({ ...editing, baseURL: e.target.value })} placeholder="https://example.com/v1" />
-            <label className="field-label">Models (optional)</label>
-            <input className="field-input" value={editing.models ?? ""} onChange={(e) => setEditing({ ...editing, models: e.target.value })} placeholder="gpt-4o-mini, llama-3.1-8b" />
-            <p className="panel-hint">Separate model ids with commas. Leave empty to discover them from the endpoint.</p>
+            {/* The key belongs in this form. Saving an endpoint and then hunting for a
+                separate "Set key" button made a working setup look like a broken
+                provider: the row appeared, listed models, and rejected every call. */}
+            <label className="field-label">API key</label>
+            <input
+              className="field-input"
+              type="password"
+              value={editing.apiKey ?? ""}
+              onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
+              placeholder={editing.id ? "Leave empty to keep the stored key" : "sk-…"}
+              autoComplete="off"
+            />
+            <p className="panel-hint">Stored in the OS secret store, never in settings or sync. Not needed for a local endpoint that accepts unauthenticated calls.</p>
+
+            <details className="provider-advanced" open={Boolean(editing.headers)}>
+              <summary>Advanced options</summary>
+              <label className="field-label">Models</label>
+              <div className="provider-models-row">
+                <input className="field-input" value={editing.models ?? ""} onChange={(e) => setEditing({ ...editing, models: e.target.value })} placeholder="gpt-4o-mini, llama-3.1-8b" />
+                <button className="btn-ghost" type="button" disabled={discovering} onClick={discoverModels}>
+                  {discovering ? "Discovering…" : "Discover"}
+                </button>
+              </div>
+              <p className="panel-hint">Separate model ids with commas, or discover them from the endpoint using the URL and key above.</p>
+              {discoverNote && <div className={discoverNote.error ? "fc-error" : "panel-hint"} role={discoverNote.error ? "alert" : undefined}>{discoverNote.text}</div>}
+              <label className="field-label">Extra request headers</label>
+              <textarea
+                className="field-input provider-headers"
+                rows={3}
+                value={editing.headers ?? ""}
+                onChange={(e) => setEditing({ ...editing, headers: e.target.value })}
+                placeholder={'{"X-Organization": "acme"}'}
+              />
+              <p className="panel-hint">Optional JSON object of string values, sent with every request to this endpoint.</p>
+            </details>
+
             {error && <div className="fc-error" role="alert">{error}</div>}
             <div className="modal-actions">
               <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>

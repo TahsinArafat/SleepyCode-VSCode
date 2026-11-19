@@ -113,6 +113,14 @@ export interface SettingsPanelHost {
   removeProvider(id: string): Promise<void>;
   /** Store (or clear) an endpoint's API key. */
   setProviderKey(id: string, key: string): Promise<void>;
+  /**
+   * Discover the models an endpoint serves, without saving anything.
+   *
+   * The host has always implemented this for the provider form; the settings window
+   * had no route to it, so an endpoint whose model ids the user did not already know
+   * could not be configured at all.
+   */
+  fetchProviderModels(input: { id?: string; name?: string; baseURL: string; apiKey?: string; customHeaders?: Record<string, string> }): Promise<{ models: string[] }>;
   /** Make one provider the default for new conversations. */
   setActiveProvider(id: string): Promise<void>;
   /** Recent extension log entries, newest last. */
@@ -479,6 +487,24 @@ export class SettingsPanel {
       case 'getProviders':
         this.post({ type: 'providers', providers: await this.host.readProviders() });
         return;
+      case 'fetchProviderModels': {
+        // Forwarded to the host's existing discovery call. Nothing typed into the form
+        // is persisted here: the draft is used for this one request only, so a
+        // not-yet-saved endpoint can still list its models.
+        try {
+          const result = await this.host.fetchProviderModels({
+            id: message.id ? String(message.id) : undefined,
+            name: message.name ? String(message.name) : undefined,
+            baseURL: String(message.baseURL ?? ''),
+            apiKey: message.apiKey ? String(message.apiKey) : undefined,
+            ...(message.customHeaders ? { customHeaders: message.customHeaders as Record<string, string> } : {}),
+          });
+          this.post({ type: 'providerModels', models: result.models, ok: true });
+        } catch (error) {
+          this.post({ type: 'providerModels', ok: false, models: [], text: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
       case 'saveProvider':
       case 'deleteProvider':
       case 'setProviderKey':

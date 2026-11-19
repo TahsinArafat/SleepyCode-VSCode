@@ -389,6 +389,10 @@ const SUPPORTED_PANEL_MESSAGES = new Set<string>([
   // Which provider new conversations use. The page showed an "Active" badge and
   // had no control that wrote it.
   'setActiveProvider',
+  // Model discovery for the endpoint form. The host always implemented it, but the
+  // window had no route, so an endpoint whose model ids the user did not already
+  // know could not be configured.
+  'fetchProviderModels',
   // The three settings surfaces the window gained alongside the classic ones.
   'getLogs',
   'clearLogs',

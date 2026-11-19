@@ -126,3 +126,55 @@ test('the default provider can be changed from the page that shows it', () => {
   assert.match(providers.activateHint(local), /Local/);
   assert.equal(providers.canActivateProvider(undefined), false);
 });
+
+test('an endpoint can be added with its key in the same save', () => {
+  // Adding a provider and setting its key were two separate steps: the dialog saved
+  // the endpoint, then the user had to find a "Set key" button on the row. An endpoint
+  // that existed, listed models, and rejected every call read as a broken provider
+  // rather than an unfinished setup.
+  const draft = { name: 'Acme', baseURL: 'https://acme.test/v1', apiKey: 'sk-secret' };
+  assert.equal(providers.validateProviderDraft(draft), null, 'a key on the draft is valid');
+  assert.equal(providers.providerFromDraft(draft).id, 'acme');
+  // The key must NOT be part of the provider record: it belongs in secret storage.
+  const built = providers.providerFromDraft(draft);
+  assert.equal(Object.prototype.hasOwnProperty.call(built, 'apiKey'), false);
+  assert.equal(JSON.stringify(built).includes('sk-secret'), false, 'the key never enters the persisted provider');
+});
+
+test('advanced options: extra request headers round-trip, and a bad block is refused', () => {
+  assert.deepEqual(providers.parseHeaderBlock(''), {}, 'empty means no headers');
+  assert.deepEqual(providers.parseHeaderBlock('   '), {}, 'whitespace means no headers');
+  assert.deepEqual(providers.parseHeaderBlock('{"X-Org":"acme"}').headers, { 'X-Org': 'acme' });
+  assert.equal(providers.parseHeaderBlock('{"X-Org":"acme"}').error, undefined);
+
+  assert.match(providers.parseHeaderBlock('{nope').error, /JSON object/);
+  assert.match(providers.parseHeaderBlock('["a"]').error, /JSON object/, 'an array is not a header block');
+  assert.match(providers.parseHeaderBlock('"text"').error, /JSON object/);
+  assert.match(providers.parseHeaderBlock('{"X-N":1}').error, /string value/, 'a non-string header value is refused');
+  assert.match(providers.parseHeaderBlock('{"":"x"}').error, /cannot be empty/, 'an empty header name is refused');
+
+  // Validation surfaces it in the form, before the dialog closes.
+  assert.match(
+    providers.validateProviderDraft({ name: 'X', baseURL: 'https://e.test/v1', headers: '{oops' }),
+    /JSON object/,
+  );
+
+  // And the saved provider carries them.
+  const built = providers.providerFromDraft({ name: 'Acme', baseURL: 'https://acme.test/v1', headers: '{"X-Org":"acme"}' });
+  assert.deepEqual(built.customHeaders, { 'X-Org': 'acme' });
+  // No headers means the field is absent, so an edit cannot silently blank an existing set.
+  assert.equal(providers.providerFromDraft({ name: 'Acme', baseURL: 'https://acme.test/v1' }).customHeaders, undefined);
+});
+
+test('a provider row exposes its headers so Edit can show them', () => {
+  const rows = providers.providerRows({
+    providers: [{ id: 'acme', name: 'Acme', baseURL: 'https://acme.test/v1', customHeaders: { 'X-Org': 'acme' } }],
+    keys: { acme: 'sk-secret' },
+    activeId: 'acme',
+  });
+  assert.deepEqual(rows[0].customHeaders, { 'X-Org': 'acme' });
+  // A row with no headers must not carry an empty object, or the form would open
+  // showing "{}" for every ordinary endpoint.
+  const plain = providers.providerRows({ providers: [{ id: 'b', name: 'B', baseURL: 'https://b.test/v1' }], keys: {}, activeId: '' });
+  assert.equal(plain[0].customHeaders, undefined);
+});

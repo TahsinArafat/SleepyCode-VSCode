@@ -2195,11 +2195,27 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         // is built around it, so an edit must not be able to repoint it.
         const next = existing
           ? providers.map(provider => (provider.id === built.id
-            ? { ...provider, name: built.isSleepy ? provider.name : built.name, baseURL: provider.isSleepy ? provider.baseURL : built.baseURL, ...(built.modelList ? { modelList: built.modelList } : {}) }
+            ? {
+              ...provider,
+              name: built.isSleepy ? provider.name : built.name,
+              baseURL: provider.isSleepy ? provider.baseURL : built.baseURL,
+              ...(built.modelList ? { modelList: built.modelList } : {}),
+              // Cleared rather than left behind when the field is emptied, or removing
+              // a header would appear to work and keep being sent.
+              customHeaders: built.customHeaders,
+            }
             : provider))
           : [...providers, built];
         await this.context.globalState.update('sleepycode.providers', next);
-        this.log('info', 'provider.saved', built.id);
+        // The key belongs to the same gesture as the endpoint. Sending the user to a
+        // second "Set key" button after saving meant an endpoint that could never
+        // authenticate looked like a broken provider rather than an unfinished setup.
+        const key = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+        if (key) {
+          await this.context.secrets.store(`sleepycode.apiKey.${built.id}`, key);
+          this.apiKeys[built.id] = key;
+        }
+        this.log('info', 'provider.saved', `${built.id}${key ? ' with key' : ''}`);
         await this.refreshModels();
       },
       setActiveProvider: async (id) => {
@@ -2222,6 +2238,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         delete this.apiKeys[id];
         this.log('info', 'provider.removed', id);
         await this.refreshModels();
+      },
+      fetchProviderModels: async input => {
+        // Nothing here is persisted: the draft and the pasted key are used for this one
+        // request, so an endpoint can list its models before it is saved. The saved key
+        // is the fallback, which is what makes "Edit → Discover" work without retyping.
+        const existing = input.id ? this.getProviders().find(provider => provider.id === input.id) : undefined;
+        const apiKey = input.apiKey?.trim() || (existing ? this.providerApiKey(existing) : '');
+        const provider: Provider = {
+          id: input.id || '__form__',
+          name: input.name?.trim() || 'Endpoint',
+          baseURL: input.baseURL.trim().replace(/\/+$/, ''),
+          ...(input.customHeaders ? { customHeaders: input.customHeaders } : {}),
+        };
+        const models = await fetchProviderModels(provider, apiKey, this.config().extraFreeModels);
+        return { models: sortModelsA2Z(models).map(model => model.id) };
       },
       setProviderKey: async (id, key) => {
         const provider = this.getProviders().find(entry => entry.id === id);

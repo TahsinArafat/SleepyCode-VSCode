@@ -34,6 +34,8 @@ export interface ProviderRow {
   hasKey: boolean;
   /** The tail of the stored key, or '' when there is none. */
   keyHint: string;
+  /** Extra request headers, so the edit form can show what is already set. */
+  customHeaders?: Record<string, string>;
 }
 
 /** The visible tail of a key. Short keys reveal nothing. */
@@ -73,6 +75,7 @@ export function providerRows(input: {
       active: provider.id === input.activeId,
       hasKey: Boolean(key),
       keyHint: keyHint(key),
+      ...(provider.customHeaders ? { customHeaders: { ...provider.customHeaders } } : {}),
     });
   }
   // Sort is stable, so the user's own order survives.
@@ -90,6 +93,44 @@ export interface ProviderDraft {
   baseURL?: string;
   models?: string;
   isSleepy?: boolean;
+  /** The API key to store against this endpoint. Optional, and never echoed back. */
+  apiKey?: string;
+  /**
+   * Extra request headers, as the JSON text typed into the form.
+   *
+   * A string rather than a parsed object because that is what the field holds: the
+   * draft crosses into the host as written, and `parseHeaderBlock` is what decides
+   * whether it is valid.
+   */
+  headers?: string;
+}
+
+/**
+ * Parse the headers field: a JSON object of string values, or nothing.
+ *
+ * Returns the reason it is unusable rather than throwing, because the answer has to be
+ * shown in the form. `undefined` means "no headers", which is different from `{}` only
+ * in that it leaves any existing headers untouched on an edit.
+ */
+export function parseHeaderBlock(value: unknown): { headers?: Record<string, string>; error?: string } {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: 'Headers must be a JSON object, for example {"X-Org": "acme"}.' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { error: 'Headers must be a JSON object, for example {"X-Org": "acme"}.' };
+  }
+  const headers: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!key.trim()) return { error: 'A header name cannot be empty.' };
+    if (typeof entry !== 'string') return { error: `Header "${key}" must have a string value.` };
+    headers[key.trim()] = entry;
+  }
+  return { headers };
 }
 
 /**
@@ -114,6 +155,8 @@ export function validateProviderDraft(draft: ProviderDraft | undefined): string 
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.protocol !== 'https:' && !loopback) return 'Use https:// — an API key must not travel in clear text.';
   if (url.username || url.password) return 'Remove the credentials from the URL; enter the key separately.';
+  const headerProblem = parseHeaderBlock(draft?.headers).error;
+  if (headerProblem) return headerProblem;
   return null;
 }
 
@@ -142,6 +185,8 @@ export function providerFromDraft(draft: ProviderDraft): ProviderConfig {
   if (draft.isSleepy) provider.isSleepy = true;
   const models = parseModelList(draft.models);
   if (models.length) provider.modelList = models;
+  const headers = parseHeaderBlock(draft.headers).headers;
+  if (headers && Object.keys(headers).length) provider.customHeaders = headers;
   return provider;
 }
 /**

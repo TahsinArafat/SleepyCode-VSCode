@@ -459,7 +459,7 @@ export function App() {
   // Provider rows from the host. Keys are never included: only whether one is set
   // and its tail.
   const [version, setVersion] = React.useState("");
-  const [providers, setProviders] = React.useState<{ id: string; name: string; baseUrl: string; models: string[]; isSleepy: boolean; active: boolean; hasKey: boolean; keyHint: string }[]>([]);
+  const [providers, setProviders] = React.useState<{ id: string; name: string; baseUrl: string; models: string[]; isSleepy: boolean; active: boolean; hasKey: boolean; keyHint: string; customHeaders?: Record<string, string> }[]>([]);
   const contentRef = React.useRef<HTMLElement>(null);
   const [s, setS] = React.useState<Settings>(DEFAULTS);
   const [apiKey, setApiKey] = React.useState("");
@@ -536,6 +536,12 @@ export function App() {
         setVersion(String(msg.version || ""));
       } else if (msg.type === "providers") {
         setProviders(msg.providers || []);
+      } else if (msg.type === "providerModels") {
+        // One window listener owns the message channel; the Providers panel subscribes
+        // through a DOM event rather than adding a second one.
+        window.dispatchEvent(new CustomEvent("sleepycode:providerModels", {
+          detail: { models: msg.models || [], ok: msg.ok !== false, text: msg.text },
+        }));
       } else if (msg.type === "firstRun") {
         setFirstRun(true);
       } else if (msg.type === "logs") {

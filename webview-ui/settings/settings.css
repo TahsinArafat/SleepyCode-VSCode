@@ -636,6 +636,22 @@ body.vscode-high-contrast .msel-item.active, body.vscode-high-contrast-light .ms
 .provider-key-hint { opacity: .8; }
 .provider-actions { display: flex; gap: 6px; flex: 0 0 auto; }
 
+/* The endpoint form's advanced block. Collapsed by default so the three fields a
+   normal setup needs stay visible, and opened automatically when headers are already
+   set — an option the user once turned on must not become invisible. */
+.provider-advanced { margin: 14px 0 4px; }
+.provider-advanced > summary {
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: 600;
+	padding: 6px 0;
+	color: var(--muted, var(--vscode-descriptionForeground));
+}
+.provider-advanced > summary:hover { color: var(--fg, var(--vscode-foreground, #ccc)); }
+.provider-models-row { display: flex; gap: 6px; align-items: center; }
+.provider-models-row .field-input { flex: 1; min-width: 0; }
+.provider-headers { font-family: var(--vscode-editor-font-family, monospace); resize: vertical; }
+
 /* Dialogs. `modal-overlay` existed here but the card inside it did not — the
    provider add/edit and API-key dialogs rendered as an unstyled box. Mirrors the
    chat's dialog styling so the two surfaces agree. */
