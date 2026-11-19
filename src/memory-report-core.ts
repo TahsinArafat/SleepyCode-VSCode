@@ -72,6 +72,21 @@ export type RetainerBreakdown = {
   /** Live runs and queued prompts: work in flight explains a temporary spike. */
   activeRuns: number;
   queuedPrompts: number;
+  /**
+   * Bytes held by compaction undo/redo snapshots.
+   *
+   * Each snapshot keeps FOUR complete arrays (before/after items and before/after
+   * messages) and a conversation keeps up to three, so this is frequently several times
+   * the conversation it belongs to. It is counted separately because it is invisible in
+   * `stateBytes` -- that was the explanation for "state 1 MB" beside 126 MB of live
+   * objects, and nothing in the report could say so.
+   */
+  compactionBytes: number;
+  compactionSnapshots: number;
+  compactionSaturated: boolean;
+  /** Bytes held by the per-conversation transcript copies the webview reads. */
+  reactItemsBytes: number;
+  reactItemsSaturated: boolean;
 };
 
 export type MemoryReport = {
@@ -123,6 +138,8 @@ export function formatMemoryLine(report: MemoryReport): string {
     `${r.conversations} conversations (${r.coldConversations} cold)`,
     `${r.items} items`,
     `state ${r.stateSaturated ? '>' : ''}${megabytes(r.stateBytes)}MB`,
+    `compaction ${r.compactionSaturated ? '>' : ''}${megabytes(r.compactionBytes)}MB/${r.compactionSnapshots}`,
+    `reactItems ${r.reactItemsSaturated ? '>' : ''}${megabytes(r.reactItemsBytes)}MB`,
     `snapshots ${megabytes(r.snapshotBytes)}MB`,
     `index ${r.indexFiles} files/${megabytes(r.indexBytes)}MB`,
     `terminals ${r.runningTerminals}/${r.terminals} running`,
@@ -177,6 +194,8 @@ export function formatMemoryReport(report: MemoryReport, extra: { at?: number; n
   lines.push(`  conversations  ${r.conversations} (${r.coldConversations} cold, heavy state released)`);
   lines.push(`  transcript     ${r.items} items`);
   lines.push(`  state          ${r.stateSaturated ? '>' : ''}${megabytes(r.stateBytes)} MB${r.stateSaturated ? '   (measurement saturated: at least this much)' : ''}`);
+  lines.push(`  compaction     ${r.compactionSaturated ? '>' : ''}${megabytes(r.compactionBytes)} MB   (${r.compactionSnapshots} undo/redo snapshot(s); each holds four full transcript arrays)`);
+  lines.push(`  webview copy   ${r.reactItemsSaturated ? '>' : ''}${megabytes(r.reactItemsBytes)} MB   (per-conversation transcript copy for change actions)`);
   lines.push(`  file snapshots ${megabytes(r.snapshotBytes)} MB   (pre-edit contents kept for undo)`);
   lines.push('');
   lines.push('Other retainers');
@@ -220,7 +239,7 @@ export function memoryVerdict(report: MemoryReport): string {
   }
   // Live objects dominate: this is the leak case.
   if (s.oldSpace > 250 * MB) {
-    const explained = megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes);
+    const explained = megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes + r.compactionBytes + r.reactItemsBytes);
     return `old_space ${megabytes(s.oldSpace)}MB is live JS objects, while known retainers account for ${explained}MB — the rest is held somewhere this report does not name yet`;
   }
   // Compiled JavaScript is checked before the garbage reading, because a code-heavy heap
@@ -236,7 +255,7 @@ export function memoryVerdict(report: MemoryReport): string {
   if (s.external > 250 * MB) {
     return `external ${megabytes(s.external)}MB sits outside the JS heap: buffers or native allocations, not objects this report can count`;
   }
-  return `retained state ${megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes)}MB across ${r.conversations} conversations; heap ${megabytes(s.heapUsed)}MB`;
+  return `retained state ${megabytes(r.stateBytes + r.snapshotBytes + r.indexBytes + r.compactionBytes + r.reactItemsBytes)}MB across ${r.conversations} conversations; heap ${megabytes(s.heapUsed)}MB`;
 }
 
 /**

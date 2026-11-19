@@ -26,6 +26,8 @@ const report = (over = {}) => ({
     stateBytes: 4 * 1048576, stateSaturated: false, snapshotBytes: 1048576,
     indexFiles: 0, indexBytes: 0, terminals: 1, runningTerminals: 0,
     cliServerOwned: false, mcpCached: false, activeRuns: 0, queuedPrompts: 0,
+    compactionBytes: 0, compactionSnapshots: 0, compactionSaturated: false,
+    reactItemsBytes: 0, reactItemsSaturated: false,
     ...over.retainers,
   },
   containers: { reactItems: 1, logRing: 400, subscriptions: 30, ...over.containers },
@@ -164,4 +166,49 @@ test('a post-GC figure is used when the engine exposes one, and explains itself 
 test('the report always ends with a reading of its own numbers', () => {
   // A reader who does not know the codebase still needs to know which section grew.
   assert.match(m.formatMemoryReport(report(), {}), /^Reading: /m, 'the verdict closes the report');
+});
+
+// ---------------------------------------------------------------------------
+// The reported case: 126 MB of live objects beside the report's own "1 MB of state".
+//
+// The two figures were both true. Conversation state was measured once while three
+// further copies of the same transcript sat in compaction stacks and the webview's
+// per-conversation cache, and nothing in the report counted them.
+
+test('compaction snapshots and the webview copy are counted, not just described', () => {
+  const withCopies = report({
+    retainers: {
+      stateBytes: 1 * 1048576,
+      compactionBytes: 96 * 1048576,
+      compactionSnapshots: 3,
+      reactItemsBytes: 28 * 1048576,
+    },
+  });
+  const text = m.formatMemoryReport(withCopies, {});
+  assert.match(text, /compaction +96\.0 MB/, 'the snapshot bytes are shown');
+  assert.match(text, /3 undo\/redo snapshot/, 'and how many snapshots hold them');
+  assert.match(text, /webview copy +28\.0 MB/, 'the per-conversation copy is shown');
+  // The point: the explained total now approaches the heap instead of contradicting it.
+  const log = m.formatMemoryLine(withCopies);
+  assert.match(log, /compaction 96\.0MB\/3/);
+  assert.match(log, /reactItems 28\.0MB/);
+});
+
+test('the verdict counts the copies, so it stops claiming only 1 MB is held', () => {
+  // With 300 MB of old_space and the copies counted, the "accounted for" figure must
+  // reflect them -- otherwise the reading says "held somewhere this report does not
+  // name" while the report is in fact naming it.
+  const explained = report({
+    snapshot: { oldSpace: 300 * 1048576, heapUsed: 320 * 1048576 },
+    retainers: { stateBytes: 1 * 1048576, compactionBytes: 96 * 1048576, reactItemsBytes: 28 * 1048576, snapshotBytes: 0, indexBytes: 0 },
+  });
+  assert.match(m.memoryVerdict(explained), /account for 125\.0MB/, 'copies are part of what is accounted for');
+});
+
+test('a saturated copy measurement reads as a floor like every other figure', () => {
+  const saturated = report({ retainers: { compactionBytes: 32 * 1048576, compactionSaturated: true, reactItemsSaturated: true, reactItemsBytes: 32 * 1048576 } });
+  const text = m.formatMemoryReport(saturated, {});
+  assert.match(text, /compaction +>32\.0 MB/);
+  assert.match(text, /webview copy +>32\.0 MB/);
+  assert.match(m.formatMemoryLine(saturated), /compaction >32\.0MB/);
 });

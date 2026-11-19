@@ -2703,6 +2703,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
       }
     }
+    // Compaction undo/redo snapshots are NOT part of conversation state, and they are
+    // far heavier than the count of stacks suggests: each snapshot holds four complete
+    // arrays (before/after items AND before/after messages), and a conversation keeps up
+    // to three. Leaving them out is how "state 1 MB" coexisted with 126 MB of live
+    // objects -- the transcript was counted once while three copies of it sat in a stack.
+    let compactionBytes = 0;
+    let compactionSnapshots = 0;
+    let compactionSaturated = false;
+    for (const stacks of [this.compactionUndoStacks, this.compactionRedoStacks]) {
+      for (const stack of stacks.values()) {
+        for (const snapshot of stack) {
+          compactionSnapshots += 1;
+          const measured = measureSerializedBytes(snapshot);
+          compactionBytes += measured.bytes;
+          if (measured.truncated) compactionSaturated = true;
+        }
+      }
+    }
+    // `reactItems` is a second copy of each resident transcript, kept for the webview's
+    // change actions. It is the same items minus fileSnapshot, so it roughly doubles what
+    // a conversation costs while it is open.
+    let reactItemsBytes = 0;
+    let reactItemsSaturated = false;
+    for (const items of this.reactItems.values()) {
+      const measured = measureSerializedBytes(items);
+      reactItemsBytes += measured.bytes;
+      if (measured.truncated) reactItemsSaturated = true;
+    }
     const usage = process.memoryUsage();
     // Heap SPACES, not just the totals. A 400 MB heap says nothing on its own: V8 grows
     // the heap with allocation rate, so that number is routinely dominated by space it has
@@ -2768,6 +2796,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         mcpCached: Boolean(this.mcpCache),
         activeRuns: this.runs.size,
         queuedPrompts: this.queue.length,
+        compactionBytes,
+        compactionSnapshots,
+        compactionSaturated,
+        reactItemsBytes,
+        reactItemsSaturated,
       },
       // One entry per long-lived map. A container that grows by conversation id is
       // invisible in `heapUsed` until it is enormous, and by then it looks exactly
@@ -2905,12 +2938,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    * back to the totals-only report.
    */
   private async objectCensus(): Promise<objectCensusCore.ObjectCensus | undefined> {
-    const query = (globalThis as { gc?: unknown }).gc === undefined
-      ? undefined
-      : (ctor: unknown) => v8.queryObjects(ctor as never) as unknown as Promise<number>;
-    if (!query) return undefined;
+    // NOT gated on --expose-gc. `v8.queryObjects` works in a plain process; only
+    // `global.gc` needs the flag. The first version of this checked for `gc` and so
+    // reported the census as unavailable in exactly the build where it was needed --
+    // verified by calling it in a bare `node -e` with no flags and getting a real count.
     try {
-      const census = await objectCensusCore.objectCensus(query);
+      const census = await objectCensusCore.objectCensus(
+        (ctor: unknown) => v8.queryObjects(ctor as never) as unknown as Promise<number>,
+      );
       return census.available ? census : undefined;
     } catch {
       return undefined;
